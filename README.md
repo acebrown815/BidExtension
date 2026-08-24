@@ -1,17 +1,17 @@
-# JobMatch AI
+# JobMatch AI (BidExtension fork)
 
-**Smart Chrome Extension for Job Seekers** — Analyze any job posting against your resume, check H1B / PERM sponsorship history for the employer, get a match score and skill gap analysis, auto-fill applications, generate cover letters (with `.docx` / `.pdf` export), rewrite and tailor resume bullets, and track every job you apply to.
+**Smart Chrome Extension for Job Seekers** — Analyze any job posting against your resume, get a match score and skill gap analysis, auto-fill applications, generate cover letters (with `.docx` / `.pdf` export), rewrite and tailor resume bullets, and track every job you apply to — including an optional sync of applied jobs to a Google Sheet.
 
-[![Install from Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-Install_Free-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/jobmatch-ai-%E2%80%93-smart-resum/pfdlaofmcbmjnljfiembdcadcjjnlcia?hl=en-US)
+This is a personal fork of [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), maintained at [acebrown815/BidExtension](https://github.com/acebrown815/BidExtension). It is **not** the version published on the Chrome Web Store — see [Installation](#installation-developer--local-build) below to load it unpacked. Key differences from the upstream project are called out throughout this document and summarized in [What's Different From Upstream](#whats-different-from-upstream).
 
 ![Chrome](https://img.shields.io/badge/Chrome-MV3-brightgreen?logo=googlechrome&logoColor=white)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-blueviolet)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 <p align="center">
-  <img src="screenshots/panel-overview.png" alt="JobMatch AI side panel open on a Fireworks AI job posting, showing resume slots and action buttons" width="900">
+  <img src="screenshots/panel-overview.png" alt="JobMatch AI side panel open on a job posting, showing resume list and action buttons" width="900">
 </p>
-<p align="center"><em>JobMatch AI panel open on a job posting — resume slot switcher, one-click Analyze, AutoFill, Cover Letter, Improve Resume Bullets, and more.</em></p>
+<p align="center"><em>JobMatch AI panel open on a job posting — resume switcher, one-click Analyze, AutoFill, Cover Letter, Improve Resume Bullets, and more.</em></p>
 
 ---
 
@@ -34,19 +34,6 @@ Upload your resume once. Navigate to any job posting, open the panel, and click 
 - **Recommendations** — specific, actionable advice to improve your fit for that exact role
 
 Results are cached per URL. You get a consistent score every session — click **Re-Analyze** any time to force a fresh evaluation.
-
----
-
-### Visa & H1B Sponsorship Intelligence
-
-Before you invest time in an application, find out whether the employer actually sponsors work visas — and how often.
-
-- **Sponsorship phrase detection** — automatically scans the job description for phrases like "must be authorized to work without sponsorship" and surfaces them as a clear indicator at the top of the analysis.
-- **Live H1B & PERM data** — for recognized employers, the panel shows real approval / denial counts from public **USCIS** and **DOL OFLC** datasets.
-- **5-year trend chart** — see year-by-year sponsorship volume so you can tell whether it's trending up, holding steady, or has dried up.
-- **One-click H1B history** — the "H1B history" link expands the full record without leaving the panel or visiting external sites.
-
-Especially useful if you're an international candidate filtering down to roles that are realistic to apply to.
 
 ---
 
@@ -135,20 +122,30 @@ Every job has a **Notes** section at the bottom of the panel — a free-text are
 
 ---
 
-### Three Resume Slots
+### Unlimited Resume Profiles & Local Auto-Match
 
-Store up to **3 resume profiles** and switch between them with one click directly from the panel. Each slot is independently parsed and stored. Rename any slot to keep them organized — for example, "Backend Eng", "Data Eng", "Lead".
+Store as many resume profiles as you want and switch between them with one click directly from the panel — add a new one with the **+** button, or delete one you no longer need. Each resume is independently parsed and stored. Rename any resume to keep them organized — for example, "Backend Eng", "Data Eng", "Lead".
 
 <p align="center">
-  <img src="screenshots/profile.png" alt="Profile page with three resume slots, upload area, and parsed profile fields" width="900">
+  <img src="screenshots/profile.png" alt="Profile page with a resume list, upload area, and parsed profile fields" width="900">
 </p>
-<p align="center"><em>Profile page — three named resume slots, drag-and-drop upload (PDF or DOCX), and fully parsed profile fields including contact info, summary, skills, experience, education, projects, and certifications. Autosaves as you edit.</em></p>
+<p align="center"><em>Profile page — named resumes with add/delete controls, drag-and-drop upload (PDF or DOCX), and fully parsed profile fields including contact info, summary, skills, experience, education, projects, and certifications. Autosaves as you edit.</em></p>
+
+With two or more resumes saved, the extension scores every resume against the current job posting locally — by ATS-keyword overlap across skills, certifications, and project technologies — with **no AI call and no network request**. Whichever resume scores highest is auto-selected as the active one before you even click Analyze (a **"★ ... Switch?"** hint and a Local Match badge show the score); picking a resume yourself for that job overrides the auto-selection until you open a different posting. The Profile tab's **ATS Keywords by Resume** card lists the exact terms each resume contributes to this matching.
+
+---
+
+### Backup & Restore
+
+**Settings → Backup & Restore** exports your entire setup — profile, resumes, Q&A answers, saved and applied jobs, AI Settings, and Google Sheets sync config — as a single JSON file, and imports it back on another browser or machine. The exported file includes your API key and Sheets sync secret in plain text, so keep it private and only import files you trust.
 
 ---
 
 ### Common Q&A Answers
 
 Pre-fill answers to hundreds of standard application questions so AutoFill can complete them instantly. Covers work authorization, availability, salary expectations, notice period, sponsorship requirements, EEO and demographic fields, and more. Filter by category to quickly find and update any answer.
+
+**Export / Import** — export your Q&A answers as a JSON file and import it on another browser or computer instead of retyping everything. Importing updates any question that already matches by text and adds the rest; it never removes questions the imported file doesn't mention.
 
 <p align="center">
   <img src="screenshots/qa-answers.png" alt="Q&A Answers tab with category filters and pre-filled answers" width="900">
@@ -157,14 +154,15 @@ Pre-fill answers to hundreds of standard application questions so AutoFill can c
 
 ---
 
-### Applied Jobs Tracker
+### Applied Tracking & Google Sheets Sync
 
-Mark any job as Applied from the panel. Every tracked application is stored with the match score, job title (linked to the original posting), company, location, salary, and date applied.
+Click **Mark as Applied** on any analyzed job and it's recorded locally with its match score, title, company, location, salary, and date — this count feeds the Stats tab's "Total Applied" figure. There is no standalone in-panel "Applied Jobs" table in this fork; instead, applied jobs can be pushed automatically to a Google Sheet:
 
-<p align="center">
-  <img src="screenshots/applied-jobs.png" alt="Applied Jobs tab showing tracked applications with score, company, location, salary, and date" width="900">
-</p>
-<p align="center"><em>Applied Jobs — full application history. Click any job title to go back to the original posting.</em></p>
+- **Settings → Google Sheets Sync** — paste the Web App URL from a one-time [Apps Script deployment](docs/sheets-sync/SETUP.md) (`docs/sheets-sync/Code.gs`), set a shared secret, and enable sync. No Google API key is involved — Sheets doesn't support write access with a bare key, so the extension POSTs to a script running under your own Google account instead.
+- Every **Mark as Applied** click appends a row — Date, Title, Link, Company, Location, Salary, ResumeNo, Score — to your target tab (or "Applications" by default). The button only flips to the locked "Applied" state once the row is confirmed appended; if sync fails or isn't configured, it stays as "Mark as Applied" so you can retry without creating a duplicate record.
+- **Test Sync** in Settings verifies connectivity and your shared secret without adding a row.
+
+See `docs/sheets-sync/SETUP.md` for full setup and troubleshooting steps.
 
 ---
 
@@ -181,7 +179,7 @@ The Stats tab gives you a live overview of your search: total jobs analyzed, tot
 
 ### Saved Jobs
 
-Bookmark any job from the panel. The Saved tab shows score badges, company names, and quick links back to each posting for when you're ready to apply.
+Bookmark any job from the panel — including before you've run Analyze. The **Saved Jobs** tab lists every bookmarked job in a table with score badge (or a neutral "Not analyzed" badge for quick-saves with no score yet), title linked back to the posting, company, location, salary, date, and a Delete button.
 
 ---
 
@@ -217,46 +215,24 @@ On SPAs like LinkedIn and Indeed, the extension detects navigation between job p
 
 ---
 
-## AI Providers — Your Key, Your Data
+## AI Provider — Your Key, Your Data
 
-JobMatch AI uses your own AI API key and calls your chosen provider directly from the browser. Nothing passes through any external server. Your resume, your answers, and your API key are stored locally in Chrome's storage.
+JobMatch AI uses your own OpenAI API key and calls the OpenAI Chat Completions API directly from the browser. Nothing passes through any external server (other than the optional Google Sheets sync webhook, see above). Your resume, your answers, and your API key are stored locally in Chrome's storage.
 
 <p align="center">
-  <img src="screenshots/ai-settings.png" alt="AI Settings page showing provider dropdown, API key input, model selection, temperature slider, and Test Connection button" width="900">
+  <img src="screenshots/ai-settings.png" alt="Settings page showing provider dropdown, API key input, model selection, temperature slider, and Test Connection button" width="900">
 </p>
-<p align="center"><em>AI Settings — select a provider, paste your API key, pick a model, set temperature, and click Test Connection to verify before saving.</em></p>
+<p align="center"><em>Settings — paste your OpenAI API key, pick a model, set temperature, and click Test Connection to verify before saving.</em></p>
 
-Supported providers — several with free tiers:
+This fork supports a **single provider, OpenAI**, unlike upstream JobMatch AI's ten-provider lineup (Anthropic, Google Gemini, Groq, Cerebras, Together AI, OpenRouter, Mistral AI, DeepSeek, Cohere, OpenAI). The provider abstraction (`aiService.js`) is kept generic internally, so another provider could be re-added the same way if needed, but only OpenAI ships today.
 
-| Provider | Free Tier | Get Key |
-|----------|:---------:|---------|
-| **Cerebras** | ✓ | [cloud.cerebras.ai](https://cloud.cerebras.ai) |
-| **Groq** | ✓ | [console.groq.com](https://console.groq.com) |
-| **Google Gemini** | ✓ | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
-| **OpenRouter** | ✓ | [openrouter.ai](https://openrouter.ai) |
-| **Mistral AI** | ✓ | [console.mistral.ai](https://console.mistral.ai) |
-| **Together AI** | ✓ | [api.together.ai](https://api.together.ai) |
-| **Cohere** | ✓ | [dashboard.cohere.com](https://dashboard.cohere.com) |
-| Anthropic (Claude) | — | [console.anthropic.com](https://console.anthropic.com) |
-| OpenAI | — | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
-| DeepSeek | — | [platform.deepseek.com](https://platform.deepseek.com) |
+Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Built-in models include GPT-4.1, GPT-4.1 Mini, GPT-4o, GPT-4o Mini, o4-mini, and o3-mini (default: GPT-4.1).
 
-**Tip:** Cerebras, Groq, and Google Gemini have the most generous free tiers. OpenRouter gives access to dozens of free models through a single key.
+### Live Model Refresh & Custom Models
 
-### Live Model Refresh & Per-Provider Keys
-
-- **🔄 Refresh models** — click the refresh button next to the model dropdown and the extension pulls the provider's **current** model list directly from their `/models` API. No more being stuck on a deprecated model id.
-- **Custom model entry** — every provider has a `Custom…` option so you can paste in any model id the provider supports, including brand-new ones.
-- **Per-provider API key memory** — JobMatch AI remembers one API key per provider. Switching providers auto-fills the right key, so you never have to paste it again. A "Clear saved keys" link in Settings wipes the lot.
-
-### Getting a Free Key (Cerebras Example)
-
-1. Go to [cloud.cerebras.ai](https://cloud.cerebras.ai) and sign up
-2. Go to **API Keys** in the dashboard
-3. Click **Create API Key** and copy it (starts with `csk-...`)
-4. Paste it into JobMatch AI's **AI Settings** tab — done
-
-The same flow applies to every provider: sign up → find API Keys → create → paste into the extension.
+- **🔄 Refresh models** — click the refresh button next to the model dropdown and the extension pulls OpenAI's **current** model list directly from the `/models` API. No more being stuck on a deprecated model id.
+- **Custom model entry** — pick `Custom…` to paste in any OpenAI model id, including brand-new ones.
+- **Saved key** — JobMatch AI remembers your API key locally. A "Clear saved keys" link in Settings wipes it.
 
 ---
 
@@ -264,40 +240,44 @@ The same flow applies to every provider: sign up → find API Keys → create �
 
 ### 1. Install and Open
 
-Install from the [Chrome Web Store](https://chromewebstore.google.com/detail/jobmatch-ai-%E2%80%93-smart-resum/pfdlaofmcbmjnljfiembdcadcjjnlcia?hl=en-US), then click the toolbar icon or the **★ floating button** on any job page to open the panel.
+Load the extension unpacked (see [Installation](#installation-developer--local-build) below — this fork isn't published to the Chrome Web Store), then click the toolbar icon or the **★ floating button** on any job page to open the panel.
 
 ### 2. Configure AI
 
-Go to **AI Settings**, select a provider, paste your API key, pick a model, and click **Test Connection**. Click **Save Settings**.
+Go to **Settings**, paste your OpenAI API key, pick a model, and click **Test Connection**. Click **Save Settings**.
 
 ### 3. Upload Your Resume
 
-Go to **Profile**, select a slot (Resume 1, 2, or 3), and drag & drop your PDF or DOCX. The AI parses it into a structured profile — name, contact info, summary, skills, experience, education, projects, and certifications — all editable. The profile autosaves as you type.
+Go to **Profile**, select or add a resume, and drag & drop your PDF or DOCX. The AI parses it into a structured profile — name, contact info, summary, skills, experience, education, projects, and certifications — all editable. The profile autosaves as you type.
 
 ### 4. Pre-fill Q&A (Optional but Recommended)
 
-Go to **Q&A Answers** and click **Load Common US Job Application Questions** to populate standard answers for work authorization, salary, availability, EEO fields, and more. Edit any answer to match your preferences.
+Go to **Q&A Answers** and click **Load Common US Job Application Questions** to populate standard answers for work authorization, salary, availability, EEO fields, and more. Edit any answer to match your preferences, or import a previously exported Q&A file.
 
 ### 5. Analyze a Job
 
-Navigate to any job posting, click the **★ button** to open the panel, and click **Analyze Job**. Your match score, insights, skill gaps, ATS keywords, and recommendations are ready in seconds.
+Navigate to any job posting, click the **★ button** to open the panel, and click **Analyze Job**. With two or more resumes saved, the best local ATS-keyword match is auto-selected first. Your match score, insights, skill gaps, ATS keywords, and recommendations are ready in seconds.
 
 ### 6. Apply
 
 - Use **AutoFill Application** to complete the form with your resume and Q&A answers
 - Generate a **Cover Letter** tailored to the role
 - **Improve Resume Bullets** and download a **Tailored Resume** with missing skills added
-- Click **Mark as Applied** to log the application
+- Click **Mark as Applied** to log the application (and sync it to Google Sheets, if configured)
+
+### 7. Sync to Google Sheets (Optional)
+
+Go to **Settings → Google Sheets Sync**, follow `docs/sheets-sync/SETUP.md` to deploy the included Apps Script once, then paste the Web App URL and your shared secret and enable sync.
 
 ---
 
 ## Privacy
 
-- Your resume and API keys are stored **locally** in Chrome's storage — never sent to any server other than the AI provider you configured.
-- All AI analysis happens via direct API calls from your browser to your chosen provider.
+- Your resume, API key, and Sheets sync secret are stored **locally** in Chrome's storage — never sent to any server other than OpenAI, and (if you enable it) the Google Apps Script web app you deploy yourself for Sheets sync.
+- All AI analysis happens via direct API calls from your browser to OpenAI.
 - No analytics, no tracking, no data collection of any kind.
 
-Full privacy policy: [wadekarg.github.io/JobMatchAI/privacy-policy.html](https://wadekarg.github.io/JobMatchAI/privacy-policy.html)
+This fork removes upstream JobMatch AI's H1B/PERM sponsorship-data feature, which called a separate third-party H1B data worker — see [What's Different From Upstream](#whats-different-from-upstream). Upstream's privacy policy (linked from the original project) does not describe this fork's Google Sheets sync feature or its narrower AI-provider surface.
 
 ---
 
@@ -305,43 +285,78 @@ Full privacy policy: [wadekarg.github.io/JobMatchAI/privacy-policy.html](https:/
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/wadekarg/JobMatchAI.git
+   git clone https://github.com/acebrown815/BidExtension.git
    ```
 2. Open Chrome and go to `chrome://extensions`
 3. Enable **Developer mode** (toggle in the top-right)
-4. Click **Load unpacked** and select the `JobMatchAI` folder
+4. Click **Load unpacked** and select the `BidExtension` folder
 5. Pin the extension from the puzzle icon in the Chrome toolbar
+
+Run the test suite with `npm test` (or `npm run test:watch`) — see `tests/`.
 
 ---
 
 ## Project Structure
 
 ```
-JobMatchAI/
-├── manifest.json            # Chrome MV3 manifest
-├── background.js            # Service worker: message routing, AI calls, caching
-├── content.js               # Side panel UI, job scraping, autofill, notes, badges
-├── aiService.js             # AI provider abstraction (10 providers, retry logic)
-├── deterministicMatcher.js  # Rule-based dropdown matching (no AI)
-├── directFill.js            # Low-level field filling helpers
-├── profile.html / profile.js # Profile, Q&A, Applied Jobs, Stats, AI Settings
-├── styles.css               # Content script base styles
-├── icons/                   # Extension icons (16, 48, 128px)
-├── libs/                    # pdf.js & mammoth.js for client-side resume parsing
-└── screenshots/             # README images
+BidExtension/
+├── manifest.json              # Chrome MV3 manifest
+├── background.js              # Service worker: message routing, AI calls, caching,
+│                               #   Sheets sync, backup/restore
+├── content.js                 # Side panel UI, job scraping, autofill, notes, badges,
+│                               #   local resume auto-match
+├── aiService.js                # AI provider abstraction (OpenAI only; retry logic)
+├── deterministicMatcher.js    # Rule-based dropdown matching (no AI)
+├── directFill.js               # Low-level field filling helpers
+├── profile.html / profile.js  # Profile, Q&A, Saved Jobs, Stats, Settings
+├── styles.css                  # Content script base styles
+├── lib/                        # Shared helpers, each as a classic script (content
+│   │                           #   scripts / profile.html) + an .mjs mirror (tests):
+│   ├── urlKey.js(.mjs)          #   per-URL storage key normalization
+│   ├── fieldFilter.js            #   filters sensitive fields out of autofill
+│   ├── resumeKeywords.js(.mjs)   #   ATS keyword extraction from a resume profile
+│   ├── resumeRanker.js(.mjs)     #   local, zero-AI resume-vs-JD scoring
+│   ├── aiSettingsMigration.mjs   #   migrates older stored AI settings shapes
+│   ├── coverLetterDocx.mjs, coverLetterPdf.mjs, coverLetterFilename.mjs, docxBullets.mjs
+│   │                             #   cover letter / tailored resume file generation
+│   └── visaPhrases.js(.mjs), h1bCache.mjs
+│                                 #   unused leftovers from the upstream H1B/visa
+│                                 #   feature, which this fork doesn't load or call
+├── libs/                       # pdf.js, mammoth.js, jspdf, jszip — third-party
+│                               #   libraries for client-side resume/file parsing
+├── docs/sheets-sync/           # Code.gs (Apps Script) + SETUP.md for Google Sheets sync
+├── docs/smoke-test.md          # Manual QA checklist
+├── tests/                      # Vitest unit tests (see package.json's "test" script)
+├── icons/                      # Extension icons (16, 48, 128px)
+└── screenshots/                # README images
 ```
+
+---
+
+## What's Different From Upstream
+
+Compared to [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), this fork:
+
+- **Removed** the Visa & H1B/PERM sponsorship-data feature entirely (sponsorship phrase detection, USCIS/DOL trend charts, H1B history) — `lib/visaPhrases.js` and the H1B data-worker host permission are gone from the manifest, though the unused source files are still present in `lib/`.
+- **Reduced AI providers from ten to one** — only OpenAI is wired up in `aiService.js` and the Settings provider dropdown; the multi-provider registry and per-provider key memory were removed.
+- **Removed the resume cap** — resumes are an unlimited, add/delete list instead of exactly 3 fixed slots.
+- **Added local, zero-AI resume-to-job matching** — auto-selects the best-matching saved resume for the current posting by ATS-keyword overlap (`lib/resumeRanker.js`, `lib/resumeKeywords.js`), and shows an "ATS Keywords by Resume" breakdown on the Profile tab.
+- **Added Google Sheets Sync** — optionally pushes every "Mark as Applied" to a Google Sheet via a self-deployed Apps Script webhook (`docs/sheets-sync/`).
+- **Removed the in-panel Applied Jobs table** — applied jobs are still tracked (for the Stats count and Sheets sync) but no longer have a dedicated browsable tab; the **Applied Jobs** tab was replaced by a **Saved Jobs** tab with a fuller table (score, title, company, location, salary, date, delete).
+- **Added Backup & Restore** and **Q&A Export/Import** — full-setup and Q&A-only JSON export/import from the Settings and Q&A tabs, respectively.
+- **Renamed** the "AI Settings" tab to **Settings** (it now also hosts Google Sheets Sync and Backup & Restore).
 
 ---
 
 ## Contributing
 
-JobMatch AI is free and open source — built to help job seekers spend less time on repetitive tasks and more time landing the right role. Contributions are welcome.
+Contributions are welcome.
 
 1. Fork the repo
 2. Create a feature branch: `git checkout -b feature/my-improvement`
 3. Commit your changes and open a Pull Request
 
-Have an idea but not sure where to start? Open an [issue](https://github.com/wadekarg/JobMatchAI/issues).
+Have an idea but not sure where to start? Open an [issue](https://github.com/acebrown815/BidExtension/issues).
 
 ---
 
