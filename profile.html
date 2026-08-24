@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JobMatch AI – Profile & Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* ── Theme CSS Variables ── */
+    body {
+      --jm-primary: #3b82f6;
+      --jm-primary-hover: #2563eb;
+      --jm-bg: #ffffff;
+      --jm-card-bg: #f8fafc;
+      --jm-border: #e2e8f0;
+      --jm-text: #1e293b;
+      --jm-text-secondary: #64748b;
+      --jm-text-muted: #94a3b8;
+      --jm-tag-bg: #dbeafe;
+      --jm-tag-text: #1e40af;
+      --jm-hover-bg: #eff6ff;
+      --jm-input-bg: #f8fafc;
+      --jm-shadow: rgba(59,130,246,0.15);
+      --jm-page-bg: #f0f2f5;
+      --jm-header-bg: #3b82f6;
+    }
+
+    body.theme-dark {
+      --jm-primary: #3b82f6;
+      --jm-primary-hover: #2563eb;
+      --jm-bg: #1e293b;
+      --jm-card-bg: #0f172a;
+      --jm-border: #334155;
+      --jm-text: #f1f5f9;
+      --jm-text-secondary: #cbd5e1;
+      --jm-text-muted: #94a3b8;
+      --jm-tag-bg: #1e3a5f;
+      --jm-tag-text: #93c5fd;
+      --jm-hover-bg: #334155;
+      --jm-input-bg: #0f172a;
+      --jm-shadow: rgba(0,0,0,0.3);
+      --jm-page-bg: #0f172a;
+      --jm-header-bg: #1e3a5f;
+    }
+
+    body.theme-warm {
+      --jm-primary: #d97706;
+      --jm-primary-hover: #b45309;
+      --jm-bg: #fffbf5;
+      --jm-card-bg: #fefce8;
+      --jm-border: #fde68a;
+      --jm-text: #451a03;
+      --jm-text-secondary: #92400e;
+      --jm-text-muted: #a16207;
+      --jm-tag-bg: #fef3c7;
+      --jm-tag-text: #92400e;
+      --jm-hover-bg: #fef9c3;
+      --jm-input-bg: #fefce8;
+      --jm-shadow: rgba(217,119,6,0.15);
+      --jm-page-bg: #fffbf5;
+      --jm-header-bg: #d97706;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--jm-page-bg);
+      color: var(--jm-text);
+      line-height: 1.5;
+    }
+
+    .header {
+      background: var(--jm-header-bg);
+      color: white;
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .header h1 { font-size: 22px; font-weight: 600; }
+    .header .subtitle { opacity: 0.85; font-size: 13px; }
+
+    .jm-theme-btn-profile {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.4);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+      font-size: 16px;
+      transition: background 0.15s;
+      margin-left: auto;
+      flex-shrink: 0;
+      padding: 0;
+    }
+    .jm-theme-btn-profile:hover { background: rgba(255,255,255,0.3); }
+
+    .tabs {
+      display: flex;
+      background: var(--jm-bg);
+      border-bottom: 2px solid var(--jm-border);
+      padding: 0 32px;
+    }
+
+    .tab {
+      padding: 14px 24px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--jm-text-secondary);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+
+    .tab:hover { color: var(--jm-primary); }
+    .tab.active { color: var(--jm-primary); border-bottom-color: var(--jm-primary); }
+
+    .container {
+      max-width: 900px;
+      margin: 24px auto;
+      padding: 0 24px;
+    }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .card {
+      background: var(--jm-bg);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    .card h2 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--jm-text);
+    }
+
+    .card h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--jm-text-secondary);
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--jm-text-secondary);
+      margin-bottom: 4px;
+    }
+
+    input[type="text"], input[type="email"], input[type="tel"],
+    input[type="url"], input[type="password"], input[type="number"],
+    textarea, select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--jm-border);
+      border-radius: 8px;
+      font-size: 14px;
+      font-family: inherit;
+      transition: border-color 0.2s;
+      margin-bottom: 12px;
+      background: var(--jm-input-bg);
+      color: var(--jm-text);
+    }
+
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--jm-primary);
+      box-shadow: 0 0 0 3px var(--jm-shadow);
+    }
+
+    textarea { min-height: 80px; resize: vertical; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary { background: var(--jm-primary); color: white; }
+    .btn-primary:hover { background: var(--jm-primary-hover); }
+    .btn-secondary { background: var(--jm-border); color: var(--jm-text-secondary); }
+    .btn-secondary:hover { background: var(--jm-hover-bg); }
+    .btn-danger { background: #fee2e2; color: #dc2626; }
+    .btn-danger:hover { background: #fecaca; }
+    .btn-success { background: #d1fae5; color: #059669; }
+    .btn-sm { padding: 6px 14px; font-size: 13px; }
+
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* Upload zone */
+    .upload-zone {
+      border: 2px dashed var(--jm-border);
+      border-radius: 12px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-bottom: 16px;
+    }
+
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--jm-primary);
+      background: var(--jm-hover-bg);
+    }
+
+    .upload-zone .icon { font-size: 36px; margin-bottom: 8px; }
+    .upload-zone .text { font-size: 14px; color: var(--jm-text-secondary); }
+    .upload-zone .hint { font-size: 12px; color: var(--jm-text-muted); margin-top: 4px; }
+
+    .upload-status {
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: none;
+    }
+
+    .upload-status.success { display: block; background: #d1fae5; color: #059669; }
+    .upload-status.error { display: block; background: #fee2e2; color: #dc2626; }
+    .upload-status.loading { display: block; background: #dbeafe; color: #1e40af; }
+
+    /* Skills tags */
+    .skills-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .skill-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 12px;
+      background: var(--jm-tag-bg);
+      color: var(--jm-tag-text);
+      border-radius: 20px;
+      font-size: 13px;
+    }
+
+    .skill-tag .remove {
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      opacity: 0.6;
+    }
+
+    .skill-tag .remove:hover { opacity: 1; }
+
+    .skill-input-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .skill-input-row input { margin-bottom: 0; }
+
+    /* Experience / Education entries */
+    .entry {
+      border: 1px solid var(--jm-border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .entry-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .entry-header h4 { font-size: 14px; color: var(--jm-text); }
+
+    /* Q&A section */
+    #qaList {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .qa-entry {
+      grid-column: span 2;
+      border: 1px solid var(--jm-border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .qa-entry.qa-compact {
+      grid-column: span 1;
+      padding: 10px 12px;
+    }
+
+    .qa-entry label { font-weight: 600; }
+
+    .qa-compact-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .qa-compact-header label {
+      font-size: 12px;
+      margin-bottom: 0;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .qa-compact input[type="text"],
+    .qa-compact select {
+      margin-bottom: 0;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+
+    .qa-compact textarea {
+      min-height: 50px;
+      margin-bottom: 0;
+      padding: 7px 10px;
+      font-size: 13px;
+    }
+
+    .qa-compact .qa-category-badge {
+      font-size: 9px;
+      padding: 0 6px;
+      margin-left: 4px;
+    }
+
+    /* API key */
+    .api-key-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .api-key-row input { flex: 1; margin-bottom: 0; }
+
+    /* Settings grid */
+    .settings-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .slider-container {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .slider-container input[type="range"] {
+      flex: 1;
+      margin-bottom: 0;
+      border: none;
+      padding: 0;
+      box-shadow: none;
+    }
+
+    .slider-value {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--jm-primary);
+      min-width: 32px;
+    }
+
+    .test-result {
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-top: 12px;
+      display: none;
+    }
+
+    .test-result.success { display: block; background: #d1fae5; color: #059669; }
+    .test-result.error { display: block; background: #fee2e2; color: #dc2626; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      padding: 12px 24px;
+      background: var(--jm-text, #1e293b);
+      color: white;
+      border-radius: 8px;
+      font-size: 14px;
+      z-index: 9999;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: all 0.3s;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    .provider-hint {
+      font-size: 12px;
+      color: var(--jm-text-secondary);
+      margin: -8px 0 12px;
+      min-height: 16px;
+    }
+
+    .qa-filter-btn { background: var(--jm-border); color: var(--jm-text-secondary); border: 1px solid transparent; }
+    .qa-filter-btn:hover { background: var(--jm-hover-bg); }
+    .qa-filter-btn.active { background: var(--jm-primary); color: white; border-color: var(--jm-primary); }
+
+    .qa-entry .qa-category-badge {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    .qa-cat-personal { background: #ccfbf1; color: #0f766e; }
+    .qa-cat-work-auth { background: #dbeafe; color: #1d4ed8; }
+    .qa-cat-availability { background: #fef3c7; color: #92400e; }
+    .qa-cat-salary { background: #d1fae5; color: #065f46; }
+    .qa-cat-background { background: #fce7f3; color: #9d174d; }
+    .qa-cat-relocation { background: #dbeafe; color: #1e40af; }
+    .qa-cat-referral { background: #eff6ff; color: #3b82f6; }
+    .qa-cat-demographics { background: #fef9c3; color: #854d0e; }
+    .qa-cat-general { background: #e2e8f0; color: #475569; }
+    .qa-cat-custom { background: #f1f5f9; color: #64748b; }
+
+    .badge-free {
+      display: inline-block;
+      padding: 1px 8px;
+      background: #d1fae5;
+      color: #059669;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    /* Saved jobs table */
+    .saved-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .saved-table th {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 2px solid var(--jm-border);
+      color: var(--jm-text-secondary);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .saved-table td {
+      padding: 10px 8px;
+      border-bottom: 1px solid var(--jm-border);
+      color: var(--jm-text);
+      vertical-align: middle;
+    }
+
+    .saved-table tr:hover td {
+      background: var(--jm-card-bg);
+    }
+
+    .saved-table a {
+      color: var(--jm-primary);
+      text-decoration: none;
+    }
+
+    .saved-table a:hover {
+      text-decoration: underline;
+    }
+
+    .score-badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-weight: 600;
+      font-size: 12px;
+      min-width: 36px;
+      text-align: center;
+    }
+
+    .score-badge-green { background: #d1fae5; color: #059669; }
+    .score-badge-amber { background: #fef3c7; color: #92400e; }
+    .score-badge-red { background: #fee2e2; color: #dc2626; }
+    .score-badge-gray { background: #f1f5f9; color: #64748b; font-weight: 500; }
+
+    .saved-empty {
+      text-align: center;
+      color: var(--jm-text-muted);
+      padding: 40px 20px;
+      font-size: 14px;
+    }
+
+    .saved-count {
+      font-size: 13px;
+      color: var(--jm-text-secondary);
+      margin-bottom: 16px;
+    }
+
+    /* Resume list switcher */
+    .slot-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .profile-slot-btn-wrap { display: inline-flex; align-items: center; gap: 2px; }
+    .profile-slot-btn { background: var(--jm-border); color: var(--jm-text-secondary); border: 2px solid transparent; }
+    .profile-slot-btn:hover { background: var(--jm-hover-bg); }
+    .profile-slot-btn.active { background: var(--jm-primary); color: white; border-color: var(--jm-primary-hover); }
+    .profile-slot-btn.has-data::after { content: ' ●'; font-size: 9px; opacity: 0.7; }
+    .slot-delete-btn {
+      background: none; border: none; cursor: pointer; color: var(--jm-text-muted);
+      font-size: 14px; line-height: 1; padding: 4px 6px; border-radius: 50%;
+    }
+    .slot-delete-btn:hover { background: #fee2e2; color: #dc2626; }
+    .slot-add-btn { border: 2px dashed var(--jm-border); background: transparent; color: var(--jm-text-secondary); }
+    .slot-add-btn:hover { border-color: var(--jm-primary); color: var(--jm-primary); }
+
+    /* ATS keywords by resume */
+    .ats-resume-block { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid var(--jm-border); }
+    .ats-resume-block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+    .ats-resume-block h4 { margin: 0 0 8px; font-size: 14px; }
+    .ats-resume-block .ats-count { font-weight: 400; color: var(--jm-text-secondary); font-size: 12px; }
+    .ats-resume-empty { color: var(--jm-text-muted); font-size: 13px; margin: 0; }
+    .keyword-tag { background: var(--jm-tag-bg); color: var(--jm-tag-text); border-radius: 20px; padding: 4px 12px; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+    .keyword-tag .freq { opacity: 0.6; font-size: 11px; }
+
+    /* Stats dashboard */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      text-align: center;
+      background: var(--jm-card-bg);
+      border-radius: 10px;
+      padding: 18px 12px;
+      border: 1px solid var(--jm-border);
+    }
+    .stat-card .stat-value { font-size: 34px; font-weight: 700; color: var(--jm-primary); line-height: 1; }
+    .stat-card .stat-label { font-size: 12px; color: var(--jm-text-secondary); margin-top: 5px; }
+    .stat-section-title {
+      font-size: 14px; font-weight: 600; color: var(--jm-text);
+      margin: 20px 0 10px; border-bottom: 1px solid var(--jm-border); padding-bottom: 6px;
+    }
+    .skill-freq-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .skill-freq-name { font-size: 13px; color: var(--jm-text); min-width: 130px; }
+    .skill-freq-track { flex: 1; height: 8px; background: var(--jm-border); border-radius: 4px; overflow: hidden; }
+    .skill-freq-fill { height: 100%; background: var(--jm-primary); border-radius: 4px; transition: width 0.4s ease; }
+    .skill-freq-count { font-size: 12px; color: var(--jm-text-muted); min-width: 28px; text-align: right; }
+    .score-dist { display: flex; gap: 8px; margin: 12px 0; }
+    .score-dist-bar {
+      flex: 1; text-align: center; border-radius: 8px;
+      padding: 10px 4px; font-size: 13px; font-weight: 700;
+    }
+    .score-dist-bar small { display: block; font-size: 10px; font-weight: 400; opacity: 0.7; margin-top: 2px; }
+
+    /* Refresh-models row: dropdown + refresh button side by side */
+    .model-row {
+      display: flex;
+      gap: 6px;
+      align-items: stretch;
+    }
+    .model-row select { flex: 1; margin-bottom: 0; }
+    /* Match the model dropdown's visual treatment so the refresh button
+       reads as part of the same input row — same border, radius, fill,
+       focus ring. Icon stays a hair larger than body text. */
+    .icon-btn {
+      background: var(--jm-input-bg);
+      border: 1px solid var(--jm-border);
+      border-radius: 8px;
+      padding: 0 14px;
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      color: var(--jm-text);
+      font-family: inherit;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.2s, background 0.15s, box-shadow 0.2s;
+    }
+    .icon-btn:hover:not(:disabled) {
+      background: var(--jm-hover-bg);
+      border-color: var(--jm-primary);
+    }
+    .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .icon-btn:focus-visible {
+      outline: none;
+      border-color: var(--jm-primary);
+      box-shadow: 0 0 0 3px var(--jm-shadow);
+    }
+    .icon-btn.spinning { animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .refresh-status {
+      font-size: 12px;
+      margin-top: 4px;
+      min-height: 16px;
+      color: var(--jm-text-secondary);
+    }
+    .refresh-status.error   { color: #b91c1c; }
+    .refresh-status.success { color: #15803d; }
+    .muted-link {
+      font-size: 11px;
+      color: var(--jm-text-secondary);
+      text-decoration: none;
+      display: inline-block;
+      margin-top: 4px;
+    }
+    .muted-link:hover { text-decoration: underline; }
+    #sModelCustom { margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1><span style="margin-right:6px;">&#9733;</span>JobMatch AI</h1>
+    </div>
+    <button class="jm-theme-btn-profile" id="profileThemeToggle" title="Switch theme">&#9728;&#65039;</button>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="profile">Profile</div>
+    <div class="tab" data-tab="qa">Q&A Answers</div>
+    <div class="tab" data-tab="saved">Saved Jobs</div>
+    <div class="tab" data-tab="stats">Stats</div>
+    <div class="tab" data-tab="settings">Settings</div>
+  </div>
+
+  <div class="container">
+    <!-- ─── Profile Tab ─────────────────────────────────── -->
+    <div class="tab-content active" id="tab-profile">
+
+      <!-- Resume list switcher -->
+      <div class="card" style="margin-bottom:16px;">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+          <div>
+            <h2 style="margin-bottom:3px;">Active Resume Profile</h2>
+            <p style="font-size:12px;color:#64748b;margin:0;">Switch between your resume versions for different job types, or add a new one.</p>
+          </div>
+          <div class="slot-btns" id="profileSlotBtns"></div>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+          <input type="text" id="slotNameInput" placeholder="Name this profile, e.g. Software Engineer…" style="margin-bottom:0;flex:1;">
+          <button class="btn btn-secondary btn-sm" id="saveSlotNameBtn">Rename</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Upload Resume</h2>
+        <div class="upload-zone" id="uploadZone">
+          <div class="icon">&#128196;</div>
+          <div class="text">Drag & drop your resume or click to browse</div>
+          <div class="hint">Supports PDF and DOCX</div>
+        </div>
+        <input type="file" id="fileInput" accept=".pdf,.docx" style="display:none">
+        <div class="upload-status" id="uploadStatus"></div>
+      </div>
+
+      <div class="card">
+        <h2>Personal Information</h2>
+        <div class="form-row">
+          <div><label>Full Name</label><input type="text" id="pName"></div>
+          <div><label>Email</label><input type="email" id="pEmail"></div>
+        </div>
+        <div class="form-row">
+          <div><label>Phone</label><input type="tel" id="pPhone"></div>
+          <div><label>Location</label><input type="text" id="pLocation"></div>
+        </div>
+        <div class="form-row">
+          <div><label>LinkedIn</label><input type="url" id="pLinkedin"></div>
+          <div><label>Website</label><input type="url" id="pWebsite"></div>
+        </div>
+        <label>Professional Summary</label>
+        <textarea id="pSummary" rows="3"></textarea>
+      </div>
+
+      <div class="card">
+        <h2>Skills</h2>
+        <div class="skills-container" id="skillsContainer"></div>
+        <div class="skill-input-row">
+          <input type="text" id="skillInput" placeholder="Add a skill and press Enter">
+          <button class="btn btn-secondary btn-sm" id="addSkillBtn">Add</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Experience</h2>
+        <div id="experienceList"></div>
+        <button class="btn btn-secondary btn-sm" id="addExpBtn">+ Add Experience</button>
+      </div>
+
+      <div class="card">
+        <h2>Education</h2>
+        <div id="educationList"></div>
+        <button class="btn btn-secondary btn-sm" id="addEduBtn">+ Add Education</button>
+      </div>
+
+      <div class="card">
+        <h2>Certifications</h2>
+        <div class="skills-container" id="certsContainer"></div>
+        <div class="skill-input-row">
+          <input type="text" id="certInput" placeholder="Add a certification and press Enter">
+          <button class="btn btn-secondary btn-sm" id="addCertBtn">Add</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Projects</h2>
+        <div id="projectsList"></div>
+        <button class="btn btn-secondary btn-sm" id="addProjBtn">+ Add Project</button>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-bottom:3px;">ATS Keywords by Resume</h2>
+        <p style="font-size:12px;color:#64748b;margin:0 0 12px;">Skills, certifications, and project technologies from each resume — the terms an ATS scans for.</p>
+        <div id="atsKeywordsByResume"></div>
+      </div>
+
+      <div style="text-align: right; margin-bottom: 40px;">
+        <button class="btn btn-primary" id="saveProfileBtn">Save Profile</button>
+      </div>
+    </div>
+
+    <!-- ─── Q&A Tab ─────────────────────────────────────── -->
+    <div class="tab-content" id="tab-qa">
+      <div class="card">
+        <h2>Common Application Q&A <span id="qaCount" style="font-size:13px;font-weight:400;color:#64748b;"></span></h2>
+        <p style="font-size:13px;color:#64748b;margin-bottom:8px;">
+          Pre-fill answers to common job application questions. These will be used during autofill.
+        </p>
+        <div style="margin-bottom:16px;">
+          <button class="btn btn-secondary btn-sm" id="exportQABtn">&#8595; Export</button>
+          <button class="btn btn-secondary btn-sm" id="importQABtn">&#8593; Import</button>
+          <input type="file" id="qaImportFile" accept="application/json,.json" hidden>
+          <p style="font-size:11px;color:#94a3b8;margin-top:4px;">
+            Export your Q&amp;A answers as a JSON file, then Import it on another browser or
+            computer to recreate them there instead of retyping. Importing updates any
+            question that already matches by text and adds the rest — it won't remove
+            questions the file doesn't mention.
+          </p>
+        </div>
+        <div id="loadQASection" style="margin-bottom:16px;">
+          <button class="btn btn-primary btn-sm" id="loadDefaultQABtn">Load Common US Job Application Questions</button>
+          <p style="font-size:11px;color:#94a3b8;margin-top:4px;">
+            Loads ~25 commonly asked questions across work authorization, availability, salary, background, and more.
+          </p>
+        </div>
+        <div id="qaCategoryFilter" style="display:none;margin-bottom:16px;">
+          <label style="margin-bottom:6px;">Filter by category:</label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            <button class="btn btn-sm qa-filter-btn active" data-cat="all">All</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="personal">Personal / Address</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="work-auth">Work Authorization</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="availability">Availability</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="salary">Salary</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="background">Background</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="relocation">Relocation</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="referral">Referral & Links</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="demographics">Demographics / EEO</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="general">General</button>
+            <button class="btn btn-sm qa-filter-btn" data-cat="custom">Custom</button>
+          </div>
+        </div>
+        <div id="qaList"></div>
+        <button class="btn btn-secondary btn-sm" id="addQABtn">+ Add Q&A</button>
+        <div style="text-align: right; margin-top: 16px;">
+          <button class="btn btn-primary" id="saveQABtn">Save Q&A Answers</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Stats Tab ───────────────────────────────────── -->
+    <div class="tab-content" id="tab-stats">
+      <div class="card">
+        <h2>Job Search Stats</h2>
+        <div id="statsContent">
+          <p style="color:#94a3b8;text-align:center;padding:30px 0;">Click the Stats tab to load your stats.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Saved Jobs Tab ───────────────────────────────── -->
+    <div class="tab-content" id="tab-saved">
+      <div class="card">
+        <h2>Saved Jobs</h2>
+        <div class="saved-count" id="savedCount"></div>
+        <div id="savedJobsList"></div>
+      </div>
+    </div>
+
+    <!-- ─── Settings Tab ────────────────────────────────── -->
+    <div class="tab-content" id="tab-settings">
+      <div class="card">
+        <h2>AI Configuration</h2>
+
+        <label>Provider</label>
+        <select id="sProvider">
+          <option value="openai">OpenAI</option>
+        </select>
+        <div class="provider-hint" id="providerHint"></div>
+
+        <label>API Key</label>
+        <div class="api-key-row">
+          <input type="password" id="sApiKey" placeholder="sk-...">
+          <button class="btn btn-secondary btn-sm" id="toggleKeyBtn">Show</button>
+        </div>
+        <a href="#" id="clearSavedKeysBtn" class="muted-link" hidden>
+          Clear saved keys
+        </a>
+        <div style="height:12px"></div>
+
+        <div class="settings-row">
+          <div>
+            <label>Model</label>
+            <div class="model-row">
+              <select id="sModel">
+                <option value="">Loading models...</option>
+              </select>
+              <button type="button" id="refreshModelsBtn" class="icon-btn"
+                      title="Refresh models from provider"
+                      aria-label="Refresh models from provider"
+                      aria-controls="sModel sModelCustom">
+                &#x21BB;
+              </button>
+            </div>
+            <input type="text" id="sModelCustom"
+                   placeholder="e.g. gpt-5.6-sol"
+                   hidden>
+            <div class="refresh-status" id="refreshStatus" aria-live="polite"></div>
+          </div>
+          <div>
+            <label>Temperature: <span id="tempValue">0.3</span></label>
+            <div class="slider-container">
+              <input type="range" id="sTemp" min="0" max="1" step="0.1" value="0.3">
+            </div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="testConnBtn">Test Connection</button>
+        <button class="btn btn-secondary" id="saveSettingsBtn" style="margin-left:8px;">Save Settings</button>
+        <div class="test-result" id="testResult"></div>
+      </div>
+
+      <div class="card">
+        <h2>Google Sheets Sync</h2>
+        <div class="provider-hint">
+          Push every job you mark as "Applied" to a Google Sheet automatically, via a
+          small Apps Script webhook you deploy once (not a Google API key — Sheets
+          doesn't support write access that way). See the setup instructions provided
+          alongside this file for the one-time deploy steps.
+        </div>
+
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--jm-text);margin-bottom:12px;">
+          <input type="checkbox" id="sheetsEnabled" style="width:auto;margin:0;">
+          Enable Google Sheets sync
+        </label>
+
+        <label>Web App URL</label>
+        <input type="text" id="sheetsWebAppUrl" placeholder="https://script.google.com/macros/s/XXXXXXXX/exec">
+        <div style="height:12px"></div>
+
+        <label>Sheet Tab Name</label>
+        <input type="text" id="sheetsTabName" placeholder="Applications (default if left blank)">
+        <div style="height:12px"></div>
+
+        <label>Shared Secret</label>
+        <div class="api-key-row">
+          <input type="password" id="sheetsSecret" placeholder="A random string only you and your script know">
+          <button class="btn btn-secondary btn-sm" id="toggleSheetsSecretBtn">Show</button>
+        </div>
+        <div style="height:12px"></div>
+
+        <button class="btn btn-primary" id="testSheetsSyncBtn">Test Sync</button>
+        <button class="btn btn-secondary" id="saveSheetsSettingsBtn" style="margin-left:8px;">Save Sheets Settings</button>
+        <div class="test-result" id="sheetsTestResult"></div>
+      </div>
+
+      <div class="card">
+        <h2 style="margin-bottom:3px;">Backup &amp; Restore</h2>
+        <p style="font-size:12px;color:#64748b;margin:0 0 12px;">
+          Export your whole JobMatch AI setup — profile, resumes, Q&amp;A answers, saved and
+          applied jobs, AI Settings, and Google Sheets sync — as one file, then Import it on
+          another browser or computer to set it up the same way instead of re-entering
+          everything. The file includes your API key and Sheets sync secret in plain text, so
+          keep it private and only import files you trust.
+        </p>
+        <button class="btn btn-secondary btn-sm" id="exportAllBtn">&#8595; Export All Data</button>
+        <button class="btn btn-secondary btn-sm" id="importAllBtn">&#8593; Import All Data</button>
+        <input type="file" id="allDataImportFile" accept="application/json,.json" hidden>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="libs/pdf.min.js"></script>
+  <script src="libs/mammoth.browser.min.js"></script>
+  <script src="libs/jszip.min.js"></script>
+  <!-- Shared ATS-keyword extractor (skills + certifications + project
+       technologies) — also used by lib/resumeRanker.js on job pages, so
+       the Profile tab's "ATS Keywords" list and the local resume-vs-JD
+       match score are always derived from the exact same definition. -->
+  <script src="lib/resumeKeywords.js"></script>
+  <script src="profile.js"></script>
+</body>
+</html>
