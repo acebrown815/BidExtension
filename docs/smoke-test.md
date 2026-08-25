@@ -24,7 +24,21 @@ the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
 9. **AutoFill** — open a Greenhouse job application form (any company on
    `*.greenhouse.io`). Click **AutoFill Application**. Fields fill. No
    answer text (gender / salary / etc.) leaks into DevTools console.
-10. **Mark Applied** — click. Open Profile → Applied tab. Job appears.
+9b. **Resume file upload** — on that same (or another) form with a résumé
+    upload widget, confirm the widget shows your resume filename attached
+    after AutoFill runs, without you touching it — check both a plain
+    native file input (Greenhouse) and a drag-and-drop style uploader
+    (Lever/Workday) at least once each. Confirm a **cover letter** upload
+    field on the same form is left untouched (should not get the résumé).
+    Status message should say "Attached resume (...)".
+9c. **Resume file download button** — with a JD scanned (Local Match badge
+    visible next to the resume switcher), click the **"⬇ Resume file"**
+    button beside it. A file named `Resume_<YourName>.pdf` or `.docx`
+    downloads. Open it — it's a valid, uncorrupted copy of your actual
+    resume, same format you originally uploaded, and it's byte-identical
+    to whatever step 9b just attached to the form.
+10. **Mark Applied** — click. Total Applied count increases on the Stats tab
+    (there is no in-panel Applied Jobs table in this fork).
 11. **SPA navigation** — on LinkedIn, click another job posting in the list.
     Panel resets. New job's title/company/location render. Click Analyze.
     No "wrong job's analysis" flash.

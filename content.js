@@ -76,6 +76,11 @@
 
   // AutoFill state
   let _fieldMap        = {};   // Map of question_id → { el, type, ... } built during field detection
+  // Resume-upload <input type="file"> fields found by the most recent
+  // detectFormFields() call. Kept separate from _fieldMap/questions because
+  // these are filled locally from the active resume's raw file bytes — no
+  // AI call, so they never go through GENERATE_AUTOFILL. See attachResumeFile().
+  let _resumeFileFields = []; // [{ el: HTMLInputElement, label: string }, ...]
 
   // Autofill badges — fixed-position pills that don't affect page layout
   let _badges            = [];        // [{ badgeEl, fieldEl, place }] for repositioning + cleanup
@@ -1340,6 +1345,22 @@
       .jm-local-score-green { background: rgba(16,185,129,0.14); color: #059669; }
       .jm-local-score-amber { background: rgba(245,158,11,0.14); color: #d97706; }
       .jm-local-score-red   { background: rgba(239,68,68,0.14);  color: #dc2626; }
+      .jm-download-resume-btn {
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 9px;
+        border-radius: 20px;
+        white-space: nowrap;
+        border: 1.5px solid var(--jm-border);
+        background: transparent;
+        color: var(--jm-text-secondary);
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .jm-download-resume-btn:hover {
+        border-color: var(--jm-primary);
+        color: var(--jm-primary);
+      }
 
       /* Saved jobs tab */
       .jm-saved-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1438,6 +1459,15 @@
                available. -->
           <span class="jm-local-score" id="jmLocalScore" style="display:none"
                 title="ATS keyword-match score (skills, certifications, project technologies) — computed instantly on-device, no AI call. Not the same as the AI-generated match score from Analyze."></span>
+          <!-- Downloads the exact file (same bytes, same generated name)
+               that AutoFill's resume-upload attachment would use for the
+               currently active resume — lets the user open and check it
+               before trusting AutoFill to attach it on a real form. Shown
+               and hidden together with jmLocalScore by updateLocalScoreChip,
+               since both depend on a resume having been scored/selected for
+               the current JD. -->
+          <button class="jm-download-resume-btn" id="jmDownloadResume" style="display:none"
+                  title="Download the exact resume file AutoFill would attach, to check it yourself first">&#8681; Resume file</button>
         </div>
         <div class="jm-actions">
           <button class="jm-btn jm-btn-primary" id="jmAnalyze">Analyze Job</button>
@@ -1563,6 +1593,7 @@
       analyzeJob(forceRefresh);
     });
     panel.querySelector('#jmAutofill').addEventListener('click', autofillForm);
+    panel.querySelector('#jmDownloadResume').addEventListener('click', downloadActiveResumeFile);
     panel.querySelector('#jmAutofillWarningClose').addEventListener('click', () => {
       shadowRoot.getElementById('jmAutofillWarning').style.display = 'none';
     });
@@ -2059,10 +2090,12 @@
    */
   function updateLocalScoreChip() {
     const chip = shadowRoot && shadowRoot.getElementById('jmLocalScore');
+    const downloadBtn = shadowRoot && shadowRoot.getElementById('jmDownloadResume');
     if (!chip) return;
     const score = _resumeScores[_activeResumeId];
     if (typeof score !== 'number') {
       chip.style.display = 'none';
+      if (downloadBtn) downloadBtn.style.display = 'none';
       return;
     }
     const pct = Math.round(score * 100);
@@ -2070,6 +2103,10 @@
     chip.textContent = `${pct}% ATS keyword match`;
     chip.className = 'jm-local-score jm-local-score-' + tier;
     chip.style.display = 'inline-block';
+    // Shown together with the chip — both depend on a resume having been
+    // scored/selected for the current JD (see attachResumeFile() /
+    // downloadActiveResumeFile() for what this button actually downloads).
+    if (downloadBtn) downloadBtn.style.display = 'inline-block';
   }
 
   /**
@@ -3185,14 +3222,32 @@
     if (_autofillWarning) _autofillWarning.style.display = 'none';
 
     try {
+      // Step 0: make sure "the active resume" is the best local ATS match
+      // for this JD before anything below reads it (file upload AND the
+      // Q&A/AI text passes both key off whichever resume is active).
+      try {
+        await ensureBestResumeSelected();
+      } catch (_) {}
+
       // Step 1: detect fields and store DOM references
       _fieldMap = {};
       clearAutofillBadges(); // remove any badges left over from a previous run on this page
       console.log('[JobMatch AI] Detecting form fields...');
       const questions = detectFormFields();
       console.log(`[JobMatch AI] Found ${questions.length} form fields`);
+
+      // Pass 0: Attach the active resume's file to any resume-upload field
+      // found in this frame (no AI call — see attachResumeFile()). Runs
+      // before the "no fields found" check below since a bare "upload your
+      // resume" page can have a file input and nothing else.
+      setStatus('Attaching resume...', 'info');
+      let resumeResult = { attached: 0, fileName: null };
+      try {
+        resumeResult = await attachResumeFile();
+      } catch (_) { /* best-effort — the rest of the pipeline still runs */ }
+
       if (questions.length === 0) {
-        // No fields in top frame — try iframes via broadcast
+        // No text/dropdown/radio/checkbox fields in top frame — try iframes via broadcast
         console.log('[JobMatch AI] No fields in top frame, broadcasting to iframes...');
         setStatus('Found embedded form. Filling fields...', 'info');
         try {
@@ -3201,18 +3256,23 @@
           // The wrapper unwraps the {success, data} envelope, so we read
           // .filled directly off the resolved value.
           const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
-          if (iframeData?.filled > 0) {
-            setStatus(`Filled ${iframeData.filled} fields in embedded form.`, 'success');
+          const iframeFilled = iframeData?.filled || 0;
+          if (iframeFilled > 0 || resumeResult.attached > 0) {
+            let msg = `Filled ${iframeFilled} field${iframeFilled === 1 ? '' : 's'} in embedded form.`;
+            if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
+            setStatus(msg, 'success');
             setTimeout(clearStatus, 5000);
-            return;
-          } else if (iframeData?.filled === 0) {
-            setStatus('Embedded form found but no fields could be filled.', 'error');
             return;
           }
         } catch (iframeErr) {
           console.warn('[JobMatch AI] iframe broadcast error:', iframeErr);
         }
-        setStatus('No form fields found on this page.', 'error');
+        if (resumeResult.attached > 0) {
+          setStatus(`Attached resume (${resumeResult.fileName}). No other form fields found.`, 'success');
+          setTimeout(clearStatus, 5000);
+        } else {
+          setStatus('No form fields found on this page.', 'error');
+        }
         return;
       }
 
@@ -3256,6 +3316,7 @@
       const { filled, skipped } = await fillFormFromAnswers(Array.isArray(answers) ? answers : []);
       const totalFilled = directFilled + filled;
       let msg = `Filled ${totalFilled} field${totalFilled === 1 ? '' : 's'}.`;
+      if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
       if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
       setStatus(msg, 'success');
       setTimeout(clearStatus, 4000);
@@ -3288,6 +3349,7 @@
     const questions = [];
     let qIndex = 0;
     const seen = new Set(); // track qids to avoid duplicates
+    _resumeFileFields = []; // reset — repopulated by the file-input pass below
 
     // ── Helper: build select option data ──
     function buildSelectOptions(selectEl) {
@@ -3495,7 +3557,284 @@
       qIndex++;
     });
 
+    // ── 5. Resume-upload file inputs ──
+    // Filled locally from the active resume's raw file bytes (see
+    // attachResumeFile()) — never sent to the AI, so these are collected
+    // into _resumeFileFields rather than pushed onto `questions`.
+    document.querySelectorAll('input[type="file"]').forEach(fileEl => {
+      if (fileEl.offsetParent === null) return;
+      if (!isFieldEligible(fileEl)) return;
+      if (fileEl.files && fileEl.files.length > 0) return; // already has a file — don't clobber it
+      const label = getFieldLabel(fileEl);
+      if (!looksLikeResumeUpload(fileEl, label)) return;
+      _resumeFileFields.push({ el: fileEl, label });
+    });
+
     return questions;
+  }
+
+  /**
+   * Heuristic: does this file input look like a resume/CV upload field
+   * (as opposed to a cover letter, portfolio, transcript, or "additional
+   * documents" upload)? Checked against the field's label, id, name, and
+   * accept attribute. Deliberately conservative — a false positive would
+   * attach the resume to the wrong upload field, so any cover-letter-ish
+   * wording anywhere in the probe text disqualifies the field even if
+   * "resume" also appears (e.g. "Resume/Cover Letter" combined uploaders
+   * are skipped rather than guessed at).
+   * @param {HTMLInputElement} el
+   * @param {string} label
+   * @returns {boolean}
+   */
+  function looksLikeResumeUpload(el, label) {
+    const probe = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (!probe) return false;
+    if (/cover[\s_-]?letter|coverletter|portfolio|transcript|writing[\s_-]?sample|references?\b/i.test(probe)) return false;
+    return /resum[eé]|\bcv\b|curriculum vitae/i.test(probe);
+  }
+
+  /**
+   * Re-affirms (or updates) the active resume as the best local
+   * ATS-keyword match for the current job description, before AutoFill
+   * reads "the active resume" for both the file-upload attachment and the
+   * Q&A/AI text answers.
+   *
+   * This duplicates (rather than calls into) the equivalent auto-select
+   * block inside analyzeJob(), deliberately: scanResumeMatch() — which
+   * runs on panel open and on SPA navigation — already does this same
+   * switch, but it's fire-and-forget there, so there's a brief window
+   * right after opening the panel or navigating to a new posting where
+   * _activeResumeId could still point at a stale resume if AutoFill is
+   * clicked before that scan finishes. Calling this at the start of
+   * autofillForm() makes AutoFill's resume selection deterministic
+   * instead of "usually right by the time you click". A manual pick for
+   * this job (_manualResumeSelection) is always honored over the score,
+   * exactly as it is for Analyze.
+   * @async
+   */
+  async function ensureBestResumeSelected() {
+    if (_manualResumeSelection) return;
+    try {
+      const jdForRanking = extractJobDescription() || '';
+      if (!jdForRanking) return;
+      const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
+      if (resumes.length < 2) return; // nothing to compare against
+      const ranked = rankResumes(jdForRanking, resumes);
+      const top = ranked[0];
+      const currentId = activeResumeId || _activeResumeId;
+      if (top && top.score > 0 && top.id !== currentId) {
+        await switchSlot(top.id, { silent: true });
+      }
+    } catch (_) { /* best-effort — AutoFill proceeds with whichever resume is active */ }
+  }
+
+  /**
+   * Builds a File for the currently active resume — shared by
+   * attachResumeFile() (AutoFill's automatic attachment) and
+   * downloadActiveResumeFile() (the manual "⬇ Resume file" button), so
+   * both always produce the exact same bytes and the exact same name.
+   *
+   * Filename is always the generated "Resume_<CandidateName>.<ext>" form
+   * (e.g. "Resume_Jane-Doe.pdf") rather than the originally-uploaded
+   * filename — falls back to a bare "Resume.<ext>" when no candidate name
+   * is available yet. Format always matches whatever the resume was
+   * actually uploaded as (PDF stays PDF, DOCX stays DOCX) — this never
+   * converts between formats.
+   *
+   * How it works: background.js's rawResumeBase64/resumeFileType keys are
+   * kept mirrored to whichever resume is active (see switchSlot()), so
+   * GET_RAW_RESUME always returns the right file for the resume AutoFill
+   * (or the download button) is currently running against.
+   *
+   * @async
+   * @returns {Promise<{file: File, fileName: string, mime: string, ext: string}|null>}
+   *   null when there's no resume file saved yet, or it couldn't be decoded.
+   */
+  async function buildActiveResumeFile() {
+    let raw;
+    try {
+      raw = await sendMessage({ type: 'GET_RAW_RESUME' });
+    } catch (_) {
+      return null;
+    }
+    const { rawResumeBase64, fileType } = raw || {};
+    if (!rawResumeBase64) return null;
+
+    const ext = fileType === 'docx' ? 'docx' : 'pdf';
+    const mime = ext === 'docx'
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'application/pdf';
+
+    let candidateName = '';
+    try {
+      const profile = await sendMessage({ type: 'GET_PROFILE' });
+      candidateName = (profile && profile.name) || '';
+    } catch (_) { /* fall back to a generic filename below */ }
+    const nameSeg = sanitizeFileNameSegment(candidateName);
+    const fileName = (nameSeg ? `Resume_${nameSeg}` : 'Resume') + '.' + ext;
+
+    try {
+      const blob = base64ToBlob(rawResumeBase64, mime);
+      const file = new File([blob], fileName, { type: mime });
+      return { file, fileName, mime, ext };
+    } catch (err) {
+      console.warn('[JobMatch AI] Could not build resume File object:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Attaches the active resume's raw file to every detected resume-upload
+   * field (see _resumeFileFields), so AutoFill can complete a file-upload
+   * widget the same way it fills text fields — no AI call, no network
+   * request beyond the existing GET_RAW_RESUME / GET_PROFILE messages (via
+   * buildActiveResumeFile()).
+   *
+   * Call ensureBestResumeSelected() before this so "the active resume" is
+   * guaranteed to be the best local ATS match rather than whatever was
+   * last active for a different job.
+   *
+   * The file itself is attached to the input via a DataTransfer (the
+   * standard trick for scripting a native file input — Chrome does not
+   * allow setting .files directly), and both a plain 'change' event and
+   * synthetic drag events are dispatched, since some ATS upload widgets
+   * (react-dropzone-style components common on Lever/Workday) listen for a
+   * 'drop' event on a wrapping element rather than 'change' on the input
+   * itself.
+   *
+   * @async
+   * @returns {Promise<{attached: number, fileName: string|null, reason?: string}>}
+   */
+  async function attachResumeFile() {
+    if (!_resumeFileFields.length) return { attached: 0, fileName: null };
+
+    const built = await buildActiveResumeFile();
+    if (!built) return { attached: 0, fileName: null, reason: 'no-resume' };
+    const { file, fileName, ext, mime } = built;
+
+    let attached = 0;
+    for (const { el } of _resumeFileFields) {
+      if (!el.isConnected) continue;
+      if (!fileAcceptsType(el, ext, mime)) continue;
+      try {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+
+        // Some upload widgets are drop-zones listening for 'drop' rather
+        // than (or in addition to) the input's 'change' — fire the same
+        // sequence on the input and its likely drop-zone wrapper. Wrapped
+        // in its own try/catch: DragEvent-with-dataTransfer construction
+        // isn't universally needed, so a failure here shouldn't undo the
+        // native-input attachment above.
+        try {
+          const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
+          ['dragenter', 'dragover', 'drop'].forEach(type => {
+            dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+          });
+        } catch (_) { /* best-effort only */ }
+
+        showAutofillBadge(el);
+        attached++;
+      } catch (err) {
+        console.warn('[JobMatch AI] Could not attach resume file to field:', err.message);
+      }
+    }
+
+    return { attached, fileName: attached > 0 ? fileName : null };
+  }
+
+  /**
+   * Handler for the "⬇ Resume file" button next to the Local Match score —
+   * downloads the exact file (same bytes, same generated name) that
+   * attachResumeFile() would attach to a resume-upload field right now, so
+   * the user can open it themselves and confirm it's correct before
+   * trusting AutoFill to attach it on a real application form.
+   *
+   * Uses the standard content-script download trick (object URL + a
+   * temporary `<a download>` click) rather than chrome.downloads, since
+   * this fork has no "downloads" permission in the manifest and this way
+   * needs none — it's the same mechanism a page's own "Download" link
+   * would use.
+   * @async
+   */
+  async function downloadActiveResumeFile() {
+    try {
+      const built = await buildActiveResumeFile();
+      if (!built) {
+        setStatus('No resume file saved for the active resume.', 'error');
+        setTimeout(clearStatus, 3000);
+        return;
+      }
+      const url = URL.createObjectURL(built.file);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = built.fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke on a delay rather than immediately — some browsers process
+      // the download asynchronously and revoking too early can abort it.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      setStatus(`Downloaded ${built.fileName}.`, 'success');
+      setTimeout(clearStatus, 3000);
+    } catch (err) {
+      console.warn('[JobMatch AI] Resume download failed:', err.message);
+      setStatus('Could not download resume: ' + err.message, 'error');
+    }
+  }
+
+  /**
+   * Best-effort check of a file input's `accept` attribute against the
+   * resume's actual type — an input explicitly restricted to a
+   * type the resume isn't (e.g. accept=".doc,.docx" but the saved resume
+   * is a PDF) is skipped rather than attached and likely rejected by the
+   * page anyway. An input with no `accept`, or one that already allows
+   * the resume's extension/mimetype, passes.
+   * @param {HTMLInputElement} el
+   * @param {string} ext - 'pdf' | 'docx'
+   * @param {string} mime
+   * @returns {boolean}
+   */
+  function fileAcceptsType(el, ext, mime) {
+    const accept = (el.getAttribute('accept') || '').trim();
+    if (!accept) return true;
+    const tokens = accept.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    if (tokens.some(t => t === '*/*' || t === '*')) return true;
+    return tokens.some(t => t === '.' + ext || t === mime || (t.endsWith('/*') && mime.startsWith(t.slice(0, -1))));
+  }
+
+  /**
+   * Decodes a base64 string into a Blob of the given MIME type.
+   * @param {string} base64
+   * @param {string} mimeType
+   * @returns {Blob}
+   */
+  function base64ToBlob(base64, mimeType) {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+    return new Blob([bytes], { type: mimeType });
+  }
+
+  /**
+   * Sanitizes a name segment for use in a generated filename — same rules
+   * as lib/coverLetterFilename.mjs's buildCoverLetterFilename(), kept as a
+   * small local copy here since content.js is a classic (non-module)
+   * script and can't import that .mjs helper directly.
+   * @param {string} input
+   * @returns {string}
+   */
+  function sanitizeFileNameSegment(input) {
+    let s = String(input || '').trim();
+    if (!s) return '';
+    s = s.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    if (!s || s.length <= 30) return s;
+    const cut = s.lastIndexOf('-', 30);
+    return cut > 0 ? s.slice(0, cut) : s.slice(0, 30);
   }
 
   /**
@@ -4941,6 +5280,25 @@
       if (msg.type === 'AUTOFILL_IN_FRAME') {
         (async () => {
           try {
+            let totalFilled = 0;
+
+            // Make sure the active resume is the best local ATS match
+            // before reading it below (same as the top-frame flow).
+            try { await ensureBestResumeSelected(); } catch (_) {}
+
+            // ── PASS 0: Attach resume file to any resume-upload field in
+            // this frame (no AI) — detectFormFields() populates
+            // _resumeFileFields as a side effect; Pass 2 below calls it
+            // again for the text/dropdown/radio/checkbox questions.
+            try {
+              detectFormFields();
+              const resumeResult = await attachResumeFile();
+              totalFilled += resumeResult.attached;
+              if (resumeResult.attached > 0) {
+                console.log(`[JobMatch AI] iframe Pass 0 (resume file): attached ${resumeResult.fileName}`);
+              }
+            } catch (_) {}
+
             // ── PASS 1: Direct fill from Q&A (no AI, instant, accurate) ──
             let qaList = [], profile = {};
             try {
@@ -4948,7 +5306,6 @@
               profile = await sendMessage({ type: 'GET_PROFILE' }) || {};
             } catch (_) {}
 
-            let totalFilled = 0;
             if (window.__jobMatchDirectFill) {
               const directResult = await window.__jobMatchDirectFill(qaList, profile);
               totalFilled += directResult.filled;

@@ -48,14 +48,23 @@ Results are cached per URL. You get a consistent score every session — click *
 
 ### Smart Auto-Fill
 
-Click **AutoFill Application** and the extension scans every field on the page, sends them to the AI along with your resume profile and pre-saved Q&A answers, and prepares an answer for every field.
+Click **AutoFill Application** and the extension scans every field on the page and fills it in two passes: first directly from your saved Q&A answers (no AI call), then it sends whatever's still empty to the AI along with your resume profile and writes those answers straight into the form too — **there is no review/approve step before fields are written** in this fork (see below).
 
-A **Review before fill** panel then appears in the side panel listing every proposed answer with a checkbox. Uncheck anything you don't want filled, then click **Apply Selected** to commit — or **Cancel** to discard. Nothing is written to the form until you click Apply.
+Every field AutoFill touches gets a small "AI" badge pinned to it (hover for "Filled by JobMatch AI — please review"), and a dismissible **"Review before submitting"** warning banner appears in the panel afterward as a reminder to check the form before you hit Submit.
+
+**Resume file upload.** AutoFill also detects résumé/CV file-upload fields (by label/name/`accept`, skipping anything that also reads as a cover letter, portfolio, transcript, or references upload) and attaches a file automatically — no AI call. Specifically:
+
+- **Which resume** — before attaching (and before the Q&A/AI text passes), AutoFill re-confirms the active resume is whichever saved resume scores highest by local ATS-keyword overlap for this job's JD, the same ranking the "★ ... Switch?" hint and Local Match badge use. This re-check exists because the panel's own background auto-select (on opening the panel / navigating to a new posting) is fire-and-forget — clicking AutoFill in the brief window before that finishes could otherwise attach a stale resume. A resume you picked manually for this job is always respected instead.
+- **Filename** — attached as a generated name, `Resume_<CandidateName>.<ext>` (e.g. `Resume_Jane-Doe.pdf`), not the filename it was originally uploaded as. The format always matches whatever you actually uploaded — a PDF resume is never converted to DOCX or vice versa.
+- **Download it yourself first** — once a resume is scored for the current job (the Local Match badge next to the resume switcher is visible), a **"⬇ Resume file"** button appears right beside it. Click it to download that exact file — same bytes, same generated name AutoFill would attach — so you can open it and confirm it's the right one before trusting AutoFill on a real form.
+- It works both on plain `<input type="file">` widgets and on drag-and-drop-style uploaders that listen for a drop event instead of a native file selection, and never overwrites a field that already has a file in it.
+
+⚠️ *This is new, untested-in-production code from this session — verify it on your actual target sites (see `docs/smoke-test.md`, step 9b) before relying on it for real applications.*
 
 <p align="center">
-  <img src="screenshots/autofill-form.png" alt="AutoFill in action on a Greenhouse form — panel showing score and action buttons, form fields completed with teal badges" width="900">
+  <img src="screenshots/autofill-form.png" alt="AutoFill in action on a Greenhouse form — panel showing score and action buttons, form fields completed with badges" width="900">
 </p>
-<p align="center"><em>AutoFill in action — form fields completed using your resume and saved Q&A answers. Teal "✦ Autofilled by JobMatch AI" badges mark every filled field after you confirm.</em></p>
+<p align="center"><em>AutoFill in action — form fields completed using your resume and saved Q&A answers, each marked with an "AI" badge.</em></p>
 
 Works with:
 - Standard text inputs and textareas
@@ -340,11 +349,13 @@ Compared to [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), this 
 - **Removed** the Visa & H1B/PERM sponsorship-data feature entirely (sponsorship phrase detection, USCIS/DOL trend charts, H1B history) — `lib/visaPhrases.js` and the H1B data-worker host permission are gone from the manifest, though the unused source files are still present in `lib/`.
 - **Reduced AI providers from ten to one** — only OpenAI is wired up in `aiService.js` and the Settings provider dropdown; the multi-provider registry and per-provider key memory were removed.
 - **Removed the resume cap** — resumes are an unlimited, add/delete list instead of exactly 3 fixed slots.
+- **Removed AutoFill's review/approve gate** — upstream showed a "Review before fill" panel with a checkbox per proposed answer and an explicit "Apply Selected" click before anything was written; this fork writes AI-proposed answers straight into the form and only shows a "Review before submitting" warning afterward. Fields are still marked with an "AI" badge so you can see what was touched.
 - **Added local, zero-AI resume-to-job matching** — auto-selects the best-matching saved resume for the current posting by ATS-keyword overlap (`lib/resumeRanker.js`, `lib/resumeKeywords.js`), and shows an "ATS Keywords by Resume" breakdown on the Profile tab.
 - **Added Google Sheets Sync** — optionally pushes every "Mark as Applied" to a Google Sheet via a self-deployed Apps Script webhook (`docs/sheets-sync/`).
 - **Removed the in-panel Applied Jobs table** — applied jobs are still tracked (for the Stats count and Sheets sync) but no longer have a dedicated browsable tab; the **Applied Jobs** tab was replaced by a **Saved Jobs** tab with a fuller table (score, title, company, location, salary, date, delete).
 - **Added Backup & Restore** and **Q&A Export/Import** — full-setup and Q&A-only JSON export/import from the Settings and Q&A tabs, respectively.
 - **Renamed** the "AI Settings" tab to **Settings** (it now also hosts Google Sheets Sync and Backup & Restore).
+- **Added automatic resume file upload to AutoFill** — attaches the active resume's file (as `Resume_<CandidateName>.<ext>`) to résumé/CV upload widgets, no AI call, plus a manual **"⬇ Resume file"** download button next to the Local Match badge to check the exact file first (see Smart Auto-Fill above). Not yet verified against real ATS forms — test before relying on it.
 
 ---
 
