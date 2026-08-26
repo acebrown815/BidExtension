@@ -1518,12 +1518,16 @@
           <div class="jm-tags" id="jmKeywords"></div>
         </div>
 
-        <!-- Truncation notice -->
+        <!-- Truncation notice. There used to be a second "Your resume was
+             truncated" banner here, but its underlying truncated flag
+             (background.js handleAnalyzeJob) was set by the exact same
+             condition as jdTruncated below it — a copy-paste bug, not a
+             real resume-length check (nothing in the analyze prompt ever
+             truncates the resume). It always fired together with this one
+             and was factually wrong about which text got cut, so it was
+             removed rather than fixed to say something accurate. -->
         <div class="jm-trunc-notice" id="jmTruncNotice">
-          &#9888; Job description was too long and was trimmed — match score may be approximate.
-        </div>
-        <div class="jm-trunc-notice" id="jmResumeTruncNotice">
-          &#9888; Note: Your resume was truncated for analysis. Consider shortening it for better results.
+          &#9888; Job description trimmed (too long) — match score may be approximate.
         </div>
 
         <!-- Cover letter output -->
@@ -2294,7 +2298,7 @@
 
     if (jd === undefined) {
       jd = '';
-      try { jd = extractJobDescription() || ''; } catch (_) { /* extraction can throw on weird pages */ }
+      try { jd = (await getJobDescriptionForAnalysis()) || ''; } catch (_) { /* extraction can throw on weird pages */ }
     }
     if (!jd) { renderSlotSwitcher(); return; }
 
@@ -2347,11 +2351,20 @@
   // (or null) when nothing can be found, so callers can show an error.
 
   /**
-   * Extracts the full job description text from the current page.
-   * Tries site-specific selectors first, then generic heuristics.
-   * @returns {string} The extracted job description text, or '' if not found.
+   * Extracts the full job description text from the current page using only
+   * signals that actually indicate job-description content: a site-specific
+   * selector match, or the largest named content block (main/article/etc.)
+   * over 200 characters. Deliberately has NO last-resort "just grab the
+   * page body" fallback — see extractJobDescription() for that — because
+   * this is also used to decide whether the current page has real JD
+   * content at all (see getJobDescriptionForAnalysis()). A page with no JD
+   * (e.g. an application-form-only step of a multi-step apply flow) should
+   * report that honestly as '' rather than have callers unknowingly treat
+   * the form's own text as the job description.
+   * @returns {string} The extracted job description text, or '' if nothing
+   *   that actually looks like a job description was found.
    */
-  function extractJobDescription() {
+  function extractJobDescriptionConfident() {
     // ATS-specific selectors
     const selectors = [
       // Greenhouse
@@ -2402,9 +2415,70 @@
     }
 
     if (bestBlock && bestLen > 200) return bestBlock;
+    return '';
+  }
 
+  /**
+   * Extracts the full job description text from the current page. Tries
+   * extractJobDescriptionConfident() first; if that finds nothing, falls
+   * back to the page body text so this function's contract (never returns
+   * '' on a non-empty page) is unchanged from before — existing callers
+   * that don't need the tab-cache fallback (or that predate it) keep
+   * working exactly as they did.
+   *
+   * New/updated callers that want the smarter behavior — fall back to the
+   * JD this same TAB saw on an earlier step of the same posting, instead
+   * of scraping whatever's on the current (JD-less) page — should use
+   * getJobDescriptionForAnalysis() instead.
+   * @returns {string} The extracted job description text, or '' if not found.
+   */
+  function extractJobDescription() {
+    const confident = extractJobDescriptionConfident();
+    if (confident) return confident;
     // Last resort: body text
     return document.body.innerText.substring(0, 10000);
+  }
+
+  /**
+   * The JD-extraction entry point for anything that sends the result to the
+   * AI or uses it for resume ranking (Analyze, AutoFill's resume
+   * auto-select, Cover Letter, bullet rewriting). Handles multi-step apply
+   * flows where the application-form step has no visible JD (e.g. Ashby's
+   * .../<id> posting page vs .../<id>/application form page, reached via a
+   * client-side route change — see handleSpaUrlChanged) by falling back to
+   * whatever JD text THIS BROWSER TAB last confidently extracted, cached in
+   * the background service worker (chrome.storage.session, cleared when the
+   * tab closes — see the CACHE_TAB_JD/GET_CACHED_TAB_JD handlers in
+   * background.js).
+   *
+   * On a page WITH real JD content, this caches it (fire-and-forget) for
+   * later steps of the same posting to fall back to, and returns it
+   * directly — no behavior change from extractJobDescription() there. Only
+   * on a page with NO confident JD match does this reach for the tab's
+   * cached JD instead of falling back to page-body text.
+   * @async
+   * @returns {Promise<string>} JD text — confidently extracted, or this
+   *   tab's cached JD, or (only if neither exists) the same page-body
+   *   fallback extractJobDescription() has always used.
+   */
+  async function getJobDescriptionForAnalysis() {
+    const confident = extractJobDescriptionConfident();
+    if (confident) {
+      // Fire-and-forget — don't make the caller wait on the cache write,
+      // and don't let a rejected promise (e.g. extension context torn down
+      // mid-navigation) surface as an unhandled rejection.
+      sendMessage({ type: 'CACHE_TAB_JD', jd: confident, url: window.location.href }).catch(() => {});
+      return confident;
+    }
+    try {
+      const cached = await sendMessage({ type: 'GET_CACHED_TAB_JD' });
+      if (cached && cached.jd) return cached.jd;
+    } catch (_) { /* best-effort — fall through to the page-body fallback below */ }
+    // Nothing confidently extracted here, and nothing cached for this tab
+    // (e.g. the very first page the user opened in this tab has no JD) —
+    // fall back to the same last-resort scrape extractJobDescription() has
+    // always used, so single-page postings are completely unaffected.
+    return extractJobDescription();
   }
 
   /** @returns {string} The job title extracted from the page, or ''. */
@@ -2754,7 +2828,7 @@
     // though the user just explicitly chose one.
     if (!_manualResumeSelection) {
       try {
-        const jdForRanking = extractJobDescription() || '';
+        const jdForRanking = (await getJobDescriptionForAnalysis()) || '';
         if (jdForRanking) {
           const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
           if (resumes.length >= 2) {
@@ -2816,7 +2890,7 @@
     let analysisSucceeded = false;
 
     try {
-      const jd = extractJobDescription();
+      const jd = await getJobDescriptionForAnalysis();
       const title = extractJobTitle();
       const company = extractCompany();
       const location = extractLocation();
@@ -2848,7 +2922,8 @@
         type: 'ANALYZE_JOB',
         jobDescription: jd,
         jobTitle: title,
-        company: company
+        company: company,
+        resumeId: _activeResumeId
       });
 
       // Bail before mutating any UI/storage if the user navigated mid-flight.
@@ -2864,7 +2939,6 @@
 
       // Show truncation notices if text was trimmed
       shadowRoot.getElementById('jmTruncNotice').style.display = response.jdTruncated ? 'block' : 'none';
-      shadowRoot.getElementById('jmResumeTruncNotice').style.display = response.truncated ? 'block' : 'none';
 
       // Show applied, cover letter, bullet rewriter buttons. (jmSaveJob is
       // already visible — showJobMeta() revealed it as soon as the panel
@@ -3282,7 +3356,7 @@
       if (window.__jobMatchDirectFill) {
         try {
           const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
-          const profile = await sendMessage({ type: 'GET_PROFILE' }) || {};
+          const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
           const directResult = await window.__jobMatchDirectFill(qaList, profile);
           directFilled = directResult.filled;
         } catch (_) {}
@@ -3305,7 +3379,8 @@
       console.log('[JobMatch AI] Sending to AI for autofill...');
       const response = await sendMessage({
         type: 'GENERATE_AUTOFILL',
-        formFields: questionsForAI
+        formFields: questionsForAI,
+        resumeId: _activeResumeId
       });
       console.log('[JobMatch AI] AI response received');
 
@@ -3616,7 +3691,7 @@
   async function ensureBestResumeSelected() {
     if (_manualResumeSelection) return;
     try {
-      const jdForRanking = extractJobDescription() || '';
+      const jdForRanking = (await getJobDescriptionForAnalysis()) || '';
       if (!jdForRanking) return;
       const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
       if (resumes.length < 2) return; // nothing to compare against
@@ -3654,7 +3729,7 @@
   async function buildActiveResumeFile() {
     let raw;
     try {
-      raw = await sendMessage({ type: 'GET_RAW_RESUME' });
+      raw = await sendMessage({ type: 'GET_RAW_RESUME', resumeId: _activeResumeId });
     } catch (_) {
       return null;
     }
@@ -3668,7 +3743,7 @@
 
     let candidateName = '';
     try {
-      const profile = await sendMessage({ type: 'GET_PROFILE' });
+      const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
       candidateName = (profile && profile.name) || '';
     } catch (_) { /* fall back to a generic filename below */ }
     const nameSeg = sanitizeFileNameSegment(candidateName);
@@ -4112,7 +4187,8 @@
             const bestOption = await sendMessage({
               type: 'MATCH_DROPDOWN',
               questionText: questionText,
-              options: ref.optionTexts
+              options: ref.optionTexts,
+              resumeId: _activeResumeId
             });
             if (bestOption && bestOption !== 'SKIP' && bestOption !== 'NEEDS_USER_INPUT') {
               fillSelectByText(ref.el, bestOption, ref.optionMap, ref.optionTexts);
@@ -4225,7 +4301,8 @@
       aiChoice = await sendMessage({
         type: 'MATCH_DROPDOWN',
         questionText: questionText,
-        options: optionTexts
+        options: optionTexts,
+        resumeId: _activeResumeId
       });
     } catch (e) {
       document.body.click();
@@ -4583,7 +4660,7 @@
     items.forEach(i => { i.disabled = true; });
 
     try {
-      const profile = await sendMessage({ type: 'GET_PROFILE' });
+      const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
       const result  = await sendMessage({
         type:    'BUILD_COVER_LETTER_FILE',
         format,
@@ -4643,13 +4720,14 @@
     btn.innerHTML = '<span class="jm-spinner"></span> Writing...';
     try {
       if (!currentAnalysis) throw new Error('Analyze the job first.');
-      const jd = extractJobDescription();
+      const jd = await getJobDescriptionForAnalysis();
       // Re-scrape company fresh (cached value may be stale or wrong)
       const freshCompany = extractCompany() || currentAnalysis.company || '';
       const freshTitle = extractJobTitle() || currentAnalysis.title || '';
       const clResult = await sendMessage({
         type: 'GENERATE_COVER_LETTER',
         jobDescription: jd,
+        resumeId: _activeResumeId,
         analysis: {
           matchingSkills: currentAnalysis.matchingSkills,
           matchScore: currentAnalysis.matchScore
@@ -4695,11 +4773,12 @@
     section.style.display = 'block';
     try {
       if (!currentAnalysis) throw new Error('Analyze the job first.');
-      const jd = extractJobDescription();
+      const jd = await getJobDescriptionForAnalysis();
       const bullets = await sendMessage({
         type: 'REWRITE_BULLETS',
         jobDescription: jd,
-        missingSkills: currentAnalysis.missingSkills || []
+        missingSkills: currentAnalysis.missingSkills || [],
+        resumeId: _activeResumeId
       });
 
       if (!Array.isArray(bullets) || bullets.length === 0) {
@@ -4769,7 +4848,7 @@
             refreshBtn.disabled = true;
             refreshBtn.classList.add('jm-spinning');
             try {
-              const jd = extractJobDescription();
+              const jd = await getJobDescriptionForAnalysis();
               const original = item.querySelector('.jm-bullet-before').textContent;
               const currentEdit = item.querySelector('.jm-bullet-after').textContent.trim();
               const bulletSkills = [];
@@ -4873,7 +4952,8 @@
         type: 'GENERATE_TAILORED_RESUME',
         rewrittenBullets,
         customBullets,
-        missingSkills: currentAnalysis.missingSkills || []
+        missingSkills: currentAnalysis.missingSkills || [],
+        resumeId: _activeResumeId
       });
 
       // Build filename: {originalName}_{company or autoId}.docx
@@ -4953,7 +5033,7 @@
     const select = shadowRoot.getElementById('jmAddBulletTarget');
     select.innerHTML = '';
     try {
-      const profile = await sendMessage({ type: 'GET_PROFILE' });
+      const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
       if (profile?.experience) {
         profile.experience.forEach((exp, i) => {
           const opt = document.createElement('option');
@@ -4997,7 +5077,7 @@
     genBtn.textContent = 'Generating...';
 
     try {
-      const jd = extractJobDescription();
+      const jd = await getJobDescriptionForAnalysis();
       const selectedOption = select.options[select.selectedIndex];
       const targetLabel = selectedOption?.textContent || 'Unknown';
 
@@ -5080,7 +5160,7 @@
             type: 'GENERATE_CUSTOM_BULLET',
             description,
             targetRole: targetLabel,
-            jobDescription: extractJobDescription(),
+            jobDescription: await getJobDescriptionForAnalysis(),
             missingSkills: bulletSkills,
             excludedSkills
           });
@@ -5303,7 +5383,7 @@
             let qaList = [], profile = {};
             try {
               qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
-              profile = await sendMessage({ type: 'GET_PROFILE' }) || {};
+              profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
             } catch (_) {}
 
             if (window.__jobMatchDirectFill) {
@@ -5353,7 +5433,7 @@
                 const batchNum = Math.floor(i / BATCH_SIZE) + 1;
                 console.log(`[JobMatch AI] iframe AI batch ${batchNum} (${batch.length} fields)`);
                 try {
-                  const response = await sendMessage({ type: 'GENERATE_AUTOFILL', formFields: batch });
+                  const response = await sendMessage({ type: 'GENERATE_AUTOFILL', formFields: batch, resumeId: _activeResumeId });
                   const answers = Array.isArray(response) ? response : (response.answers || []);
                   const { filled } = await fillFormFromAnswers(answers);
                   totalFilled += filled;
@@ -5361,7 +5441,7 @@
                   console.warn(`[JobMatch AI] iframe AI batch ${batchNum} failed: ${batchErr.message}. Retrying per field...`);
                   for (const field of batch) {
                     try {
-                      const resp = await sendMessage({ type: 'GENERATE_AUTOFILL', formFields: [field] });
+                      const resp = await sendMessage({ type: 'GENERATE_AUTOFILL', formFields: [field], resumeId: _activeResumeId });
                       const ans = Array.isArray(resp) ? resp : (resp.answers || []);
                       const { filled } = await fillFormFromAnswers(ans);
                       totalFilled += filled;
@@ -5411,7 +5491,7 @@
       if (autofillBtn) { autofillBtn.innerHTML = 'AutoFill Application'; autofillBtn.onclick = null; }
       [
         'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
-        'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice', 'jmResumeTruncNotice',
+        'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice',
         'jmAutofillWarning', 'jmCoverLetterSection', 'jmBulletSection',
         'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn'
       ].forEach(id => {

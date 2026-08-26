@@ -222,6 +222,20 @@ JobMatch AI works on any website with a job posting. It has dedicated extraction
 
 On SPAs like LinkedIn and Indeed, the extension detects navigation between job postings and resets the panel state automatically — no page reload needed.
 
+### Multi-Step Application Flows
+
+Some job boards split the posting and the application form across two URLs of the same SPA — for example Ashby: `jobs.ashbyhq.com/<company>/<id>` is the job description, `jobs.ashbyhq.com/<company>/<id>/application` is the form, reached via a client-side route change with no JD content of its own on the page. Since that route change still resets the panel (new URL → "new job" as far as the panel's state goes — Analyze/Cover Letter/Mark Applied all reset and need re-running), Analyze or AutoFill run directly on the application step would previously have nothing real to work with there.
+
+To fix this, the extension caches the last confidently-extracted job description **per browser tab** (in the background service worker's session storage — memory-only, cleared when you close that tab, never written to disk) whenever it finds one on a page. On a page with no real JD content, Analyze, AutoFill's resume auto-select/file-attach, Cover Letter, and bullet rewriting all fall back to that tab's cached JD instead of scraping the application form's own text as if it were the job description. A tab that's never seen a JD (e.g. you opened the application URL directly) behaves exactly as before — no cached JD to fall back to.
+
+### Multi-Tab Resume Isolation
+
+Analyzing or auto-filling several job tabs at once is safe: which resume's profile and file bytes get used for AI calls (Analyze, AutoFill, Cover Letter, bullet rewriting) and file attachment is now resolved per-request from the tab's own auto-selected (or manually chosen) resume ID, not from a single shared "currently active resume" value. Previously that shared value lived in one flat storage key written by every tab's silent best-match auto-selection — two tabs open on jobs that favor different resumes at the same time could race and briefly cause one tab to generate content, or attach a file, from the *other* tab's resume while its own panel still showed the correct one selected. Each tab's request now always carries its own resume ID, so this can no longer happen regardless of how many tabs are analyzing concurrently.
+
+⚠️ *This is also new, untested-in-production code from this session.*
+
+⚠️ *This is also new, untested-in-production code from this session.*
+
 ---
 
 ## AI Provider — Your Key, Your Data
@@ -356,6 +370,8 @@ Compared to [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), this 
 - **Added Backup & Restore** and **Q&A Export/Import** — full-setup and Q&A-only JSON export/import from the Settings and Q&A tabs, respectively.
 - **Renamed** the "AI Settings" tab to **Settings** (it now also hosts Google Sheets Sync and Backup & Restore).
 - **Added automatic resume file upload to AutoFill** — attaches the active resume's file (as `Resume_<CandidateName>.<ext>`) to résumé/CV upload widgets, no AI call, plus a manual **"⬇ Resume file"** download button next to the Local Match badge to check the exact file first (see Smart Auto-Fill above). Not yet verified against real ATS forms — test before relying on it.
+- **Added a per-tab job description cache** so multi-step application flows (a JD page and a separate application-form page on the same site, e.g. Ashby) don't lose the real job description when you navigate between them — see Multi-Step Application Flows above. Not yet verified against real ATS forms — test before relying on it.
+- **Made concurrent multi-tab analysis/AutoFill resume-safe** — resume profile/file lookups for AI calls and file attachment are now resolved per-request by resume ID instead of through a single shared "active resume" value, so analyzing several job tabs at once (each auto-selecting a different best-match resume) can no longer cross-contaminate which resume's data one tab uses — see Multi-Tab Resume Isolation above. Not yet verified against real ATS forms — test before relying on it.
 
 ---
 

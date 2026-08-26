@@ -139,6 +139,56 @@ async function getProfile() {
 }
 
 /**
+ * Same as getProfile() but resolves one SPECIFIC resume's profile by id
+ * (looked up in the `resumes` array) instead of the flat "currently active"
+ * singleton keys.
+ *
+ * Why this exists: `profile`/`activeResumeId`/`rawResumeBase64` are single
+ * flat keys shared across every open tab. If two tabs are analyzing or
+ * auto-filling different jobs at the same time and each silently
+ * auto-selects a different best-matching resume (see ensureBestResumeSelected
+ * in content.js), their switchSlot() writes race — whichever tab's write
+ * lands last "wins" for every other tab's NEXT AI call or file read, even
+ * though each tab's panel still shows its own resume as selected. Passing
+ * resumeId (each content script's own tab-local _activeResumeId) makes every
+ * AI call and file read tab-scoped and immune to that race. Falls back to
+ * the flat singleton when no resumeId is supplied (e.g. profile.html, or a
+ * caller written before this existed) or when the id isn't found.
+ *
+ * @async
+ * @param {string|null|undefined} resumeId
+ * @returns {Promise<Object|null>}
+ */
+async function getProfileForResume(resumeId) {
+  if (resumeId) {
+    const { resumes = [] } = await chrome.storage.local.get('resumes');
+    const target = resumes.find(r => r.id === resumeId);
+    if (target && target.profile) return target.profile;
+  }
+  return getProfile();
+}
+
+/**
+ * Same idea as getProfileForResume() but for the raw resume file bytes used
+ * to attach to file-upload widgets and to edit DOCX tailored resumes.
+ *
+ * @async
+ * @param {string|null|undefined} resumeId
+ * @returns {Promise<{rawResumeBase64: string|null, resumeFileType: string|null}>}
+ */
+async function getRawResumeForResume(resumeId) {
+  if (resumeId) {
+    const { resumes = [] } = await chrome.storage.local.get('resumes');
+    const target = resumes.find(r => r.id === resumeId);
+    if (target) {
+      return { rawResumeBase64: target.rawResumeBase64 || null, resumeFileType: target.resumeFileType || null };
+    }
+  }
+  const data = await chrome.storage.local.get(['rawResumeBase64', 'resumeFileType']);
+  return { rawResumeBase64: data.rawResumeBase64 || null, resumeFileType: data.resumeFileType || null };
+}
+
+/**
  * Retrieves the user's custom Q&A list from local storage.
  *
  * The Q&A list is an array of { question, answer } pairs that the user has
@@ -249,11 +299,11 @@ async function handleParseResume(rawText) {
  * @throws {Error} If no API key is configured or no profile has been uploaded.
  * @returns {Promise<Object>} Analysis object including score, gaps, highlights, etc.
  */
-async function handleAnalyzeJob(jobDescription, jobTitle, company) {
+async function handleAnalyzeJob(jobDescription, jobTitle, company, resumeId) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error('No API key configured. Go to Profile → Settings.');
 
-  const profile = await getProfile();
+  const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
   // Truncate long job descriptions to avoid exceeding model context windows.
@@ -270,9 +320,13 @@ async function handleAnalyzeJob(jobDescription, jobTitle, company) {
     temperature: 0 // Analysis should be fully deterministic — no creative variation
   });
   const parsed = parseJSONResponse(result);
-  // Annotate the result so the UI can inform the user that analysis was partial
+  // Annotate the result so the UI can inform the user that analysis was partial.
+  // (There used to be a second `parsed.truncated = true` line here, under
+  // this exact same condition — a copy-paste duplicate of jdTruncated, not
+  // an actual resume-length check. Nothing in buildJobAnalysisPrompt()
+  // truncates the resume, so it was mislabeled and always fired alongside
+  // this flag. Removed rather than kept as dead/misleading data.)
   if (jobDescription.length > maxLen) parsed.jdTruncated = true;
-  if (jobDescription.length > maxLen) parsed.truncated = true;
   return parsed;
 }
 
@@ -289,11 +343,11 @@ async function handleAnalyzeJob(jobDescription, jobTitle, company) {
  * @throws {Error} If no API key is configured or no profile has been uploaded.
  * @returns {Promise<Object>} Map of field identifiers to suggested fill values.
  */
-async function handleGenerateAutofill(formFields) {
+async function handleGenerateAutofill(formFields, resumeId) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error('No API key configured. Go to Profile → Settings.');
 
-  const profile = await getProfile();
+  const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
   const qaList = await getQAList();
@@ -328,8 +382,8 @@ async function handleGenerateAutofill(formFields) {
  * @returns {Promise<string|null>}
  *   The matched option string, or null if neither stage produced a valid match.
  */
-async function handleMatchDropdown(questionText, options) {
-  const profile = await getProfile();
+async function handleMatchDropdown(questionText, options, resumeId) {
+  const profile = await getProfileForResume(resumeId);
   const qaList = await getQAList();
 
   // ── Stage 1: Try deterministic matching FIRST (no AI call) ──────────────
@@ -706,10 +760,10 @@ async function handleTestSheetsSync() {
  * @throws {Error} If no API key is configured or no profile has been uploaded.
  * @returns {Promise<string>} The generated cover letter as a plain text string.
  */
-async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta) {
+async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta, resumeId) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error('No API key configured. Go to Settings.');
-  const profile = await getProfile();
+  const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
   // Cover letter prompts are verbose; use a smaller truncation limit than
@@ -752,10 +806,10 @@ async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta) {
  * @returns {Promise<Object>} Structured object containing rewritten bullet arrays
  *   keyed by experience entry.
  */
-async function handleRewriteBullets(jobDescription, missingSkills) {
+async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
   const settings = await getSettings();
   if (!settings.apiKey) throw new Error('No API key configured. Go to Settings.');
-  const profile = await getProfile();
+  const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
   // Guard: ensure the profile has at least one experience entry with a real
@@ -799,11 +853,11 @@ async function handleRewriteBullets(jobDescription, missingSkills) {
  * @param {Array}    [customBullets]  - Array of {text, targetSection, targetIdx} for new bullets.
  * @returns {Promise<{base64: string, replacedCount: number, totalBullets: number, insertedCount: number}>}
  */
-async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets) {
-  const profile = await getProfile();
+async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets, resumeId) {
+  const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
-  const { rawResumeBase64, resumeFileType } = await chrome.storage.local.get(['rawResumeBase64', 'resumeFileType']);
+  const { rawResumeBase64, resumeFileType } = await getRawResumeForResume(resumeId);
   if (!rawResumeBase64 || resumeFileType !== 'docx') {
     throw new Error('DOCX_REQUIRED');
   }
@@ -1187,11 +1241,11 @@ const handlers = {
 
   'PARSE_RESUME': (msg) => handleParseResume(msg.rawText),
 
-  'ANALYZE_JOB': (msg) => handleAnalyzeJob(msg.jobDescription, msg.jobTitle, msg.company),
+  'ANALYZE_JOB': (msg) => handleAnalyzeJob(msg.jobDescription, msg.jobTitle, msg.company, msg.resumeId),
 
-  'GENERATE_AUTOFILL': (msg) => handleGenerateAutofill(msg.formFields),
+  'GENERATE_AUTOFILL': (msg) => handleGenerateAutofill(msg.formFields, msg.resumeId),
 
-  'MATCH_DROPDOWN': (msg) => handleMatchDropdown(msg.questionText, msg.options),
+  'MATCH_DROPDOWN': (msg) => handleMatchDropdown(msg.questionText, msg.options, msg.resumeId),
 
   // ── Storage operations ─────────────────────────────────────────────────
   // Direct reads and writes to chrome.storage.local; no AI calls involved.
@@ -1201,7 +1255,7 @@ const handlers = {
     return { success: true };
   },
 
-  'GET_PROFILE': (msg) => getProfile(),
+  'GET_PROFILE': (msg) => getProfileForResume(msg && msg.resumeId),
 
   'SAVE_SETTINGS': async (msg) => {
     await chrome.storage.local.set({ aiSettings: msg.settings });
@@ -1242,10 +1296,10 @@ const handlers = {
 
   'GET_SAVED_JOBS': (msg) => getSavedJobs(),
 
-  'GENERATE_COVER_LETTER': (msg) => handleGenerateCoverLetter(msg.jobDescription, msg.analysis, msg.jobMeta),
+  'GENERATE_COVER_LETTER': (msg) => handleGenerateCoverLetter(msg.jobDescription, msg.analysis, msg.jobMeta, msg.resumeId),
   'BUILD_COVER_LETTER_FILE': (msg) => handleBuildCoverLetterFile(msg),
 
-  'REWRITE_BULLETS': (msg) => handleRewriteBullets(msg.jobDescription, msg.missingSkills),
+  'REWRITE_BULLETS': (msg) => handleRewriteBullets(msg.jobDescription, msg.missingSkills, msg.resumeId),
 
   'REWRITE_SINGLE_BULLET': async (msg) => {
     const settings = await getSettings();
@@ -1259,7 +1313,7 @@ const handlers = {
     return result.trim();
   },
 
-  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets),
+  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets, msg.resumeId),
 
   'GENERATE_CUSTOM_BULLET': async (msg) => {
     const settings = await getSettings();
@@ -1285,9 +1339,9 @@ const handlers = {
     return { success: true };
   },
 
-  'GET_RAW_RESUME': async () => {
-    const data = await chrome.storage.local.get(['rawResumeBase64', 'resumeFileType']);
-    return { rawResumeBase64: data.rawResumeBase64 || null, fileType: data.resumeFileType || null };
+  'GET_RAW_RESUME': async (msg) => {
+    const { rawResumeBase64, resumeFileType } = await getRawResumeForResume(msg && msg.resumeId);
+    return { rawResumeBase64, fileType: resumeFileType };
   },
 
   'MARK_APPLIED': (msg) => handleMarkApplied(msg.jobData),
@@ -1328,7 +1382,47 @@ const handlers = {
     }
     return { filled: totalFilled };
   },
+
+  // ── Per-tab job description cache ───────────────────────────────────────
+  // Some job boards (e.g. Ashby: jobs.ashbyhq.com/<company>/<id> for the
+  // posting, .../<id>/application for the form) route the application form
+  // to a separate SPA step of the same posting. content.js's job-description
+  // extraction only recognizes real JD content — a confident selector match,
+  // not just any large text block — so on a page with no JD content (like an
+  // application-only form step) it comes back empty instead of scraping the
+  // form's own text. These two handlers let content.js stash the JD text
+  // once it's confidently extracted on the posting step, keyed by tab id, so
+  // a later step of the SAME posting in the SAME tab can fall back to it
+  // instead of analyzing/autofilling against nothing. chrome.storage.session
+  // is in-memory-only (never touches disk, cleared on browser restart) and
+  // survives service-worker restarts, unlike a plain module-level variable
+  // here would. Explicitly cleaned up on tab close below so the cache never
+  // outlives the tab it was captured in.
+  'CACHE_TAB_JD': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (!tabId || !msg.jd) return { cached: false };
+    await chrome.storage.session.set({
+      [`tabJD_${tabId}`]: { jd: msg.jd, url: msg.url || '', savedAt: Date.now() }
+    });
+    return { cached: true };
+  },
+
+  'GET_CACHED_TAB_JD': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (!tabId) return null;
+    const key = `tabJD_${tabId}`;
+    const result = await chrome.storage.session.get(key);
+    return result[key] || null;
+  },
 };
+
+// Drop a tab's cached job description as soon as the tab itself closes —
+// "unless we close the tab, the job description isn't lost" is the whole
+// point of this cache, so it shouldn't quietly persist (even in
+// memory-only session storage) past that point.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove(`tabJD_${tabId}`).catch(() => {});
+});
 
 /**
  * Routes an incoming extension message to the appropriate handler function
@@ -1353,7 +1447,7 @@ const handlers = {
 async function handleMessage(message, sender) {
   const handler = handlers[message.type];
   if (!handler) throw new Error(`Unknown message type: ${message.type}`);
-  return handler(message);
+  return handler(message, sender);
 }
 
 /**

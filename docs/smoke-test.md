@@ -48,6 +48,31 @@ the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
 14. **Cross-site** — visit a non-job page (e.g. github.com). Open DevTools
     console. Confirm no `[JobMatch AI]` logs leak. Confirm panel doesn't
     auto-open or auto-fill anything.
+15. **Multi-step apply flow (Ashby)** — open an Ashby job posting
+    (`jobs.ashbyhq.com/<company>/<id>`), click **Analyze Job**, let it
+    finish. Click through to the application step
+    (`.../<id>/application`). Panel resets ("New job detected") — expected.
+    Click **Analyze Job** again on the application step: score should
+    match the posting step's real content, NOT read like an analysis of
+    the application form itself (garbled skills, no real job context).
+    Click **AutoFill Application**: the Local Match badge / resume
+    auto-select and any AI-filled text should reflect the real job, not
+    the form page. Open a **new tab**, go straight to the `/application`
+    URL without visiting the posting URL first in that tab — Analyze
+    should show "Could not find a job description" (no tab cache to fall
+    back to yet) rather than silently analyzing the form.
+16. **Concurrent multi-tab resume isolation** — requires two saved resumes
+    that clearly score differently against two different jobs (e.g. a
+    "Backend" resume and a "Data" resume). Open Job A (best match: Resume 1)
+    in one tab and Job B (best match: Resume 2) in another. Click **Analyze
+    Job** in both tabs within a few seconds of each other (switch fast —
+    don't wait for one to finish before starting the other). In each tab,
+    confirm the Local Match badge shows *that tab's own* best-matching
+    resume, and the analysis/AutoFill answers reflect that resume's
+    background, not the other tab's. Click **AutoFill Application** in both
+    tabs back-to-back and confirm the résumé file each tab attaches (or the
+    "⬇ Resume file" download) matches its own selected resume, not
+    whichever tab finished switching last.
 
 ## Per-site sanity checks (do at least one of each per batch)
 
