@@ -30,9 +30,21 @@ import {
   extractJDKeywords as mjsExtractJDKeywords,
   jdKeywordWeight as mjsJdKeywordWeight,
   resumeDepthMultiplier as mjsResumeDepthMultiplier,
+  extractRequiredSectionText as mjsExtractRequiredSectionText,
+  REQUIRED_SECTION_WEIGHT_MULTIPLIER as mjsRequiredSectionWeightMultiplier,
+  isHighValueCategoryTerm as mjsIsHighValueCategoryTerm,
+  CATEGORY_WEIGHT_MULTIPLIER as mjsCategoryWeightMultiplier,
+  detectSeniorityTier as mjsDetectSeniorityTier,
+  seniorityAlignmentMultiplier as mjsSeniorityAlignmentMultiplier,
+  SENIORITY_MATCH_BONUS as mjsSeniorityMatchBonus,
+  SENIORITY_MISMATCH_PENALTY as mjsSeniorityMismatchPenalty,
 } from '../../lib/resumeRanker.mjs';
 
-let jsRank, jsScore, jsExtractJDKeywords, jsJdKeywordWeight, jsResumeDepthMultiplier;
+let jsRank, jsScore, jsExtractJDKeywords, jsJdKeywordWeight, jsResumeDepthMultiplier,
+  jsExtractRequiredSectionText, jsRequiredSectionWeightMultiplier,
+  jsIsHighValueCategoryTerm, jsCategoryWeightMultiplier,
+  jsDetectSeniorityTier, jsSeniorityAlignmentMultiplier,
+  jsSeniorityMatchBonus, jsSeniorityMismatchPenalty;
 beforeAll(async () => {
   // resumeRanker.js reads globalThis.JMResumeKeywords at load time (to
   // build its own extractAtsKeywords reference) — it MUST be imported
@@ -45,6 +57,14 @@ beforeAll(async () => {
   jsExtractJDKeywords = globalThis.JMResumeRanker.extractJDKeywords;
   jsJdKeywordWeight = globalThis.JMResumeRanker.jdKeywordWeight;
   jsResumeDepthMultiplier = globalThis.JMResumeRanker.resumeDepthMultiplier;
+  jsExtractRequiredSectionText = globalThis.JMResumeRanker.extractRequiredSectionText;
+  jsRequiredSectionWeightMultiplier = globalThis.JMResumeRanker.REQUIRED_SECTION_WEIGHT_MULTIPLIER;
+  jsIsHighValueCategoryTerm = globalThis.JMResumeRanker.isHighValueCategoryTerm;
+  jsCategoryWeightMultiplier = globalThis.JMResumeRanker.CATEGORY_WEIGHT_MULTIPLIER;
+  jsDetectSeniorityTier = globalThis.JMResumeRanker.detectSeniorityTier;
+  jsSeniorityAlignmentMultiplier = globalThis.JMResumeRanker.seniorityAlignmentMultiplier;
+  jsSeniorityMatchBonus = globalThis.JMResumeRanker.SENIORITY_MATCH_BONUS;
+  jsSeniorityMismatchPenalty = globalThis.JMResumeRanker.SENIORITY_MISMATCH_PENALTY;
 });
 
 // A JD whose own ATS keywords (per the resume vocabulary below) are:
@@ -106,15 +126,18 @@ describe('rankResumes', () => {
   it('gives each resume a score reflecting its weighted fraction of the 7 JD keywords', () => {
     const ranked = jsRank(jd, [backendResume, frontendResume]);
     const byId = Object.fromEntries(ranked.map(r => [r.id, r.score]));
-    // Every keyword here is mentioned once in the JD (weight 1) and listed
-    // once in each resume (depth multiplier 1.0, not the 1.15 max) — so
-    // each resume's score is its keyword count divided by (7 * 1.15), not
-    // a clean N/7: coverage alone caps below 100%, by design (see the
-    // "resume-depth weighting" describe block below for why).
-    // backend covers python/kubernetes/postgresql/aws/docker = 5 of 7.
-    expect(byId.r1).toBeCloseTo(5 / (7 * 1.15), 5);
-    // frontend covers react/graphql = 2 of 7.
-    expect(byId.r2).toBeCloseTo(2 / (7 * 1.15), 5);
+    // Every keyword here is mentioned once in the JD and listed once in
+    // each resume (depth multiplier 1.0, not the 1.15 max). Five of the
+    // seven keywords — python, kubernetes, postgresql, aws, docker — are
+    // also programming-language/database/cloud category terms (see
+    // HIGH_VALUE_CATEGORY_TERMS), so each carries weight 2 instead of 1;
+    // react and graphql aren't in that list and stay at weight 1. Total JD
+    // weight = 5*2 + 2*1 = 12, not a clean 7 — coverage alone caps below
+    // 100% regardless (see the "resume-depth weighting" describe block).
+    // backend covers all five weight-2 keywords: (2*5)/(12*1.15).
+    expect(byId.r1).toBeCloseTo(10 / (12 * 1.15), 5);
+    // frontend covers only the two weight-1 keywords: (1*2)/(12*1.15).
+    expect(byId.r2).toBeCloseTo(2 / (12 * 1.15), 5);
   });
 
   it('handles resumes with empty or missing skills without throwing', () => {
@@ -198,19 +221,160 @@ describe('rankResumes', () => {
 });
 
 describe('jdKeywordWeight', () => {
+  // These tests use deliberately non-category terms (figma, excel) so they
+  // stay focused on pure repetition-counting, isolated from the category
+  // boost — see the dedicated 'jdKeywordWeight — category weighting'
+  // describe block below for python/aws/etc.-specific behavior.
   it('weighs a keyword by how many times it appears in the JD text', () => {
-    const text = 'python python python experience required, plus some sql';
-    expect(jsJdKeywordWeight(text, 'python')).toBe(3);
-    expect(jsJdKeywordWeight(text, 'sql')).toBe(1);
+    const text = 'figma figma figma experience required, plus some excel';
+    expect(jsJdKeywordWeight(text, 'figma')).toBe(3);
+    expect(jsJdKeywordWeight(text, 'excel')).toBe(1);
   });
 
   it('caps the weight so one very-repeated word cannot dominate', () => {
-    const text = 'react react react react react react react react';
-    expect(jsJdKeywordWeight(text, 'react')).toBe(5); // JD_TERM_WEIGHT_CAP
+    const text = 'figma figma figma figma figma figma figma figma';
+    expect(jsJdKeywordWeight(text, 'figma')).toBe(5); // JD_TERM_WEIGHT_CAP
   });
 
   it('floors at 1 even if somehow asked about a term not actually present', () => {
-    expect(jsJdKeywordWeight('go and rust', 'python')).toBe(1);
+    expect(jsJdKeywordWeight('go and rust', 'excel')).toBe(1);
+  });
+
+  it('doubles the weight when the keyword is also in the required section text', () => {
+    const text = 'figma experience wanted';
+    expect(jsJdKeywordWeight(text, 'figma', 'figma experience wanted')).toBe(2);
+  });
+
+  it('does not boost when requiredTextLower is omitted or empty', () => {
+    const text = 'figma figma experience';
+    expect(jsJdKeywordWeight(text, 'figma')).toBe(2);
+    expect(jsJdKeywordWeight(text, 'figma', '')).toBe(2);
+  });
+
+  it('applies the required-section boost after the repetition cap, not before', () => {
+    const text = 'figma figma figma figma figma figma figma figma';
+    // capped repetition weight is 5 (JD_TERM_WEIGHT_CAP), boost doubles that to 10
+    expect(jsJdKeywordWeight(text, 'figma', 'figma is required')).toBe(10);
+  });
+});
+
+describe('jdKeywordWeight — category weighting (programming language / database / cloud / AI)', () => {
+  it('doubles the weight for a programming language term', () => {
+    expect(jsJdKeywordWeight('python experience needed', 'python')).toBe(2);
+  });
+
+  it('doubles the weight for a database term', () => {
+    expect(jsJdKeywordWeight('postgresql experience needed', 'postgresql')).toBe(2);
+  });
+
+  it('doubles the weight for a cloud platform term', () => {
+    expect(jsJdKeywordWeight('aws experience needed', 'aws')).toBe(2);
+  });
+
+  it('doubles the weight for an AI/ML term', () => {
+    expect(jsJdKeywordWeight('machine learning experience needed', 'machine learning')).toBe(2);
+  });
+
+  it('does not boost a term outside the curated category list', () => {
+    expect(jsJdKeywordWeight('figma experience needed', 'figma')).toBe(1);
+  });
+
+  it('stacks with the required-section boost rather than replacing it', () => {
+    const text = 'python experience wanted';
+    // base 1 (mentioned once) * required-section x2 * category x2 = 4
+    expect(jsJdKeywordWeight(text, 'python', text)).toBe(4);
+  });
+
+  it('matches a multi-word resume vocabulary term via whole-word containment', () => {
+    // "aws certified solutions architect" isn't itself in the curated list,
+    // but it contains "aws" as a whole word — see isHighValueCategoryTerm().
+    expect(jsJdKeywordWeight('aws certified solutions architect required', 'aws certified solutions architect')).toBe(2);
+  });
+
+  it('does not false-positive match "ai" inside an unrelated word', () => {
+    expect(jsJdKeywordWeight('email domain experience', 'email')).toBe(1);
+    expect(jsJdKeywordWeight('email domain experience', 'domain')).toBe(1);
+  });
+
+  it('the floor of 1 still gets the category boost for a high-value term not actually present', () => {
+    // Defensive-floor edge case (real callers only ever ask about JD
+    // keywords already confirmed present in the text) — documented here as
+    // a natural consequence of the category check being independent of
+    // repetition count.
+    expect(jsJdKeywordWeight('go and rust', 'python')).toBe(2);
+  });
+});
+
+describe('rankResumes — category weighting', () => {
+  it('a resume matching a category keyword (Python) outranks one matching an equal-mention non-category keyword (Figma), at equal mention counts', () => {
+    const jd = 'Looking for someone with Python and Figma experience.';
+    const pythonDev = { id: 'py', name: 'Python', profile: { skills: ['Python'] } };
+    const figmaDesigner = { id: 'fg', name: 'Figma', profile: { skills: ['Figma'] } };
+    const ranked = jsRank(jd, [pythonDev, figmaDesigner]);
+    const byId = Object.fromEntries(ranked.map(r => [r.id, r.score]));
+    // Both keywords mentioned once in the raw JD text with no section
+    // headers — with no category weighting these would score identically.
+    // python (category weight 2) clearly outweighs figma (weight 1).
+    expect(byId.py).toBeGreaterThan(byId.fg);
+    expect(byId.py).toBeCloseTo(2 / (3 * 1.15), 5);
+    expect(byId.fg).toBeCloseTo(1 / (3 * 1.15), 5);
+  });
+});
+
+describe('extractRequiredSectionText', () => {
+  it('captures text under a Requirements/Qualifications-style header', () => {
+    const jd = [
+      'We are looking for a Backend Engineer.',
+      '',
+      'Requirements:',
+      '- 5+ years of Python experience',
+      '- Strong AWS knowledge',
+      '',
+      'Nice to Have:',
+      '- Kubernetes',
+      '',
+      'About Us:',
+      'We use React internally.',
+    ].join('\n');
+    const required = jsExtractRequiredSectionText(jd);
+    expect(required).toContain('Python');
+    expect(required).toContain('AWS');
+    expect(required).not.toContain('Kubernetes');
+    expect(required).not.toContain('React');
+  });
+
+  it('treats "Preferred Qualifications" as non-required even though it contains "qualifications"', () => {
+    const jd = [
+      'Preferred Qualifications:',
+      '- Rust',
+      '- GraphQL',
+      '',
+      'Required Qualifications:',
+      '- Python',
+      '- AWS',
+    ].join('\n');
+    const required = jsExtractRequiredSectionText(jd);
+    expect(required).not.toContain('Rust');
+    expect(required).not.toContain('GraphQL');
+    expect(required).toContain('Python');
+    expect(required).toContain('AWS');
+  });
+
+  it('returns "" for a JD with no section headers at all', () => {
+    const jd = 'We need a Python engineer with AWS and Docker experience for our growing team.';
+    expect(jsExtractRequiredSectionText(jd)).toBe('');
+  });
+
+  it('does not mistake a sentence merely containing a trigger word for a header', () => {
+    const jd = 'Deep Python knowledge required. Some Docker experience is nice to have.';
+    // Neither line is a short, standalone header line, so no section is detected.
+    expect(jsExtractRequiredSectionText(jd)).toBe('');
+  });
+
+  it('handles empty/null/undefined input without throwing', () => {
+    expect(jsExtractRequiredSectionText('')).toBe('');
+    expect(jsExtractRequiredSectionText(null)).toBe('');
+    expect(jsExtractRequiredSectionText(undefined)).toBe('');
   });
 });
 
@@ -257,6 +421,29 @@ describe('rankResumes — JD-emphasis weighting', () => {
     const resume = { id: 'r', name: 'R', profile: { skills: ['Python'] } };
     // No 3rd argument — matches the pre-weighting call signature.
     expect(jsScore(resume, jdKeywords)).toBeCloseTo(1 / (2 * 1.15), 5);
+  });
+
+  it('a resume matching a Requirements-section keyword outranks one matching only a Nice-to-Have keyword, even at equal mention counts', () => {
+    const jd = [
+      'Backend Engineer',
+      '',
+      'Requirements:',
+      '- Python',
+      '',
+      'Nice to Have:',
+      '- Docker',
+    ].join('\n');
+    const pythonDev = { id: 'py', name: 'Python', profile: { skills: ['Python'] } };
+    const dockerDev = { id: 'dk', name: 'Docker', profile: { skills: ['Docker'] } };
+    const ranked = jsRank(jd, [pythonDev, dockerDev]);
+    const byId = Object.fromEntries(ranked.map(r => [r.id, r.score]));
+    // Both keywords are mentioned once in the raw JD text — with no
+    // required-section weighting these would score identically. With it,
+    // python (in Requirements, weight 1*2=2) clearly outweighs docker
+    // (in Nice to Have, weight 1).
+    expect(byId.py).toBeGreaterThan(byId.dk);
+    expect(byId.py).toBeCloseTo(2 / (3 * 1.15), 5);
+    expect(byId.dk).toBeCloseTo(1 / (3 * 1.15), 5);
   });
 });
 
@@ -312,6 +499,134 @@ describe('rankResumes — resume-depth weighting', () => {
   });
 });
 
+describe('detectSeniorityTier', () => {
+  it('detects each tier from representative title wording', () => {
+    expect(jsDetectSeniorityTier('Director of Engineering')).toBe(4);
+    expect(jsDetectSeniorityTier('VP of Product')).toBe(4);
+    expect(jsDetectSeniorityTier('Staff Software Engineer')).toBe(3);
+    expect(jsDetectSeniorityTier('Principal Engineer')).toBe(3);
+    expect(jsDetectSeniorityTier('Senior Backend Engineer')).toBe(2);
+    expect(jsDetectSeniorityTier('Mid-Level Engineer')).toBe(1);
+    expect(jsDetectSeniorityTier('Junior Software Engineer')).toBe(0);
+    expect(jsDetectSeniorityTier('Software Engineering Intern')).toBe(0);
+  });
+
+  it('prefers the more specific/senior tier when a title contains both words', () => {
+    // "Senior Staff Engineer" is checked against the STAFF phrases before
+    // SENIOR, so it resolves to STAFF (3), not SENIOR (2).
+    expect(jsDetectSeniorityTier('Senior Staff Engineer')).toBe(3);
+  });
+
+  it('returns null for a title with no recognizable seniority wording', () => {
+    expect(jsDetectSeniorityTier('Software Engineer')).toBeNull();
+    expect(jsDetectSeniorityTier('Full Stack Developer')).toBeNull();
+  });
+
+  it('returns null for missing/blank input', () => {
+    expect(jsDetectSeniorityTier('')).toBeNull();
+    expect(jsDetectSeniorityTier(undefined)).toBeNull();
+    expect(jsDetectSeniorityTier(null)).toBeNull();
+  });
+
+  it('is case-insensitive', () => {
+    expect(jsDetectSeniorityTier('SENIOR ENGINEER')).toBe(2);
+  });
+
+  it('matches whole words only, so "sr" does not match inside an unrelated word', () => {
+    // "disruptive" contains the literal substring "sr" — this only stays
+    // null if the boundary check is real, not a naive .includes().
+    expect(jsDetectSeniorityTier('Disruptive Technology Engineer')).toBeNull();
+  });
+});
+
+describe('seniorityAlignmentMultiplier', () => {
+  const seniorResume = {
+    profile: { experience: [{ title: 'Senior Backend Engineer' }, { title: 'Software Engineer' }] },
+  };
+  const juniorResume = {
+    profile: { experience: [{ title: 'Junior Software Engineer' }] },
+  };
+  const directorResume = {
+    profile: { experience: [{ title: 'Director of Engineering' }] },
+  };
+  const noLevelResume = {
+    profile: { experience: [{ title: 'Software Engineer' }] },
+  };
+  const noExperienceResume = { profile: {} };
+
+  it('gives the bonus when the JD title and the most recent role match tiers exactly', () => {
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', seniorResume)).toBe(jsSeniorityMatchBonus);
+  });
+
+  it('stays neutral when tiers are one apart', () => {
+    // Senior (2) vs. Staff (3) — one tier apart.
+    expect(jsSeniorityAlignmentMultiplier('Staff Engineer', seniorResume)).toBe(1);
+  });
+
+  it('applies the penalty when tiers are two or more apart', () => {
+    // Junior (0) vs. Director (4).
+    expect(jsSeniorityAlignmentMultiplier('Director of Engineering', juniorResume)).toBe(jsSeniorityMismatchPenalty);
+    expect(jsSeniorityAlignmentMultiplier('Junior Software Engineer', directorResume)).toBe(jsSeniorityMismatchPenalty);
+  });
+
+  it('stays neutral when the JD title has no recognizable seniority level', () => {
+    expect(jsSeniorityAlignmentMultiplier('Software Engineer', juniorResume)).toBe(1);
+  });
+
+  it('stays neutral when the resume\'s most recent title has no recognizable seniority level', () => {
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', noLevelResume)).toBe(1);
+  });
+
+  it('stays neutral when the resume has no experience entries at all', () => {
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', noExperienceResume)).toBe(1);
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', {})).toBe(1);
+  });
+
+  it('uses only the most recent (first) experience entry, not older ones', () => {
+    // seniorResume's most recent title is "Senior Backend Engineer" (tier
+    // 2); its second, older entry is a plain "Software Engineer" (no
+    // tier) — the multiplier must reflect the first entry only.
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', seniorResume)).toBe(jsSeniorityMatchBonus);
+  });
+});
+
+describe('scoreResumeAgainstJD / rankResumes — seniority alignment', () => {
+  it('is unaffected when jobTitle is omitted (backward compatible)', () => {
+    const jdKeywords = jsExtractJDKeywords(jd, [backendResume]);
+    expect(jsScore(backendResume, jdKeywords, jd)).toBe(jsScore(backendResume, jdKeywords, jd, undefined));
+  });
+
+  it('boosts a resume whose most recent title matches the JD title\'s seniority', () => {
+    const seniorBackend = {
+      id: 'sb', name: 'Senior Backend',
+      profile: { skills: ['Python', 'AWS'], experience: [{ title: 'Senior Backend Engineer' }] },
+    };
+    const juniorBackend = {
+      id: 'jb', name: 'Junior Backend',
+      profile: { skills: ['Python', 'AWS'], experience: [{ title: 'Junior Backend Engineer' }] },
+    };
+    const seniorJd = 'Looking for a Senior Backend Engineer strong in Python and AWS.';
+    const ranked = jsRank(seniorJd, [juniorBackend, seniorBackend], 'Senior Backend Engineer');
+    const byId = Object.fromEntries(ranked.map(r => [r.id, r.score]));
+    // Same keyword coverage on both sides — only the seniority nudge
+    // should separate them.
+    expect(byId.sb).toBeGreaterThan(byId.jb);
+  });
+
+  it('never pushes a score above 1 even with the match bonus applied', () => {
+    const perfectResume = {
+      id: 'p', name: 'Perfect',
+      profile: {
+        skills: ['Python'], certifications: ['Python'], projects: [{ technologies: ['Python'] }],
+        experience: [{ title: 'Senior Engineer', description: 'Python Python Python Python' }],
+      },
+    };
+    const jdKeywords = jsExtractJDKeywords('Python Python Python Python Python', [perfectResume]);
+    const score = jsScore(perfectResume, jdKeywords, 'Python Python Python Python Python', 'Senior Engineer');
+    expect(score).toBeLessThanOrEqual(1);
+  });
+});
+
 describe('lib/resumeRanker.js and lib/resumeRanker.mjs parity', () => {
   const resumes = [backendResume, frontendResume, emptySkillsResume, noProfileResume];
 
@@ -341,5 +656,57 @@ describe('lib/resumeRanker.js and lib/resumeRanker.mjs parity', () => {
     for (const n of [0, 1, 2, 4, 10]) {
       expect(jsResumeDepthMultiplier(n)).toBe(mjsResumeDepthMultiplier(n));
     }
+  });
+
+  it('REQUIRED_SECTION_WEIGHT_MULTIPLIER is the same constant', () => {
+    expect(jsRequiredSectionWeightMultiplier).toBe(mjsRequiredSectionWeightMultiplier);
+  });
+
+  it('extractRequiredSectionText produces identical output', () => {
+    const structuredJd = [
+      'Requirements:', '- Python', '- AWS', '',
+      'Nice to Have:', '- Kubernetes',
+    ].join('\n');
+    expect(jsExtractRequiredSectionText(structuredJd)).toBe(mjsExtractRequiredSectionText(structuredJd));
+    expect(jsExtractRequiredSectionText(jd)).toBe(mjsExtractRequiredSectionText(jd));
+  });
+
+  it('jdKeywordWeight (3-arg, with required-section text) produces identical output', () => {
+    const requiredText = 'python is required here';
+    expect(jsJdKeywordWeight('python is required here', 'python', requiredText))
+      .toBe(mjsJdKeywordWeight('python is required here', 'python', requiredText));
+  });
+
+  it('CATEGORY_WEIGHT_MULTIPLIER is the same constant', () => {
+    expect(jsCategoryWeightMultiplier).toBe(mjsCategoryWeightMultiplier);
+  });
+
+  it('isHighValueCategoryTerm produces identical output', () => {
+    for (const term of ['python', 'aws certified solutions architect', 'figma', 'email']) {
+      expect(jsIsHighValueCategoryTerm(term)).toBe(mjsIsHighValueCategoryTerm(term));
+    }
+  });
+
+  it('SENIORITY_MATCH_BONUS and SENIORITY_MISMATCH_PENALTY are the same constants', () => {
+    expect(jsSeniorityMatchBonus).toBe(mjsSeniorityMatchBonus);
+    expect(jsSeniorityMismatchPenalty).toBe(mjsSeniorityMismatchPenalty);
+  });
+
+  it('detectSeniorityTier produces identical output', () => {
+    for (const title of ['Director of Engineering', 'Staff Engineer', 'Senior Engineer', 'Software Engineer', '', null]) {
+      expect(jsDetectSeniorityTier(title)).toBe(mjsDetectSeniorityTier(title));
+    }
+  });
+
+  it('seniorityAlignmentMultiplier produces identical output', () => {
+    const resume = { profile: { experience: [{ title: 'Senior Backend Engineer' }] } };
+    expect(jsSeniorityAlignmentMultiplier('Senior Backend Engineer', resume))
+      .toBe(mjsSeniorityAlignmentMultiplier('Senior Backend Engineer', resume));
+    expect(jsSeniorityAlignmentMultiplier('Director of Engineering', resume))
+      .toBe(mjsSeniorityAlignmentMultiplier('Director of Engineering', resume));
+  });
+
+  it('rankResumes produces identical output with a jobTitle argument', () => {
+    expect(jsRank(jd, resumes, 'Senior Backend Engineer')).toEqual(mjsRank(jd, resumes, 'Senior Backend Engineer'));
   });
 });

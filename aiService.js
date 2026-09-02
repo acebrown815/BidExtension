@@ -593,7 +593,13 @@ ${rawText}`
  *
  * The returned JSON includes a numeric match score (0–100), lists of matching
  * and missing skills, actionable recommendations, and an insights block with
- * strength/gap summaries and ATS keyword suggestions.
+ * strength/gap summaries and ATS keyword suggestions. The prompt explicitly
+ * instructs the model to cross-check a candidate missingSkills entry against
+ * the full resume text (skills list, summary, experience descriptions, and
+ * close variants/abbreviations) before including it, since a single-pass
+ * classification can otherwise misclassify a skill that's clearly present
+ * (e.g. flagging "Ruby on Rails" as missing when it's listed right there in
+ * the resume's Skills section) as a gap.
  *
  * @param {Object|string} resumeData    - Parsed resume object or raw resume text.
  * @param {string}        jobDescription - Full text of the job posting.
@@ -625,6 +631,8 @@ Return ONLY a JSON object:
     "keywords": ["important ATS keywords to include"]
   }
 }
+
+IMPORTANT: before listing anything in missingSkills, verify it does NOT already appear anywhere in the resume below — its skills list, summary, or experience descriptions — including close variants and abbreviations (e.g. "Rails" and "Ruby on Rails" are the same skill; "AWS" and "Amazon Web Services" are the same skill). A skill that appears anywhere in the resume, even if mentioned only once or phrased slightly differently than in the job posting, belongs in matchingSkills, never in missingSkills. Only list a skill in missingSkills if it is genuinely absent from the entire resume text.
 
 RESUME:
 ${wrapTag('user_profile', resumeText)}

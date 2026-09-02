@@ -44,6 +44,29 @@ describe('isSensitiveFieldName — allows ordinary application fields', () => {
   });
 });
 
+describe('isSensitiveFieldName — Ashby "_systemfield_*" carve-out', () => {
+  // Regression test: Ashby names every built-in application field
+  // `_systemfield_*` (Name, Email, Resume, EEOC gender/race/veteran
+  // status). The generic underscore-prefix heuristic below would
+  // otherwise classify all of these as "internal" and autofill would
+  // find zero usable fields on any Ashby application form.
+  const ashbySystemFields = [
+    '_systemfield_name', '_systemfield_email', '_systemfield_resume',
+    '_systemfield_eeoc_gender', '_systemfield_eeoc_race',
+    '_systemfield_eeoc_veteran_status',
+  ];
+
+  it.each(ashbySystemFields)('allows %s', (name) => {
+    expect(isSensitiveFieldName(name)).toBe(false);
+  });
+
+  it('still blocks generic underscore-prefixed internal-looking names', () => {
+    expect(isSensitiveFieldName('_internal')).toBe(true);
+    expect(isSensitiveFieldName('_meta')).toBe(true);
+    expect(isSensitiveFieldName('__hidden')).toBe(true);
+  });
+});
+
 describe('isSensitiveFieldName — robustness', () => {
   it('returns false for empty/null/non-string input', () => {
     expect(isSensitiveFieldName('')).toBe(false);

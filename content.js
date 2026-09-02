@@ -1331,6 +1331,13 @@
         opacity: 0.35;
         cursor: not-allowed;
       }
+      /* One of the top local-match-scoring resumes for the current JD
+         (see renderSlotSwitcher) — never applied to the active pill, so
+         this and .active never combine on the same button. */
+      .jm-switch-pill.jm-top-match {
+        border-color: #f0b429;
+        color: #b9840a;
+      }
       /* Local (no-AI) keyword-match score badge for the active resume.
          Deliberately a small pill (not the big AI score circle) so it
          never reads as the AI-generated match score. */
@@ -2057,23 +2064,57 @@
    * auto-switches to the strongest match by default, so the active pill
    * here is normally that one.
    *
+   * Up to 2 of the 3 highest-scoring resumes (score > 0) are additionally
+   * flagged with a ★ and the .jm-top-match style, so with several saved
+   * resumes it's obvious at a glance which others are worth considering.
+   * The currently active resume never gets this treatment even when it's
+   * also a top match — its own .active fill already marks it as selected,
+   * and stacking the gold top-match border on top of that looked bad.
+   *
    * Also refreshes the "Local Match" badge for whichever resume is active
    * (updateLocalScoreChip) — every code path that changes which resume is
    * active or which scores are available routes through here, so that badge
    * never goes stale.
    */
+  /**
+   * The (up to) 3 highest-scoring resumes for the current JD, from
+   * _resumeScores (populated by scanResumeMatch's local, zero-AI ranking —
+   * see rankResumes()). Shared by renderSlotSwitcher (which ★-flags these
+   * pills) and analyzeJob (which, when the resume you're about to analyze
+   * is one of these, also runs the AI analysis for the other candidates so
+   * it can switch to whichever actually scores best — see analyzeJob's doc
+   * comment).
+   * @returns {Set<string>} resume ids, largest score first, capped at 3.
+   */
+  function getTopMatchIds() {
+    return new Set(
+      Object.entries(_resumeScores)
+        .filter(([, score]) => typeof score === 'number' && score > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([id]) => id)
+    );
+  }
+
   function renderSlotSwitcher() {
     const container = shadowRoot && shadowRoot.getElementById('jmSwitchPills');
     if (!container) return;
     container.innerHTML = '';
+
+    const topMatchIds = getTopMatchIds();
+
     _resumes.forEach(r => {
       const isActive = r.id === _activeResumeId;
+      // Skip the top-match treatment for the active pill — its own
+      // .active fill already marks it as selected, and layering the gold
+      // top-match border on top of that combination looked bad.
+      const isTopMatch = !isActive && topMatchIds.has(r.id);
       const score = _resumeScores[r.id];
       const pctSuffix = typeof score === 'number' ? ` — ${Math.round(score * 100)}% ATS keyword match` : '';
       const btn = document.createElement('button');
-      btn.className = 'jm-switch-pill' + (isActive ? ' active' : '');
-      btn.textContent = r.name || 'Resume';
-      btn.title = (r.name || 'Resume') + pctSuffix;
+      btn.className = 'jm-switch-pill' + (isActive ? ' active' : '') + (isTopMatch ? ' jm-top-match' : '');
+      btn.textContent = (isTopMatch ? '★ ' : '') + (r.name || 'Resume');
+      btn.title = (r.name || 'Resume') + pctSuffix + (isTopMatch ? ' (top local match)' : '');
       btn.addEventListener('click', () => {
         _manualResumeSelection = true;
         switchSlot(r.id);
@@ -2114,17 +2155,56 @@
   }
 
   /**
-   * Switches the active resume, updates chrome.storage.local, and resets
-   * the current analysis so the user re-analyzes with the new resume.
+   * Renders a previously-cached analysis result into the panel — the exact
+   * reveal sequence Analyze Job uses on a cache hit (score, insights, skill
+   * gaps, ATS keywords, recommendations, and the Mark Applied / Cover
+   * Letter / Rewrite Bullets / Tailored Resume buttons), plus flips the
+   * Analyze button to "Re-Analyze". Shared by analyzeJob's own cache check
+   * and switchSlot's "this resume is already analyzed for this job" fast
+   * path (see switchSlot's doc comment) so both stay in sync.
+   * @param {Object} cached - A getCachedAnalysis() result: {response, title, company, location, salary, jobId, language, analysis}.
+   * @param {string} resumeName - Name of the resume this cached result belongs to (for currentAnalysis.resumeName).
+   * @param {string} rawUrl - The current page's raw (untouched) URL, for currentAnalysis.url.
+   */
+  function renderCachedAnalysis(cached, resumeName, rawUrl) {
+    currentAnalysis = { ...cached.analysis, url: rawUrl, resumeName };
+    showJobMeta(cached.title, cached.company, cached.location, cached.salary, cached.jobId, cached.language);
+    renderAnalysis(cached.response);
+    // jmSaveJob is already visible (showJobMeta reveals it as soon as the
+    // panel opens, before Analyze) — no need to show it again here.
+    // checkIfApplied() (run at panel-open / SPA-nav time) has already set
+    // this button's text to "Applied" or "Mark as Applied" as appropriate —
+    // just reveal it, don't gate on its text.
+    shadowRoot.getElementById('jmMarkApplied').style.display = 'flex';
+    updateMarkAppliedGating(currentAnalysis.matchScore);
+    shadowRoot.getElementById('jmCoverLetterBtn').style.display = 'flex';
+    shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
+    shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
+    const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
+    if (analyzeBtn) analyzeBtn.textContent = 'Re-Analyze';
+  }
+
+  /**
+   * Switches the active resume, updates chrome.storage.local, and either
+   * shows that resume's own cached analysis for the job currently on
+   * screen (if one exists) or resets to a clean "Analyze Job" state.
+   *
+   * Checking the cache here — not just inside analyzeJob — means picking a
+   * resume you (or the top-3 AI compare, see analyzeAndPickBest) already
+   * analyzed for this job shows its real score immediately, without an
+   * extra click that would just turn around and hit the same cache entry
+   * anyway. A resume with no cached result for this job still needs an
+   * explicit Analyze Job click, same as before.
    * @async
    * @param {string} id - The id (in `resumes`) of the resume to switch to.
    * @param {Object} [opts]
-   * @param {boolean} [opts.silent=false] - Skip the "Switched to ... Click
-   *   Analyze Job." status message and its auto-clear timer. Used when
-   *   analyzeJob() auto-selects the best-matching resume for the user —
-   *   the caller shows its own status message for the rest of the analyze
-   *   flow, and without this the switch's own 2.5s status-clear timer can
-   *   race in and blank that message while the AI call is still in flight.
+   * @param {boolean} [opts.silent=false] - Skip the "Switched to ..."
+   *   status message and its auto-clear timer. Used when analyzeJob()
+   *   auto-selects the best-matching resume for the user, or when
+   *   analyzeAndPickBest() switches to the AI-chosen winner — the caller
+   *   shows its own status message for the rest of the analyze flow, and
+   *   without this the switch's own status-clear timer can race in and
+   *   blank that message while the AI call is still in flight.
    */
   async function switchSlot(id, opts) {
     const silent = !!(opts && opts.silent);
@@ -2148,9 +2228,43 @@
       _activeResumeId = id;
       renderSlotSwitcher();
 
-      // Reset analysis — it was scored against the previous resume
-      currentAnalysis = null;
       const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
+
+      // Un-stick the Analyze button immediately on a manual switch. If an
+      // analysis for the PREVIOUS resume is still in flight (analyzeJob or
+      // analyzeAndPickBest left it disabled with a spinner), that analysis
+      // now knows — via its own captured resume id / _manualResumeSelection
+      // check — not to touch this button when it eventually finishes, so
+      // without this the button would otherwise stay stuck disabled until
+      // that unrelated call resolves, even though the user has already
+      // moved on to a different resume.
+      if (!silent && analyzeBtn) analyzeBtn.disabled = false;
+
+      // If this resume already has a cached analysis for the job currently
+      // on screen (e.g. it was one of the top-3 candidates a previous
+      // Analyze Job compare already ran), show it right away instead of
+      // making the user click Analyze Job again just to re-surface a
+      // result we already have. Only for non-silent (manual pill click)
+      // switches — every silent switch is an internal "point the data at
+      // the right resume" step whose caller (auto-select, AutoFill's
+      // ensureBestResumeSelected, or analyzeAndPickBest's own winner
+      // switch) already decides for itself whether/what to render, so
+      // rendering here too would just be redundant at best and, for
+      // AutoFill's silent switches in particular, an unrequested change to
+      // the visible analysis panel.
+      if (!silent) {
+        const cached = await getCachedAnalysis(normalizeUrl(window.location.href), id);
+        if (cached) {
+          renderCachedAnalysis(cached, target.name || '', window.location.href);
+          setStatus(`Switched to ${target.name || 'Resume'} — showing its results.`, 'success');
+          setTimeout(clearStatus, 2500);
+          return;
+        }
+      }
+
+      // No cached analysis for this resume+job — reset to a clean
+      // "Analyze Job" state.
+      currentAnalysis = null;
       if (analyzeBtn) analyzeBtn.textContent = 'Analyze Job';
 
       // Hide all result sections so the panel is clean for the new resume.
@@ -2298,7 +2412,11 @@
 
     if (jd === undefined) {
       jd = '';
-      try { jd = (await getJobDescriptionForAnalysis()) || ''; } catch (_) { /* extraction can throw on weird pages */ }
+      // Confident/cached JD only — never the raw last-resort scrape. This
+      // function drives a SILENT auto-switch (below) and the Local
+      // Match/★ badges, so it must never rank resumes against noise like a
+      // scraped application form (see getConfidentJobDescriptionForRanking).
+      try { jd = (await getConfidentJobDescriptionForRanking()) || ''; } catch (_) { /* extraction can throw on weird pages */ }
     }
     if (!jd) { renderSlotSwitcher(); return; }
 
@@ -2310,8 +2428,10 @@
       // Score every saved resume against this JD in one local pass — zero
       // AI calls and zero network requests no matter how many resumes are
       // saved. Powers both the active resume's "Local Match" badge below
-      // and the default auto-selection just below.
-      const ranked = rankResumes(jd, resumes);
+      // and the default auto-selection just below. Passing the page's job
+      // title (best-effort, cheap DOM read) lets rankResumes() apply its
+      // small seniority-alignment nudge on top of the keyword score.
+      const ranked = rankResumes(jd, resumes, extractJobTitle());
       ranked.forEach(r => { _resumeScores[r.id] = r.score; });
 
       if (resumes.length < 2) { renderSlotSwitcher(); return; }
@@ -2479,6 +2599,44 @@
     // fall back to the same last-resort scrape extractJobDescription() has
     // always used, so single-page postings are completely unaffected.
     return extractJobDescription();
+  }
+
+  /**
+   * Like getJobDescriptionForAnalysis(), but returns '' instead of ever
+   * falling back to the raw last-resort body-text scrape. Use this — never
+   * getJobDescriptionForAnalysis() — as the JD fed into a SILENT local
+   * resume auto-select/auto-switch decision (scanResumeMatch,
+   * ensureBestResumeSelected, analyzeJob's own inline auto-select). The
+   * actual AI Job Analysis call (and Cover Letter, bullet rewriting, etc.)
+   * should keep using getJobDescriptionForAnalysis() as before — those are
+   * explicit user actions that tolerate imperfect JD text fine.
+   *
+   * Why this exists: the last-resort scrape exists so *something* gets sent
+   * to the AI even on an unusual page, but it can be flatly wrong — e.g.
+   * Ashby's `.../application` step, opened as its own separate browser tab
+   * (not a same-tab client-side route change) rather than reached via
+   * handleSpaUrlChanged, has no real JD text once its app renders, AND has
+   * no per-tab cached JD of its own (the cache is keyed by browser tab id —
+   * a brand-new tab never populated it, even though the Overview tab did).
+   * The fallback then scrapes the APPLICATION FORM'S OWN TEXT. Ranking
+   * resumes against that noise can silently switch away from whatever
+   * resume the user actually picked on the Overview tab — even though that
+   * choice is already correctly available via chrome.storage.local's
+   * activeResumeId, which IS shared across tabs. No confident/cached JD
+   * should mean "leave the currently active resume alone", never "guess
+   * from whatever text happens to be on screen".
+   * @async
+   * @returns {Promise<string>} Confidently-extracted or cross-tab-cached JD
+   *   text, or '' if neither is available.
+   */
+  async function getConfidentJobDescriptionForRanking() {
+    const confident = extractJobDescriptionConfident();
+    if (confident) return confident;
+    try {
+      const cached = await sendMessage({ type: 'GET_CACHED_TAB_JD' });
+      if (cached && cached.jd) return cached.jd;
+    } catch (_) { /* best-effort */ }
+    return '';
   }
 
   /** @returns {string} The job title extracted from the page, or ''. */
@@ -2784,6 +2942,13 @@
    * If a cached result exists for the current URL and forceRefresh is false,
    * the cached result is displayed immediately with no API call.
    *
+   * If the resume about to be analyzed is itself one of the local top-3
+   * ATS-keyword matches (the ★-flagged pills — see getTopMatchIds), this
+   * instead compares all of those candidates via real AI analysis and
+   * switches to whichever one actually scores best — see
+   * analyzeAndPickBest. A resume picked outside that set is analyzed
+   * alone, same as always, since there's nothing to compare it against.
+   *
    * @async
    * @param {boolean} [forceRefresh=false] - When true, bypasses the cache and
    *   always makes a fresh AI call (triggered by the "Re-Analyze" button).
@@ -2828,11 +2993,15 @@
     // though the user just explicitly chose one.
     if (!_manualResumeSelection) {
       try {
-        const jdForRanking = (await getJobDescriptionForAnalysis()) || '';
+        // Confident/cached JD only for this silent auto-switch decision —
+        // never the raw last-resort scrape (see
+        // getConfidentJobDescriptionForRanking). The real JD used for the
+        // actual AI call below still comes from getJobDescriptionForAnalysis().
+        const jdForRanking = (await getConfidentJobDescriptionForRanking()) || '';
         if (jdForRanking) {
           const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
           if (resumes.length >= 2) {
-            const ranked = rankResumes(jdForRanking, resumes);
+            const ranked = rankResumes(jdForRanking, resumes, extractJobTitle());
             const top = ranked[0];
             const currentId = activeResumeId || _activeResumeId;
             if (top && top.score > 0 && top.id !== currentId) {
@@ -2853,10 +3022,49 @@
     // up separately or risk it drifting if the user switches resumes later.
     const activeResumeName = (_resumes.find(r => r.id === _activeResumeId) || {}).name || '';
 
-    // Check cache first (unless force re-analyze). Keyed by URL + active
-    // resume so a resume switch (auto or manual) never surfaces a stale
-    // score that was actually cached for a different resume.
-    const cached = await getCachedAnalysis(pageUrl, _activeResumeId);
+    // If the resume we're about to analyze is itself one of the local
+    // top-3 matches, compare all of them via real AI analysis instead of
+    // committing to just this one — the local keyword heuristic that put
+    // them in the top 3 can still be wrong about which is actually best.
+    // A resume picked outside that set is unambiguous, so it's analyzed
+    // alone, same as before. See analyzeAndPickBest's doc comment for how
+    // this stays fast (concurrent calls, cache-first).
+    //
+    // Only run the compare when the user HASN'T manually picked a resume
+    // for this job (_manualResumeSelection) — same rule the auto-select
+    // logic above already follows. Without this check, manually switching
+    // to one of the other two top-3 resumes (say, to see its own score)
+    // and clicking Analyze Job would re-trigger the 3-way compare and snap
+    // the panel straight back to whichever resume won last time, making it
+    // impossible to ever see a runner-up's own result. Once the user has
+    // picked one explicitly, analyzing it alone — same single-resume path
+    // as any other resume — is what shows its actual score; since every
+    // candidate from the compare pass was cached individually, this is
+    // still an instant cache hit, not a fresh AI call.
+    const topMatchIds = getTopMatchIds();
+    const candidateIds = (!_manualResumeSelection && topMatchIds.has(_activeResumeId) && topMatchIds.size > 1)
+      ? Array.from(topMatchIds)
+      : [_activeResumeId];
+
+    if (candidateIds.length > 1) {
+      await analyzeAndPickBest(candidateIds, { pageUrl, rawPageUrl, forceRefresh, isStale, btn });
+      return;
+    }
+
+    // Capture which resume we're actually analyzing, right now. Every
+    // reference below to "which resume is this analysis for" uses THIS
+    // captured value, never a fresh read of _activeResumeId — the AI call
+    // below can take several seconds, and if the user switches to a
+    // different resume while it's in flight, re-reading _activeResumeId
+    // afterward would silently attribute (and cache!) this result under
+    // the NEW resume's id even though it was never computed for it,
+    // corrupting that resume's own score the next time it's viewed.
+    const analyzingResumeId = _activeResumeId;
+
+    // Check cache first (unless force re-analyze). Keyed by URL + resume
+    // so a resume switch (auto or manual) never surfaces a stale score
+    // that was actually cached for a different resume.
+    const cached = await getCachedAnalysis(pageUrl, analyzingResumeId);
     if (isStale()) return; // user navigated while cache lookup was in flight
     if (!forceRefresh && cached) {
       // Override the cached url/resumeName with current values rather than
@@ -2864,20 +3072,7 @@
       // entry written before the rawPageUrl fix (or one whose page has since
       // added/changed tracking params) would otherwise resurrect a stale or
       // truncated link into Save Job / Mark Applied.
-      currentAnalysis = { ...cached.analysis, url: rawPageUrl, resumeName: activeResumeName };
-      showJobMeta(cached.title, cached.company, cached.location, cached.salary, cached.jobId, cached.language);
-      renderAnalysis(cached.response);
-      // jmSaveJob is already visible (showJobMeta reveals it as soon as the
-      // panel opens, before Analyze) — no need to show it again here.
-      // checkIfApplied() (run at panel-open / SPA-nav time) has already set
-      // this button's text to "Applied" or "Mark as Applied" as appropriate —
-      // just reveal it, don't gate on its text.
-      shadowRoot.getElementById('jmMarkApplied').style.display = 'flex';
-      updateMarkAppliedGating(currentAnalysis.matchScore);
-      shadowRoot.getElementById('jmCoverLetterBtn').style.display = 'flex';
-      shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
-      shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
-      btn.textContent = 'Re-Analyze';
+      renderCachedAnalysis(cached, activeResumeName, rawPageUrl);
       setStatus(autoSelectedName
         ? `Showing cached results for "${autoSelectedName}" (${autoSelectedPct}% ATS keyword match).`
         : 'Showing cached results.', 'success');
@@ -2923,16 +3118,33 @@
         jobDescription: jd,
         jobTitle: title,
         company: company,
-        resumeId: _activeResumeId
+        resumeId: analyzingResumeId
       });
 
       // Bail before mutating any UI/storage if the user navigated mid-flight.
       // Without this, the previous job's analysis renders on the new page.
       if (isStale()) return;
 
-      currentAnalysis = { ...response, title, company, location, salary, jobId, language, url: rawPageUrl, resumeName: activeResumeName };
-      await setCachedAnalysis(pageUrl, _activeResumeId, { response, analysis: currentAnalysis, title, company, location, salary, jobId, language });
+      const analysis = { ...response, title, company, location, salary, jobId, language, url: rawPageUrl, resumeName: activeResumeName };
+      // Always cache under analyzingResumeId — the resume this analysis was
+      // actually computed for — never the live _activeResumeId (see the
+      // capture comment above). This is the fix for the exact bug: caching
+      // under whichever resume happens to be active when the call resolves
+      // corrupts THAT resume's cache entry with a result it was never
+      // analyzed against.
+      await setCachedAnalysis(pageUrl, analyzingResumeId, { response, analysis, title, company, location, salary, jobId, language });
       if (isStale()) return;
+
+      // Only update the visible panel if the user is still looking at the
+      // resume this analysis was actually for. If they've switched to a
+      // different resume while the AI call above was running, the result
+      // is already safely cached (above) — switching back to this resume
+      // shows it instantly (see switchSlot) — but overwriting whatever
+      // resume's panel is CURRENTLY on screen with a different resume's
+      // result is exactly the "wrong Match Score" mismatch this prevents.
+      if (_activeResumeId !== analyzingResumeId) return;
+
+      currentAnalysis = analysis;
       analysisSucceeded = true;
       renderAnalysis(response);
       clearStatus();
@@ -2958,8 +3170,203 @@
     } catch (err) {
       setStatus('Error: ' + err.message, 'error');
     } finally {
-      btn.disabled = false;
-      btn.textContent = analysisSucceeded ? 'Re-Analyze' : 'Analyze Job';
+      // Only touch the Analyze button if it still represents the resume we
+      // were analyzing. If the user switched to a different resume
+      // mid-flight, switchSlot() already set the button's text/enabled
+      // state for whichever resume (and cache status) is active now — this
+      // analysis finishing in the background for a resume no longer on
+      // screen shouldn't override that.
+      if (_activeResumeId === analyzingResumeId) {
+        btn.disabled = false;
+        btn.textContent = analysisSucceeded ? 'Re-Analyze' : 'Analyze Job';
+      }
+    }
+  }
+
+  /**
+   * Compares multiple candidate resumes for the current job via real AI
+   * analysis and switches to whichever one actually scores best — used when
+   * the resume about to be analyzed is one of the local top-3 ATS-keyword
+   * matches (see getTopMatchIds), since the free local heuristic that put
+   * them in the top 3 can still be wrong about which is actually best.
+   *
+   * Stays fast despite comparing multiple resumes by: checking the cache for
+   * every candidate first (a candidate already cached for this URL costs
+   * nothing), then firing only the AI calls that are actually needed
+   * concurrently via Promise.allSettled — never sequentially — so the total
+   * wait is roughly one AI call's worth of time, not N. Every successfully
+   * analyzed candidate (not just the winner) is cached, so re-running this
+   * later, or manually switching to a runner-up, is instant.
+   *
+   * @async
+   * @param {string[]} candidateIds - Resume ids to compare (2 or 3, from getTopMatchIds).
+   * @param {{pageUrl: string, rawPageUrl: string, forceRefresh: boolean, isStale: () => boolean, btn: HTMLElement}} ctx
+   */
+  async function analyzeAndPickBest(candidateIds, ctx) {
+    const { pageUrl, rawPageUrl, forceRefresh, isStale, btn } = ctx;
+    const startingId = _activeResumeId;
+    const resumeById = new Map(_resumes.map(r => [r.id, r]));
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="jm-spinner"></span> Comparing top matches...';
+
+    // Accumulates { response, title, company, location, salary, jobId,
+    // language } per candidate id for every candidate that ends up with a
+    // usable analysis, whether from cache or a fresh AI call.
+    const results = new Map();
+    let analysisSucceeded = false;
+
+    try {
+      // Cache-first pass: a candidate already analyzed for this URL doesn't
+      // need a fresh AI call unless the user explicitly asked to re-analyze.
+      if (!forceRefresh) {
+        for (const id of candidateIds) {
+          const cached = await getCachedAnalysis(pageUrl, id);
+          if (isStale()) return;
+          if (cached) {
+            results.set(id, {
+              response: cached.response,
+              title: cached.title,
+              company: cached.company,
+              location: cached.location,
+              salary: cached.salary,
+              jobId: cached.jobId,
+              language: cached.language,
+            });
+          }
+        }
+      }
+
+      const idsNeedingCall = candidateIds.filter(id => !results.has(id));
+
+      if (idsNeedingCall.length > 0) {
+        const jd = await getJobDescriptionForAnalysis();
+        if (isStale()) return;
+
+        if (jd.length < 50) {
+          if (results.size === 0) {
+            setStatus('Could not find a job description on this page.', 'error');
+            return;
+          }
+          // Fall through and show whatever cached candidates we already have.
+        } else {
+          const title = extractJobTitle();
+          const company = extractCompany();
+          const location = extractLocation();
+          const salary = extractSalary();
+          const jobId = extractJobId();
+          const language = extractLanguages();
+
+          showJobMeta(title, company, location, salary, jobId, language);
+
+          if (jd.length < 100 && results.size === 0) {
+            setStatus('Could not extract enough job details from this page. Try copying the job description manually.', 'error');
+            return;
+          }
+
+          if (jd.length >= 100) {
+            setStatus(`Comparing ${idsNeedingCall.length} top-matching resume${idsNeedingCall.length > 1 ? 's' : ''}...`, 'info');
+
+            const settled = await Promise.allSettled(idsNeedingCall.map(id => sendMessage({
+              type: 'ANALYZE_JOB',
+              jobDescription: jd,
+              jobTitle: title,
+              company: company,
+              resumeId: id
+            })));
+
+            if (isStale()) return;
+
+            for (let i = 0; i < idsNeedingCall.length; i++) {
+              const id = idsNeedingCall[i];
+              const outcome = settled[i];
+              if (outcome.status !== 'fulfilled') continue; // one failed candidate doesn't sink the others
+              const response = outcome.value;
+              results.set(id, { response, title, company, location, salary, jobId, language });
+              await setCachedAnalysis(pageUrl, id, {
+                response,
+                analysis: { ...response, title, company, location, salary, jobId, language, url: rawPageUrl, resumeName: (resumeById.get(id) || {}).name || '' },
+                title, company, location, salary, jobId, language
+              });
+            }
+            if (isStale()) return;
+          }
+        }
+      }
+
+      // If the user manually picked a specific resume while this compare
+      // was running, respect that instead of switching them to the AI's
+      // winner or overwriting whatever they're now looking at with a
+      // status message about a compare they're no longer watching.
+      // _manualResumeSelection only flips true from an explicit
+      // switcher-pill click, and analyzeAndPickBest only ever starts when
+      // it was false (see analyzeJob's candidateIds branch) — so a true
+      // value here can only mean the user switched away during this
+      // function's awaits. Every candidate analyzed above is already
+      // cached under its own real resume id regardless (see the loop
+      // above), so switching to any of them — including the eventual
+      // winner — later still shows its real score instantly, no
+      // re-analysis needed. Also covers the pure-cache-hit path (every
+      // candidate already cached, no fresh AI calls at all above) — that
+      // path had no staleness check before this point.
+      if (_manualResumeSelection || isStale()) return;
+
+      if (results.size === 0) {
+        setStatus('Error: could not analyze any of the top-matching resumes.', 'error');
+        return;
+      }
+
+      // Pick the winner by whichever candidate the AI itself scored highest —
+      // ties favor whichever resume was already active going into this call,
+      // so a genuine tie doesn't cause a pointless resume switch.
+      let winnerId = null;
+      let winnerScore = -Infinity;
+      for (const [id, r] of results) {
+        const score = typeof r.response.matchScore === 'number' ? r.response.matchScore : -Infinity;
+        if (score > winnerScore || (score === winnerScore && id === startingId)) {
+          winnerScore = score;
+          winnerId = id;
+        }
+      }
+
+      const winner = results.get(winnerId);
+      if (winnerId !== _activeResumeId) {
+        await switchSlot(winnerId, { silent: true });
+      }
+      if (isStale()) return;
+
+      const winnerName = (resumeById.get(winnerId) || {}).name || 'Resume';
+
+      currentAnalysis = { ...winner.response, title: winner.title, company: winner.company, location: winner.location, salary: winner.salary, jobId: winner.jobId, language: winner.language, url: rawPageUrl, resumeName: winnerName };
+      showJobMeta(winner.title, winner.company, winner.location, winner.salary, winner.jobId, winner.language);
+      analysisSucceeded = true;
+      renderAnalysis(winner.response);
+
+      shadowRoot.getElementById('jmTruncNotice').style.display = winner.response.jdTruncated ? 'block' : 'none';
+      shadowRoot.getElementById('jmMarkApplied').style.display = 'flex';
+      updateMarkAppliedGating(currentAnalysis.matchScore);
+      shadowRoot.getElementById('jmCoverLetterBtn').style.display = 'flex';
+      shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
+      shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
+      shadowRoot.getElementById('jmCoverLetterSection').style.display = 'none';
+      shadowRoot.getElementById('jmBulletSection').style.display = 'none';
+      shadowRoot.getElementById('jmTailoredResumeSection').style.display = 'none';
+
+      setStatus(winnerId !== startingId
+        ? `Switched to "${winnerName}" — it scored highest of the ${candidateIds.length} top matches (${winnerScore}%).`
+        : `"${winnerName}" scored highest of the ${candidateIds.length} top matches (${winnerScore}%).`, 'success');
+      setTimeout(clearStatus, 4000);
+    } catch (err) {
+      setStatus('Error: ' + err.message, 'error');
+    } finally {
+      // Only touch the Analyze button if the user hasn't manually switched
+      // resumes since this compare started — same reasoning as the guard
+      // above: switchSlot() already owns the button's state for whichever
+      // resume the user is actually looking at now.
+      if (!_manualResumeSelection) {
+        btn.disabled = false;
+        btn.textContent = analysisSucceeded ? 'Re-Analyze' : 'Analyze Job';
+      }
     }
   }
 
@@ -3364,11 +3771,31 @@
 
       setStatus(`Direct fill: ${directFilled}. Sending rest to AI...`, 'info');
 
-      // Pass 2: AI fill for remaining empty fields
+      // Pass 2: AI fill for remaining empty fields. Skip anything Pass 1
+      // (direct Q&A fill) already answered — checked via
+      // window.__jobMatchFilledLabels, the same label-based check the
+      // iframe autofill path below already uses.
+      //
+      // The previous `q._el` check here was always a no-op: detectFormFields()
+      // never actually assigns `_el` onto any questions[] item (it's only
+      // ever read/deleted, never set), so `if (!el) return true` was always
+      // true and every field — including ones Pass 1 already filled
+      // correctly — was unconditionally resent to the AI. For an
+      // exclusive-choice radio group, a wrong AI guess on the redundant
+      // resend can silently un-select whatever Pass 1 already got right,
+      // since checking a different radio in the same name-group natively
+      // unchecks the first.
+      const filledLabels = new Set();
+      if (window.__jobMatchFilledLabels) {
+        window.__jobMatchFilledLabels.forEach(l => filledLabels.add(l.toLowerCase()));
+      }
       const questionsForAI = questions.filter(q => {
-        const el = q._el;
-        if (!el) return true;
-        return !(el.value || '').trim();
+        const qText = (q.question_text || '').toLowerCase();
+        if (qText && filledLabels.has(qText)) return false;
+        for (const filled of filledLabels) {
+          if (filled.length > 5 && (qText.includes(filled) || filled.includes(qText))) return false;
+        }
+        return true;
       }).map(q => {
         const clean = { ...q };
         delete clean._el;
@@ -3588,7 +4015,15 @@
       if (!radioGroups[groupName]) {
         radioGroups[groupName] = {
           question_id: groupName,
-          question_text: getFieldLabel(radio) || groupName.replace(/[_-]/g, ' '),
+          // Resolved below once every radio in the group is collected —
+          // getRadioGroupLabel needs the full set to reliably tell the
+          // group's own question label apart from any one option's label
+          // (some ATSs, seen on Ashby, give each radio OPTION its own
+          // <label for="optionId"> for its visible text — "Man" — while
+          // the fieldset's own question label sits elsewhere; calling
+          // getFieldLabel on a single radio here always found the
+          // option's own label first).
+          question_text: null,
           field_type: 'radio',
           required: radio.required,
           available_options: [],
@@ -3605,6 +4040,7 @@
     });
     for (const group of Object.values(radioGroups)) {
       if (group.available_options.length > 0) {
+        group.question_text = getRadioGroupLabel(group._radios) || group.question_id.replace(/[_-]/g, ' ');
         const clean = { ...group };
         delete clean._radios;
         questions.push(clean);
@@ -3691,11 +4127,22 @@
   async function ensureBestResumeSelected() {
     if (_manualResumeSelection) return;
     try {
-      const jdForRanking = (await getJobDescriptionForAnalysis()) || '';
+      // Confident/cached JD only — never the raw last-resort scrape (see
+      // getConfidentJobDescriptionForRanking). This is exactly what fixed
+      // the case where opening a job's Application step in its OWN browser
+      // tab (e.g. Ashby's .../application route, opened as a separate tab
+      // rather than a same-tab route change) has no real JD and no
+      // per-tab cached JD of its own — the old fallback scraped the
+      // application form's own text and could silently switch AutoFill to
+      // a resume completely unrelated to the one picked on the Overview
+      // tab. No confident/cached JD here now correctly means "leave
+      // whatever resume is already active alone" (which, via
+      // chrome.storage.local, is still the one selected on the other tab).
+      const jdForRanking = (await getConfidentJobDescriptionForRanking()) || '';
       if (!jdForRanking) return;
       const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
       if (resumes.length < 2) return; // nothing to compare against
-      const ranked = rankResumes(jdForRanking, resumes);
+      const ranked = rankResumes(jdForRanking, resumes, extractJobTitle());
       const top = ranked[0];
       const currentId = activeResumeId || _activeResumeId;
       if (top && top.score > 0 && top.id !== currentId) {
@@ -3919,6 +4366,22 @@
    * @returns {string} The label text, or '' if not determinable.
    */
   function getRadioLabel(input) {
+    // 0. Native <label for="id"> association via the browser's own
+    //    `.labels` reflection — matches by the `for` attribute regardless
+    //    of where the label sits in the DOM. Needed for ATS markup (seen
+    //    on Ashby) where each option's <label for="optionId"> is a SIBLING
+    //    of the radio's wrapping <span>, not an ancestor of the radio and
+    //    not adjacent to it either — every check below misses it, so
+    //    without this every option on such a form resolves to '', its
+    //    whole radio group silently drops out of detectFormFields()
+    //    (available_options ends up empty), and the AI is never even
+    //    asked the question. directFill.js's own radio-filling code
+    //    already relies on this same `.labels` API for exactly this
+    //    reason (see its radioLabels mapping in section 3).
+    if (input.labels && input.labels.length > 0) {
+      const text = input.labels[0].textContent.trim();
+      if (text) return text;
+    }
     const parentLabel = input.closest('label');
     if (parentLabel) {
       const clone = parentLabel.cloneNode(true);
@@ -3978,6 +4441,65 @@
     if (input.name) return input.name.replace(/[_-]/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
 
     return '';
+  }
+
+  function findRadioGroupContainer(radios) {
+    // Walk up from the radio's PARENT, not the radio itself — a naive
+    // `.closest('fieldset, [role="radiogroup"], [class*="radio-group"]')`
+    // called on the radio matches the radio's own class (or its immediate
+    // per-option wrapper div's class) before ever reaching the real group
+    // container, because ATS markup (seen on Ashby) names those
+    // "...-radio-group-option-radio" / "...-radio-group-option" — both
+    // contain "radio-group" as a literal substring. Skip any ancestor
+    // whose own class marks it as an option-level wrapper instead of the
+    // group container itself.
+    let node = radios[0].parentElement;
+    while (node) {
+      const tag = node.tagName;
+      const cls = typeof node.className === 'string' ? node.className : '';
+      const role = node.getAttribute && node.getAttribute('role');
+      const isOptionWrapper = /-option(-|$)/i.test(cls) || /\boption\b/i.test(cls);
+      if (!isOptionWrapper && (tag === 'FIELDSET' || role === 'radiogroup' || /radio-?group/i.test(cls))) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * Like getFieldLabel, but for an entire radio GROUP rather than one
+   * element — resolves the group's own question label (e.g. "What is
+   * your gender identity?"), not any single option's own label (e.g.
+   * "Man"). Some ATSs (seen on Ashby) give each radio option its own
+   * <label for="optionId"> for the option's visible text, inside a
+   * <fieldset> whose own <label>/<legend> carries the real question;
+   * getFieldLabel's `label[for]` strategy, called on any one radio,
+   * always finds that radio's own option label first — mislabeling the
+   * AI-facing question_text (the AI then has no idea what it's actually
+   * being asked) and, for exclusive-choice radios, risking a confused AI
+   * answer silently un-selecting an option Pass 1 (direct Q&A fill)
+   * already correctly chose, since checking a different radio in the
+   * same name-group natively unchecks the first.
+   * @param {HTMLInputElement[]} radios all radios in one group (same name)
+   * @returns {string}
+   */
+  function getRadioGroupLabel(radios) {
+    const container = findRadioGroupContainer(radios);
+    if (container) {
+      const radioIds = new Set(radios.map(r => r.id).filter(Boolean));
+      for (const cand of container.querySelectorAll('label, legend')) {
+        const forId = cand.getAttribute('for');
+        if (forId && radioIds.has(forId)) continue; // an option's own label, not the question
+        if (radios.some(r => cand.contains(r))) continue; // wraps a radio directly — also an option label
+        const text = cand.textContent.trim();
+        if (text) return text;
+      }
+    }
+    // No fieldset/legend structure found — fall back to the generic
+    // single-element resolver (covers radio groups with only a group-level
+    // aria-label/wrapper and no per-option labels to get confused by).
+    return getFieldLabel(radios[0]);
   }
 
   // ─── Form filling (uses _fieldMap from detection) ────────────
@@ -4536,8 +5058,9 @@
     // Exact label match
     for (const r of radioRefs) {
       if (r.text.toLowerCase().trim() === target || r.el.value.toLowerCase().trim() === target) {
-        r.el.checked = true;
-        fireEvents(r.el);
+        // Clicking an already-checked radio is a safe no-op (radios can't
+        // be deselected by clicking themselves).
+        if (!r.el.checked) clickNatively(r.el);
         return true;
       }
     }
@@ -4547,8 +5070,7 @@
       const val = r.el.value.toLowerCase().trim();
       if (label.includes(target) || target.includes(label) ||
           val.includes(target) || target.includes(val)) {
-        r.el.checked = true;
-        fireEvents(r.el);
+        if (!r.el.checked) clickNatively(r.el);
         return true;
       }
     }
@@ -4566,8 +5088,10 @@
   function fillCheckboxFromRef(cb, value) {
     const shouldCheck = /^(yes|true|1|checked|agree|accept)$/i.test(String(value).trim());
     if (cb.checked !== shouldCheck) {
-      cb.checked = shouldCheck;
-      fireEvents(cb);
+      // A single click toggles the checkbox; we only get here when the
+      // current state differs from the desired one, so one click lands
+      // exactly on shouldCheck.
+      clickNatively(cb);
     }
   }
 
@@ -4584,6 +5108,28 @@
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     el.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  /**
+   * Checks/selects a checkbox or radio input the way a real user would,
+   * instead of assigning `.checked` directly.
+   *
+   * React overrides the `checked` property setter the same way it overrides
+   * `value` (see fillInput below) to track whether a change came from a
+   * real user interaction vs. programmatic JS. Assigning `el.checked = ...`
+   * and firing synthetic input/change events (the old approach here)
+   * doesn't reliably register with that tracking on a React-controlled
+   * radio/checkbox — the visual/DOM change can be silently reverted on the
+   * component's next re-render, leaving the field looking blank even
+   * though this code "filled" it. A genuine `.click()` goes through the
+   * browser's native activation behavior instead, which correctly flips
+   * `checked` and dispatches real input/change events as part of that
+   * spec-defined behavior.
+   * @param {HTMLInputElement} el - The checkbox or radio input to click.
+   */
+  function clickNatively(el) {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.click();
   }
 
   /**
@@ -5410,11 +5956,7 @@
               for (const filled of filledLabels) {
                 if (filled.length > 5 && (qText.includes(filled) || filled.includes(qText))) return false;
               }
-              // Check if element already has a value
-              const el = q._el;
-              if (!el) return true;
-              const val = el.value || '';
-              return !val || val.trim().length === 0;
+              return true;
             });
 
             console.log(`[JobMatch AI] iframe Pass 2 (AI): ${emptyQuestions.length} of ${questions.length} fields need AI (${filledLabels.size} labels filled by Pass 1)`);

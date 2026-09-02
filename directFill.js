@@ -3,10 +3,13 @@
  * No AI needed. Runs as Pass 1 before the AI autofill.
  *
  * Strategy:
- * 1. Scan ALL interactive elements (inputs, selects, textareas, React Selects)
+ * 1. Scan ALL interactive elements (inputs, selects, textareas, React Selects,
+ *    and custom Yes/No button-toggle widgets like Ashby's)
  * 2. For each, extract its label using multiple strategies
  * 3. Match label to Q&A or profile data
- * 4. Fill directly with proper event simulation
+ * 4. Fill directly with proper event simulation — real clicks for
+ *    button-driven widgets (React Select, Yes/No toggles) rather than
+ *    setting hidden DOM state those widgets don't actually listen to
  */
 
 (function () {
@@ -81,6 +84,61 @@
 
   function cleanLabel(text) {
     return (text || '').replace(/\*/g, '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * Resolves the QUESTION label for a radio group — e.g. "What is your
+   * gender identity?" — as distinct from any individual option's own
+   * label. Many ATSs (seen on Ashby) give each radio option its own
+   * `<label for="optionId">` purely for the option's visible text ("Man",
+   * "Woman", ...), inside a <fieldset> whose own <label>/<legend> carries
+   * the actual question. getElementLabel's `label[for]` strategy has no
+   * way to tell those apart — called on any one radio, it always finds
+   * that radio's own option label first and returns e.g. "Man" instead of
+   * the question, so the group can never match a Q&A entry at all.
+   * @param {HTMLInputElement[]} radios all radios in one group (same name)
+   * @returns {string}
+   */
+  function findRadioGroupContainer(radios) {
+    // Walk up from the radio's PARENT, not the radio itself — a naive
+    // `.closest('fieldset, [role="radiogroup"], [class*="radio-group"]')`
+    // called on the radio matches the radio's own class (or its immediate
+    // per-option wrapper div's class) before ever reaching the real group
+    // container, because ATS markup (seen on Ashby) names those
+    // "...-radio-group-option-radio" / "...-radio-group-option" — both
+    // contain "radio-group" as a literal substring. Skip any ancestor
+    // whose own class marks it as an option-level wrapper instead of the
+    // group container itself.
+    let node = radios[0].parentElement;
+    while (node) {
+      const tag = node.tagName;
+      const cls = typeof node.className === 'string' ? node.className : '';
+      const role = node.getAttribute && node.getAttribute('role');
+      const isOptionWrapper = /-option(-|$)/i.test(cls) || /\boption\b/i.test(cls);
+      if (!isOptionWrapper && (tag === 'FIELDSET' || role === 'radiogroup' || /radio-?group/i.test(cls))) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function getRadioGroupLabel(radios) {
+    const container = findRadioGroupContainer(radios);
+    if (container) {
+      const radioIds = new Set(radios.map(r => r.id).filter(Boolean));
+      for (const cand of container.querySelectorAll('label, legend')) {
+        const forId = cand.getAttribute('for');
+        if (forId && radioIds.has(forId)) continue; // an option's own label, not the question
+        if (radios.some(r => cand.contains(r))) continue; // wraps a radio directly — also an option label
+        const text = cleanLabel(cand.textContent);
+        if (text) return text;
+      }
+    }
+    // No fieldset/legend structure found — fall back to the generic
+    // single-element resolver (covers radio groups with only a group-level
+    // aria-label/wrapper and no per-option labels to get confused by).
+    return getElementLabel(radios[0]);
   }
 
   // ─── Event simulation ──────────────────────────────────────────
@@ -187,6 +245,12 @@
     return null;
   }
 
+  // Shared by the checkbox handler (section 4) and the custom yes/no
+  // button-toggle handler (section 5): whether a Q&A answer reads as a
+  // yes/no-shaped answer at all, and if so, which side it lands on.
+  const YES_NO_ANSWER_RE = /^(yes|no|true|false|i am|i do|i have|i don't|i am not)/i;
+  const AFFIRMATIVE_ANSWER_RE = /^(yes|true|1|checked|agree|accept|i am|i do|i have)/i;
+
   // ─── Option matching for dropdowns ────────────────────────────
 
   function findBestOption(options, answer) {
@@ -209,6 +273,82 @@
       if (sw) return sw;
     }
     return null;
+  }
+
+  // ─── Custom Yes/No button-toggle handler (Ashby-style) ────────
+  //
+  // Some ATSs (seen on Ashby) render a Yes/No question as two <button>
+  // elements carrying aria-pressed/data-option, plus a hidden,
+  // tabindex="-1" checkbox that mirrors the answer for form semantics —
+  // but that checkbox has no listener of its own; it's only ever written
+  // to by the page's own click handler on the buttons, never read from.
+  // So the checkbox handler above (section 4) can find the label and the
+  // right answer, but setting `.checked` and firing a change event never
+  // reaches the page's real state. The fix is the same one fillReactSelect
+  // (below) already uses for React Select: click the real interactive
+  // element instead of poking at hidden DOM.
+
+  /**
+   * Given the two <button> children of a yes/no toggle group, figures out
+   * which is "Yes" and which is "No". Returns null (skip, don't guess) if
+   * that can't be determined confidently.
+   */
+  function classifyToggleButtons(buttons) {
+    const byOption = {};
+    buttons.forEach(b => {
+      const opt = (b.getAttribute('data-option') || '').toLowerCase().trim();
+      if (opt) byOption[opt] = b;
+    });
+    if (byOption.yes && byOption.no) return { yesBtn: byOption.yes, noBtn: byOption.no };
+
+    // Fall back to the buttons' own text for widgets that skip data-option.
+    const byText = {};
+    buttons.forEach(b => {
+      const t = cleanLabel(b.textContent).toLowerCase();
+      if (/^(yes|true|agree|accept)$/.test(t)) byText.yes = b;
+      else if (/^(no|false|disagree|decline)$/.test(t)) byText.no = b;
+    });
+    if (byText.yes && byText.no) return { yesBtn: byText.yes, noBtn: byText.no };
+    return null;
+  }
+
+  /**
+   * Resolves the question text for a toggle group. Scoped to the nearest
+   * ancestor that demarcates a single form field (Ashby marks these with
+   * data-field-path; other ATSs typically use a "field"/"form-group"
+   * class) so a neighboring question's label is never pulled in.
+   */
+  function getToggleGroupLabel(group) {
+    const fieldEntry = group.closest('[data-field-path], .field, .form-group, .form-field, [class*="field"], [class*="Field"]');
+    const scope = fieldEntry || group.parentElement || group;
+    const label = scope.querySelector('label, [class*="label"], [class*="Label"]');
+    if (label && !label.contains(group)) return cleanLabel(label.textContent);
+    return '';
+  }
+
+  // Clicks an element the same defensive way fillReactSelect clicks
+  // options: a real `.click()` (preceded by a `mousedown`) instead of
+  // programmatic property assignment.
+  //
+  // React overrides the `checked` property setter the same way it
+  // overrides `value` (see setNativeInputValue above) to track whether a
+  // change came from a real user interaction vs. programmatic JS.
+  // Assigning `el.checked = ...` (for a radio/checkbox) or toggling
+  // `aria-pressed` directly (for a custom toggle button) and firing
+  // synthetic input/change events doesn't reliably register with that
+  // tracking on a React-controlled element — the visual/DOM change can be
+  // silently reverted on the component's next re-render, leaving the
+  // field looking blank even though this code "filled" it. A genuine
+  // `.click()` goes through the browser's native activation behavior
+  // instead, which correctly flips `checked` (for inputs) and dispatches
+  // real input/change events as part of that spec-defined behavior — the
+  // element's own click handler (for buttons) takes it from there.
+  //
+  // Shared by the Yes/No button-toggle handler (section 5) and the
+  // radio/checkbox handlers (sections 3-4) below.
+  function clickNatively(el) {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.click();
   }
 
   // ─── React Select handler ────────────────────────────────────
@@ -333,7 +473,7 @@
     });
 
     for (const [name, radios] of Object.entries(radioGroups)) {
-      const label = getElementLabel(radios[0]) || name.replace(/_/g, ' ');
+      const label = getRadioGroupLabel(radios) || name.replace(/_/g, ' ');
       const answer = matchQA(label, qaList, profile);
       if (!answer) continue;
 
@@ -346,8 +486,10 @@
         const radio = radioLabels.find(r => r.text === best);
         if (radio) {
           dbg(`Direct fill radio: "${label}" matched`);
-          radio.el.checked = true;
-          fireEvents(radio.el);
+          // Clicking an already-checked radio is a safe no-op (radios can't
+          // be deselected by clicking themselves), so only click when it's
+          // actually necessary to change state.
+          if (!radio.el.checked) clickNatively(radio.el);
           filledLabels.add(label);
           filled++;
         }
@@ -357,6 +499,11 @@
     // ── 4. Checkboxes (only for Yes/No type questions, not multi-select) ──
     // Skip checkboxes that look like multi-select options (city names, skills, etc.)
     document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      // Decoy checkbox for a custom Yes/No button-toggle widget (Ashby-
+      // style) — section 5 below owns this field and clicks the real
+      // button; setting .checked here wouldn't reach the page's state
+      // anyway (see section 5's comment), so don't double-report it filled.
+      if (cb.parentElement && cb.parentElement.querySelector('button[aria-pressed]')) return;
       if (!isFieldEligible(cb)) return; // C3b
       const label = getElementLabel(cb);
       if (!label) return;
@@ -367,20 +514,57 @@
       if (!answer) return;
 
       // Only fill if the Q&A answer is clearly a yes/no type
-      const isYesNo = /^(yes|no|true|false|i am|i do|i have|i don't|i am not)/i.test(answer);
-      if (!isYesNo) return;
+      if (!YES_NO_ANSWER_RE.test(answer)) return;
 
-      const shouldCheck = /^(yes|true|1|checked|agree|accept|i am|i do|i have)/i.test(answer);
+      const shouldCheck = AFFIRMATIVE_ANSWER_RE.test(answer);
       if (cb.checked !== shouldCheck) {
         dbg(`Direct fill checkbox: "${label}" matched`);
-        cb.checked = shouldCheck;
-        fireEvents(cb);
+        // A single click toggles the checkbox; we only get here when the
+        // current state differs from the desired one, so one click lands
+        // exactly on shouldCheck.
+        clickNatively(cb);
         filledLabels.add(label);
         filled++;
       }
     });
 
-    // ── 5. React Select dropdowns ──
+    // ── 5. Custom Yes/No button-toggle widgets (Ashby-style) ──
+    // See the classifyToggleButtons/getToggleGroupLabel/clickNatively
+    // helpers above for why this can't be handled by the checkbox branch.
+    const processedToggleGroups = new Set();
+    document.querySelectorAll('button[aria-pressed]').forEach(btn => {
+      const group = btn.parentElement;
+      if (!group || processedToggleGroups.has(group)) return;
+      processedToggleGroups.add(group);
+
+      const buttons = Array.from(group.children).filter(el => el.tagName === 'BUTTON' && el.hasAttribute('aria-pressed'));
+      if (buttons.length !== 2) return; // only handle unambiguous yes/no pairs
+
+      // Already answered (by the user or an earlier run) — never override.
+      if (buttons.some(b => b.getAttribute('aria-pressed') === 'true')) return;
+
+      const toggle = classifyToggleButtons(buttons);
+      if (!toggle) return; // can't confidently tell yes from no — skip rather than guess
+
+      // C3b — probe whatever real form field backs this widget, if any.
+      const hiddenInput = group.querySelector('input[type="checkbox"], input[type="radio"], input[type="hidden"]');
+      if (!isFieldEligible(hiddenInput || group)) return;
+
+      const label = getToggleGroupLabel(group);
+      if (!label) return;
+
+      const answer = matchQA(label, qaList, profile);
+      if (!answer || !YES_NO_ANSWER_RE.test(answer)) return;
+
+      const wantsYes = AFFIRMATIVE_ANSWER_RE.test(answer);
+      const target = wantsYes ? toggle.yesBtn : toggle.noBtn;
+      dbg(`Direct fill yes/no toggle: "${label}" -> ${wantsYes ? 'Yes' : 'No'}`);
+      clickNatively(target);
+      filledLabels.add(label);
+      filled++;
+    });
+
+    // ── 6. React Select dropdowns ──
     // Find all React Select containers by looking for the input[role="combobox"] inside them
     const reactInputs = document.querySelectorAll('input[role="combobox"]');
     const processedContainers = new Set();

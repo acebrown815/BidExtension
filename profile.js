@@ -2411,7 +2411,11 @@ function renderAtsKeywordsByResume() {
 
   let html = '';
   resumes.forEach(r => {
-    const sorted = extractAtsKeywords(r.profile).map(k => [k.term, k.count]);
+    // count can be fractional (recency-weighted experience-bullet mentions
+    // — see lib/resumeKeywords.js) — round for a clean integer badge, the
+    // underlying precision only matters to the scoring math in
+    // lib/resumeRanker.js, not to this display.
+    const sorted = extractAtsKeywords(r.profile).map(k => [k.term, Math.round(k.count)]);
 
     html += `<div class="ats-resume-block">
       <h4>${escapeHTML(r.name || 'Resume')} <span class="ats-count">${sorted.length} keyword${sorted.length === 1 ? '' : 's'}</span></h4>`;
