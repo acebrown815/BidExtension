@@ -1383,6 +1383,32 @@ const handlers = {
     return { filled: totalFilled };
   },
 
+  // Some ATS platforms embed the real job posting in a cross-origin
+  // <iframe> (e.g. Greenhouse's job-boards.greenhouse.io embed widget,
+  // used by many company career pages). The top frame's content.js
+  // instance can never read that iframe's DOM directly — same-origin
+  // policy blocks it regardless of selectors — but "all_frames": true
+  // means content.js is separately injected into the iframe itself, where
+  // it CAN read its own document. This asks every subframe of the active
+  // tab (via chrome.webNavigation, the only API that can target a frame
+  // by id) for its own confidently-extracted JD text, and returns
+  // whichever one is longest so the top frame's resume ranking/AI-analysis
+  // pipeline has real JD text to work with instead of finding nothing.
+  'GET_JD_FROM_FRAMES': async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return { jd: '' };
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    let best = '';
+    for (const frame of frames) {
+      if (frame.frameId === 0) continue; // skip top frame (already tried by the caller)
+      try {
+        const result = await chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_JD_IN_FRAME' }, { frameId: frame.frameId });
+        if (result?.jd && result.jd.length > best.length) best = result.jd;
+      } catch (_) {} // iframe might not have our content script, or hasn't finished loading
+    }
+    return { jd: best };
+  },
+
   // ── Per-tab job description cache ───────────────────────────────────────
   // Some job boards (e.g. Ashby: jobs.ashbyhq.com/<company>/<id> for the
   // posting, .../<id>/application for the form) route the application form

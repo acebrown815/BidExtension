@@ -2590,6 +2590,14 @@
       sendMessage({ type: 'CACHE_TAB_JD', jd: confident, url: window.location.href }).catch(() => {});
       return confident;
     }
+    // Nothing in THIS frame's own document — try any cross-origin iframe
+    // this page embeds the real posting in (see getJDFromIframes()) before
+    // falling back to the cross-tab cache/body scrape below.
+    const fromFrame = await getJDFromIframes();
+    if (fromFrame) {
+      sendMessage({ type: 'CACHE_TAB_JD', jd: fromFrame, url: window.location.href }).catch(() => {});
+      return fromFrame;
+    }
     try {
       const cached = await sendMessage({ type: 'GET_CACHED_TAB_JD' });
       if (cached && cached.jd) return cached.jd;
@@ -2632,10 +2640,40 @@
   async function getConfidentJobDescriptionForRanking() {
     const confident = extractJobDescriptionConfident();
     if (confident) return confident;
+    const fromFrame = await getJDFromIframes();
+    if (fromFrame) return fromFrame;
     try {
       const cached = await sendMessage({ type: 'GET_CACHED_TAB_JD' });
       if (cached && cached.jd) return cached.jd;
     } catch (_) { /* best-effort */ }
+    return '';
+  }
+
+  /**
+   * Looks for a confident job description inside any subframe of this tab —
+   * needed when the ATS embeds the real posting via a cross-origin
+   * <iframe> (e.g. Greenhouse's `job-boards.greenhouse.io/embed/job_app`
+   * widget many company career pages use). The top frame's own
+   * extractJobDescriptionConfident() runs `document.querySelector()` against
+   * ITS OWN document only — browser same-origin policy makes a cross-origin
+   * iframe's DOM completely invisible to it, no matter which selector is
+   * used. manifest.json's "all_frames": true means this content script is
+   * ALSO injected into that iframe as its own independent instance (see
+   * isRealTopFrame() below), so it can read its own document just fine —
+   * this just asks the background service worker (the only thing that can
+   * address a specific frame id, via chrome.webNavigation) to broadcast an
+   * EXTRACT_JD_IN_FRAME request to every subframe and relay back whichever
+   * one found real JD text.
+   * @async
+   * @returns {Promise<string>} The longest confidently-extracted JD text
+   *   found in a subframe, or '' if none of this tab's iframes have one
+   *   (including the common case of no iframes at all).
+   */
+  async function getJDFromIframes() {
+    try {
+      const result = await sendMessage({ type: 'GET_JD_FROM_FRAMES' });
+      if (result && result.jd) return result.jd;
+    } catch (_) { /* best-effort — background worker unavailable, or no matching frames */ }
     return '';
   }
 
@@ -3816,9 +3854,28 @@
       // (NEEDS_USER_INPUT / blank) is simply left for the user to fill in.
       const answers = response.answers || response;
       const { filled, skipped } = await fillFormFromAnswers(Array.isArray(answers) ? answers : []);
-      const totalFilled = directFilled + filled;
+      let totalFilled = directFilled + filled;
+
+      // Also try any iframes on the page, even though the top frame DID
+      // have fields to fill above. The old code only broadcast to iframes
+      // when the top frame found ZERO fields — but a page can have both: an
+      // unrelated top-frame field (e.g. this site's own "Search For:" nav
+      // search box) makes questions.length > 0, while the REAL application
+      // form sits inside a cross-origin ATS iframe (Greenhouse's embed
+      // widget, etc. — same one worked around for JD extraction in
+      // getJDFromIframes()) and would otherwise be silently skipped
+      // entirely. Cheap when there are no iframes, or none with our content
+      // script/fillable fields — see AUTOFILL_IN_FRAMES in background.js.
+      let iframeFilled = 0;
+      try {
+        const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
+        iframeFilled = iframeData?.filled || 0;
+        totalFilled += iframeFilled;
+      } catch (_) { /* best-effort — top-frame fill above still stands */ }
+
       let msg = `Filled ${totalFilled} field${totalFilled === 1 ? '' : 's'}.`;
       if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
+      if (iframeFilled > 0) msg += ` (${iframeFilled} in an embedded form.)`;
       if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
       setStatus(msg, 'success');
       setTimeout(clearStatus, 4000);
@@ -5901,8 +5958,28 @@
     // our hosts, the toolbar icon still opens the panel — we don't need
     // to fight the page to keep a floating button alive.
   } else {
-    // Running inside an iframe — listen for autofill requests from the parent
+    // Running inside an iframe — listen for autofill/JD-extraction requests
+    // from the parent (relayed via the background service worker, which is
+    // the only thing that can address a specific frame by id — see
+    // AUTOFILL_IN_FRAMES/GET_JD_FROM_FRAMES in background.js).
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg.type === 'EXTRACT_JD_IN_FRAME') {
+        // Some ATS platforms (e.g. Greenhouse's job-boards.greenhouse.io
+        // embed widget) load the real job description inside a
+        // cross-origin <iframe>, which the top frame's own
+        // extractJobDescriptionConfident()/document.querySelector() calls
+        // can never see into (browser same-origin policy blocks that
+        // unconditionally, regardless of selector). Because "all_frames":
+        // true in manifest.json injects this whole script into that iframe
+        // too, THIS frame can read its own document directly — so just run
+        // the same confident extractor here and hand the text back up.
+        try {
+          sendResponse({ jd: extractJobDescriptionConfident() });
+        } catch (err) {
+          sendResponse({ jd: '', error: err.message });
+        }
+        return true;
+      }
       if (msg.type === 'AUTOFILL_IN_FRAME') {
         (async () => {
           try {
