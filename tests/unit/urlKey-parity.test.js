@@ -22,6 +22,8 @@ const cases = [
   'https://x.com/?vjk=1&jobid=2',
   'https://x.com/?jobid=2&vjk=1',
   'https://acme.com/jobs/123#anchor',
+  'https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510',
+  'https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510/application',
   'not a url',
   '',
 ];

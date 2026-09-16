@@ -72,6 +72,23 @@ describe('normalizeUrlForCache — preserves job identifiers', () => {
     const b = normalizeUrlForCache('https://x.com/?jobid=2&vjk=1');
     expect(a).toBe(b);
   });
+
+  it('collapses Ashby overview and application-form pages to one key', () => {
+    const overview = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510');
+    const application = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510/application');
+    expect(application).toBe(overview);
+  });
+
+  it('does not touch /application suffix on non-Ashby hosts', () => {
+    const k = normalizeUrlForCache('https://acme.com/jobs/123/application');
+    expect(k).toBe('https://acme.com/jobs/123/application');
+  });
+
+  it('keeps two different Ashby job ids distinct', () => {
+    const a = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/aaa/application');
+    const b = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/bbb/application');
+    expect(a).not.toBe(b);
+  });
 });
 
 describe('normalizeUrlForCache — robustness', () => {
