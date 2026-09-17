@@ -31,6 +31,7 @@ const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 let extractJobDescriptionConfident;
 let extractJobDescriptionFromLdJson;
 let jobPostingHtmlToText;
+let textExcludingForms;
 
 beforeAll(() => {
   const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
@@ -43,8 +44,8 @@ beforeAll(() => {
   }
   const extracted = src.slice(start, end);
   // eslint-disable-next-line no-eval
-  const factory = (0, eval)(`(function () { ${extracted} return { extractJobDescriptionConfident, extractJobDescriptionFromLdJson, jobPostingHtmlToText }; })`);
-  ({ extractJobDescriptionConfident, extractJobDescriptionFromLdJson, jobPostingHtmlToText } = factory());
+  const factory = (0, eval)(`(function () { ${extracted} return { extractJobDescriptionConfident, extractJobDescriptionFromLdJson, jobPostingHtmlToText, textExcludingForms }; })`);
+  ({ extractJobDescriptionConfident, extractJobDescriptionFromLdJson, jobPostingHtmlToText, textExcludingForms } = factory());
 });
 
 const DOVER_DESCRIPTION_HTML = '<h2>Company Overview</h2><p>Cooperdyne Tech is a leading technology solutions provider.</p><h2>Key Responsibilities</h2><ul><li><p>Design and develop web applications using .NET 6+ and C#</p></li><li><p>Build and maintain REST APIs and microservices on Azure</p></li></ul>';
@@ -143,5 +144,77 @@ describe('content.js extractJobDescriptionConfident — Dover-style pages', () =
   it('returns empty string when neither selectors, landmarks, nor JSON-LD have a real JD', () => {
     document.body.innerHTML = '<div class="some-random-widget">Not a job description.</div>';
     expect(extractJobDescriptionConfident()).toBe('');
+  });
+});
+
+// Regression test for a live bug on a JazzHR/Resumator job board
+// (invaluable.applytojob.com): the page has no ATS-specific selector match
+// and no JSON-LD, so extractJobDescriptionConfident() fell through to the
+// "largest text block" heuristic — and the ONLY landmark on the page is a
+// single <main> that wraps BOTH the job description AND the entire
+// application form (name/email/resume upload, EEO demographic questions,
+// "Human Check", "Submit Application"). Two problems: (1) the form's own
+// labels/options got sent to the AI as if they were job requirements, and
+// (2) anything that changes the form's rendered state between visits
+// (AutoFill filling fields, a "we've received your resume" message
+// toggling) changed this "JD" text, which could shift which resumes
+// landed in the local top-3 match set — silently orphaning
+// previously-cached analyses for resumes that fell out of it, even though
+// those cache entries were still perfectly valid. Fix: textExcludingForms()
+// hides any nested <form> before reading .innerText.
+const JAZZHR_STYLE_MAIN_HTML = `
+  <h1>Senior Backend Engineer</h1>
+  <p>${'Invaluable is a leading online auction marketplace. '.repeat(10)}</p>
+  <form action="/apply" method="POST">
+    <label>First Name *</label><input name="firstName">
+    <label>Resume *</label>
+    <div class="resume-status">We've received your resume. Click here to update it.</div>
+    <label>Gender</label>
+    <select><option>Decline to answer</option><option>Female</option><option>Male</option></select>
+    <button type="submit">Submit Application</button>
+  </form>
+`;
+
+describe('content.js textExcludingForms / JazzHR-style pages', () => {
+  it('excludes a nested <form>\'s text from an element\'s innerText', () => {
+    document.body.innerHTML = `<main>${JAZZHR_STYLE_MAIN_HTML}</main>`;
+    const text = textExcludingForms(document.querySelector('main'));
+    expect(text).toContain('Invaluable is a leading online auction marketplace');
+    expect(text).not.toContain('First Name');
+    expect(text).not.toContain('Submit Application');
+    expect(text).not.toContain('Gender');
+  });
+
+  it('restores each form\'s original inline display style afterward', () => {
+    document.body.innerHTML = `<main>${JAZZHR_STYLE_MAIN_HTML}</main>`;
+    const form = document.querySelector('form');
+    form.style.display = 'flex';
+    textExcludingForms(document.querySelector('main'));
+    expect(form.style.display).toBe('flex');
+  });
+
+  it('is a no-op (still returns full text) when there is no nested form', () => {
+    document.body.innerHTML = '<main>Just a plain job description, no form here.</main>';
+    expect(textExcludingForms(document.querySelector('main'))).toBe('Just a plain job description, no form here.');
+  });
+
+  it('extractJobDescriptionConfident excludes the application form on a page where <main> wraps both', () => {
+    document.body.innerHTML = `<main>${JAZZHR_STYLE_MAIN_HTML}</main>`;
+    const jd = extractJobDescriptionConfident();
+    expect(jd).toContain('Invaluable is a leading online auction marketplace');
+    expect(jd).not.toContain('Submit Application');
+    expect(jd).not.toContain('Gender');
+    expect(jd).not.toContain("We've received your resume");
+  });
+
+  it('extractJobDescriptionConfident stays stable whether or not the form has already been filled/toggled', () => {
+    document.body.innerHTML = `<main>${JAZZHR_STYLE_MAIN_HTML}</main>`;
+    const before = extractJobDescriptionConfident();
+    // Simulate AutoFill (or the site itself) changing the form's rendered
+    // state between visits — this must not change the extracted "JD".
+    document.querySelector('input[name="firstName"]').value = 'Jane';
+    document.querySelector('.resume-status').textContent = 'Resume attached: resume.pdf';
+    const after = extractJobDescriptionConfident();
+    expect(after).toBe(before);
   });
 });

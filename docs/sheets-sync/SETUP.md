@@ -124,10 +124,18 @@ window focus — `lib/fakeVisible.js` makes each page believe it's visible
 regardless, since some ATS platforms (Dover, confirmed) otherwise defer
 loading the job description until their tab is actually visible, which
 would make resume matching unreliable for a background-tab automation like
-this one. This only analyzes; it does not fill out or submit any
-application. Review each result yourself and click **Mark as Applied** to
-record it, the same as any other job — that's what fills in a row's
-Company/Location/Salary/ResumeNo/Score and makes it stop counting as
+this one.
+
+If a job's analysis scores above 75% — the same threshold that already
+gates the "Mark as Applied" button — the extension also autofills that
+page's application form automatically, using whichever resume actually won
+the analysis (the same AutoFill logic a manual click runs). A job at or
+below 75%, or a page with no application form on it (e.g. a JD-only
+overview page), is left as analysis-only; nothing is ever submitted either
+way. Review each result yourself — including the autofilled form, if there
+is one — and click **Mark as Applied** to record it, the same as any other
+job — that's what fills in a row's Company/Location/Salary/ResumeNo/Score
+and makes it stop counting as
 pending. Click the button again to pick up the next batch.
 
 If you deployed `Code.gs` before this feature existed, you must re-deploy

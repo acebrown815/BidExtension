@@ -829,9 +829,11 @@
           Add rows to your Google Sheet with just a <strong>Link</strong> (and optionally a
           Title) — leave Company, Location, Salary, and ResumeNo blank to mark them as pending.
           Clicking below opens up to 10 pending rows in new background tabs (one after another,
-          not all at once) and runs Analyze Job on each automatically. This step only analyzes
-          — review each result and click Mark as Applied yourself to fill in that row;
-          auto-apply isn't implemented yet. Requires Google Sheets Sync to be configured under
+          not all at once) and runs Analyze Job on each automatically. If a job scores above
+          75% with its best-matching resume, the application form on that same page is also
+          autofilled automatically — nothing is ever submitted for you. Review each result
+          (and the autofilled form, if there is one) and click Mark as Applied yourself to fill
+          in that row and finish submitting. Requires Google Sheets Sync to be configured under
           the Settings tab.
         </p>
         <button class="btn btn-primary" id="analyzePendingJobsBtn">Analyze Pending Jobs</button>

@@ -116,7 +116,17 @@
   // different resume after an (auto or manual) resume switch.
 
   const CACHE_STORAGE_KEY = 'jm_analysisCache'; // Key used in chrome.storage.local
-  const MAX_CACHE_ENTRIES = 50;                  // LRU eviction kicks in beyond this limit
+  // LRU eviction (oldest-inserted first) kicks in beyond this limit. 50 was
+  // too low in practice: analyzeAndPickBest()'s 3-way resume compare writes
+  // 2-3 entries per job in one run, so moderate usage across many jobs
+  // crosses 50 fast — and a fresh write can then evict a SIBLING entry from
+  // the SAME job's own compare (or another job's) that's still perfectly
+  // relevant, forcing a needless re-analysis with no visible error anywhere
+  // (confirmed live: a 3-way compare's earlier-cached candidate silently
+  // disappeared after later, unrelated testing pushed the total over 50).
+  // The extension already has the "unlimitedStorage" permission, so there's
+  // no real storage-size reason to keep the cap this tight.
+  const MAX_CACHE_ENTRIES = 500;
 
   /**
    * Builds the composite cache key for a page URL + resume pairing.
@@ -2527,6 +2537,45 @@
   }
 
   /**
+   * Like `el.innerText`, but excludes the text of any <form> element(s)
+   * nested inside it. Needed because some ATS platforms (confirmed on a
+   * JazzHR/Resumator job board, invaluable.applytojob.com) render the
+   * entire application form INSIDE the same landmark element (e.g. <main>)
+   * as the job description, with no separate JD-only container anywhere on
+   * the page. Without this, extractJobDescriptionConfident()'s selector
+   * and "largest text block" matches can include the form's own field
+   * labels, EEO demographic question options, and instructions as if they
+   * were part of the job description — degrading match quality (the AI
+   * sees "Gender", "Race/Ethnicity", "Human Check" mixed in as if they were
+   * job requirements) and, worse, making the extracted text UNSTABLE:
+   * anything that changes the form's rendered state between visits
+   * (AutoFill filling fields, a "we've received your resume" message
+   * toggling visibility, a validation error appearing) changes this "JD"
+   * text, which can shift which resumes rank in the local top-3 match set
+   * and silently orphan previously-cached analyses for resumes that fall
+   * out of it — even though those cache entries are still perfectly valid.
+   *
+   * Temporarily hides each <form> (display: none) rather than cloning or
+   * removing it from the DOM — a synchronous, read-only toggle that
+   * doesn't disturb focus, event listeners, or a framework's own
+   * reconciliation of that subtree — then restores each form's original
+   * inline display value immediately after reading .innerText.
+   * @param {Element} el
+   * @returns {string}
+   */
+  function textExcludingForms(el) {
+    const forms = el.querySelectorAll('form');
+    if (forms.length === 0) return el.innerText.trim();
+    const previousDisplay = Array.from(forms, f => f.style.display);
+    forms.forEach(f => { f.style.display = 'none'; });
+    try {
+      return el.innerText.trim();
+    } finally {
+      forms.forEach((f, i) => { f.style.display = previousDisplay[i]; });
+    }
+  }
+
+  /**
    * Extracts the full job description text from the current page using only
    * signals that actually indicate job-description content: a site-specific
    * selector match, or the largest named content block (main/article/etc.)
@@ -2573,8 +2622,9 @@
 
     for (const sel of selectors) {
       const el = document.querySelector(sel);
-      if (el && el.innerText.trim().length > 100) {
-        return el.innerText.trim();
+      if (el) {
+        const text = textExcludingForms(el);
+        if (text.length > 100) return text;
       }
     }
 
@@ -2595,7 +2645,7 @@
     let bestBlock = null;
     let bestLen = 0;
     for (const block of blocks) {
-      const text = block.innerText.trim();
+      const text = textExcludingForms(block);
       if (text.length > bestLen) {
         bestLen = text.length;
         bestBlock = text;
@@ -3445,7 +3495,19 @@
             for (let i = 0; i < idsNeedingCall.length; i++) {
               const id = idsNeedingCall[i];
               const outcome = settled[i];
-              if (outcome.status !== 'fulfilled') continue; // one failed candidate doesn't sink the others
+              if (outcome.status !== 'fulfilled') {
+                // One failed candidate doesn't sink the others — but a
+                // silently-swallowed failure here is indistinguishable from
+                // "caching doesn't work": a failed call is never cached (by
+                // design, since it produced nothing valid to cache), so a
+                // resume that fails here will keep failing — and keep
+                // needing a fresh AI call — on every future Analyze Job
+                // click for this job, forever, with no visible error
+                // anywhere. Logging the real reason at least makes that
+                // diagnosable instead of looking like a cache bug.
+                console.warn(`[JobMatch AI] Compare candidate "${(resumeById.get(id) || {}).name || id}" failed and will retry next time:`, outcome.reason);
+                continue;
+              }
               const response = outcome.value;
               results.set(id, { response, title, company, location, salary, jobId, language });
               await setCachedAnalysis(pageUrl, id, {
@@ -6005,6 +6067,44 @@
     });
   }
 
+  /**
+   * Auto-Bid's fully-automated analyze step: waits for the JD to render,
+   * runs the normal Analyze Job flow, and — only if that produced a strong
+   * match — also runs AutoFill automatically, exactly as if the user had
+   * clicked the AutoFill button themselves. This never submits anything;
+   * AutoFill only fills the form's fields, leaving the actual application
+   * submission for the user to review and send.
+   *
+   * The score threshold reuses MIN_SCORE_TO_APPLY (75) — the same bar that
+   * already gates the "Mark as Applied" button — so "good enough to
+   * autofill automatically" and "good enough to mark as applied" stay one
+   * consistent number instead of two separate opinions about what counts
+   * as a strong match.
+   *
+   * "Does this page have a form to submit" is decided implicitly by
+   * autofillForm() itself, not by any separate check here: it already
+   * detects form fields (top frame, then embedded iframes) before doing
+   * anything else, and cleanly no-ops with a "No form fields found" status
+   * if there's nothing to fill — e.g. a JD-only overview page reached
+   * before ever clicking through to an actual application form. Reusing
+   * that existing, already-exercised detection avoids a second, possibly
+   * inconsistent definition of "has a form".
+   *
+   * Only reached via TRIGGER_ANALYZE, which today is exclusively sent by
+   * background.js's Auto-Bid feature — a manual "Analyze Job" click in the
+   * panel always calls analyzeJob() directly and never autofills on its
+   * own; that stays an explicit, separate action the user takes themselves
+   * after reviewing the score.
+   * @async
+   */
+  async function autoAnalyzeAndMaybeAutofill() {
+    await waitForJobDescriptionReady();
+    await analyzeJob();
+    if (currentAnalysis && typeof currentAnalysis.matchScore === 'number' && currentAnalysis.matchScore > MIN_SCORE_TO_APPLY) {
+      try { await autofillForm(); } catch (_) { /* best-effort — a failed autofill still leaves the analysis visible for manual review */ }
+    }
+  }
+
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     switch (message.type) {
       case 'TOGGLE_PANEL':
@@ -6013,12 +6113,10 @@
         break;
       case 'TRIGGER_ANALYZE':
         if (!panelOpen) togglePanel();
-        // Wait for the JD to actually render (see waitForJobDescriptionReady's
-        // doc comment) rather than a fixed guess-and-hope delay, then run
-        // the normal Analyze Job flow. Fire-and-forget from this handler's
-        // point of view — sendResponse below just confirms delivery, not
-        // that analysis has finished.
-        waitForJobDescriptionReady().then(analyzeJob);
+        // Fire-and-forget from this handler's point of view — sendResponse
+        // below just confirms delivery, not that analysis/autofill has
+        // finished (see autoAnalyzeAndMaybeAutofill's doc comment).
+        autoAnalyzeAndMaybeAutofill();
         sendResponse({ success: true });
         break;
       case 'TRIGGER_AUTOFILL':
