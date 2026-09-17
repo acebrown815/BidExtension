@@ -176,6 +176,7 @@ Click **Mark as Applied** on any analyzed job and it's recorded locally with its
 - **Settings → Google Sheets Sync** — paste the Web App URL from a one-time [Apps Script deployment](docs/sheets-sync/SETUP.md) (`docs/sheets-sync/Code.gs`), set a shared secret, and enable sync. No Google API key is involved — Sheets doesn't support write access with a bare key, so the extension POSTs to a script running under your own Google account instead.
 - Every **Mark as Applied** click appends a row — Date, Title, Link, Company, Location, Salary, ResumeNo, Score — to your target tab (or "Applications" by default). The button only flips to the locked "Applied" state once the row is confirmed appended; if sync fails or isn't configured, it stays as "Mark as Applied" so you can retry without creating a duplicate record.
 - **Test Sync** in Settings verifies connectivity and your shared secret without adding a row.
+- **Auto-Bid (Beta)** — seed rows with just a Link (and optionally a Title), leaving Company/Location/Salary/ResumeNo blank to mark them pending. The **Auto-Bid** tab's **Analyze Pending Jobs** button opens up to 10 pending rows' Links in new background tabs — one after another, not all at once, to avoid a network/rate-limit burst — and runs Analyze Job on each automatically. Analysis only, for now — reviewing and marking each one applied is still manual.
 
 See `docs/sheets-sync/SETUP.md` for full setup and troubleshooting steps.
 

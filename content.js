@@ -2471,6 +2471,62 @@
   // (or null) when nothing can be found, so callers can show an error.
 
   /**
+   * Converts a JobPosting's schema.org `description` field — raw HTML, e.g.
+   * "<h2>Overview</h2><p>...</p><ul><li>...</li></ul>" — into readable
+   * plain text. Deliberately never attaches the parsing element to the live
+   * document: `.innerText` needs layout/rendering to work and returns ""
+   * on a detached element, so this inserts newlines at block-level tag
+   * boundaries itself before reading `.textContent`, which works
+   * regardless of attachment. Assigning HTML to `.innerHTML` here is safe
+   * even though it's untrusted page data — a `<script>` tag parsed this
+   * way is inert (never executes), and the element is never appended to
+   * the document for anything to render or interact with.
+   * @param {string} html
+   * @returns {string}
+   */
+  function jobPostingHtmlToText(html) {
+    if (!html || typeof html !== 'string') return '';
+    const withBreaks = html
+      .replace(/<li[^>]*>/gi, '\n• ')
+      .replace(/<\/(p|div|h[1-6])>/gi, '\n')
+      .replace(/<br\s*\/?>/gi, '\n');
+    const div = document.createElement('div');
+    div.innerHTML = withBreaks;
+    return (div.textContent || '').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  /**
+   * Looks for a schema.org JobPosting's `description` field in this page's
+   * JSON-LD structured data (the same `<script type="application/ld+json">`
+   * block extractCompany() already reads `hiringOrganization.name` from)
+   * and returns it as plain text. This is the fallback for ATS platforms
+   * (e.g. Dover) whose JD markup uses CSS-in-JS class names with
+   * hashed/generated suffixes that no fixed selector list can anticipate —
+   * the structured data is immune to that since it's keyed by an explicit,
+   * standardized field name instead of a guessable class/id.
+   * @returns {string} Plain-text JD (only returned if over 100 characters,
+   *   consistent with this file's other "confident" JD signals), or '' if
+   *   no JobPosting JSON-LD with a usable description is found.
+   */
+  function extractJobDescriptionFromLdJson() {
+    try {
+      const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+      for (const script of scripts) {
+        let data;
+        try { data = JSON.parse(script.textContent); } catch (_) { continue; }
+        const posting = data && data['@type'] === 'JobPosting'
+          ? data
+          : (Array.isArray(data) ? data.find(d => d && d['@type'] === 'JobPosting') : null);
+        if (posting && posting.description) {
+          const text = jobPostingHtmlToText(posting.description);
+          if (text.length > 100) return text;
+        }
+      }
+    } catch (_) {}
+    return '';
+  }
+
+  /**
    * Extracts the full job description text from the current page using only
    * signals that actually indicate job-description content: a site-specific
    * selector match, or the largest named content block (main/article/etc.)
@@ -2521,6 +2577,18 @@
         return el.innerText.trim();
       }
     }
+
+    // Some ATS platforms (e.g. Dover) render the JD inside CSS-in-JS class
+    // names with hashed/generated suffixes (e.g.
+    // "InboundApplication__JobDescriptionWrapper-gHhUWm") that no selector
+    // list above can reliably anticipate, and don't use <main>/<article>/
+    // [role="main"]/.content/#content either — so even the "largest text
+    // block" fallback below finds nothing on those pages. Try schema.org
+    // JobPosting structured data next: the same platforms still emit it
+    // (for Google for Jobs / SEO), and it's an explicit, unambiguous field
+    // rather than a guess at markup, so it's tried before that heuristic.
+    const fromLdJson = extractJobDescriptionFromLdJson();
+    if (fromLdJson) return fromLdJson;
 
     // Fallback: try to find the largest text block on page
     const blocks = document.querySelectorAll('main, article, [role="main"], .content, #content');
@@ -2675,6 +2743,53 @@
       if (result && result.jd) return result.jd;
     } catch (_) { /* best-effort — background worker unavailable, or no matching frames */ }
     return '';
+  }
+
+  /**
+   * Polls until this page's job description actually appears to have
+   * rendered, or maxWaitMs elapses — whichever comes first. Used before an
+   * AUTOMATED analysis (TRIGGER_ANALYZE, sent by background.js's Auto-Bid
+   * feature right after opening a job in a brand-new tab) so it doesn't
+   * fire the AI call against whatever's on screen at the exact instant the
+   * browser's "page load complete" event fires. SPA-based ATS platforms
+   * (Ashby, Greenhouse, Workday) routinely finish that event well before
+   * the JD text itself has streamed in from a follow-up API call — a fixed
+   * timeout guesses at that gap, this actually checks for it.
+   *
+   * Requires two consecutive polls to see the SAME non-empty confident JD
+   * text before resolving, not just one non-empty read — some SPAs paint
+   * the JD in progressively, so a single snapshot mid-render could look
+   * "found" while still being incomplete.
+   *
+   * Always resolves, never rejects — if nothing confident ever shows up
+   * within maxWaitMs, this gives up and lets the caller proceed exactly as
+   * it always has. analyzeJob()'s own "Could not find a job description" /
+   * last-resort body-text fallback already covers that page correctly; this
+   * function only decides WHEN to stop waiting before handing off to it.
+   * @param {number} [maxWaitMs=10000]
+   * @param {number} [intervalMs=400]
+   * @returns {Promise<void>}
+   */
+  async function waitForJobDescriptionReady(maxWaitMs = 10000, intervalMs = 400) {
+    const deadline = Date.now() + maxWaitMs;
+    let lastLen = -1;
+    while (Date.now() < deadline) {
+      const confident = extractJobDescriptionConfident();
+      if (confident) {
+        if (confident.length === lastLen) return;
+        lastLen = confident.length;
+      } else {
+        lastLen = -1;
+        // Some ATS embed the real posting in a cross-origin iframe (see
+        // getJDFromIframes) — a hit there is good enough to stop waiting on
+        // its own; the real analysis re-fetches JD text fresh via
+        // getJobDescriptionForAnalysis() regardless, so this only needs to
+        // decide readiness, not return the text itself.
+        const fromFrame = await getJDFromIframes().catch(() => '');
+        if (fromFrame) return;
+      }
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
   }
 
   /** @returns {string} The job title extracted from the page, or ''. */
@@ -3040,6 +3155,18 @@
           const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
           if (resumes.length >= 2) {
             const ranked = rankResumes(jdForRanking, resumes, extractJobTitle());
+            // Populate _resumeScores directly from this ranking rather than
+            // relying on scanResumeMatch() (fired fire-and-forget when the
+            // panel opened) to have finished first — getTopMatchIds() below
+            // reads _resumeScores to decide whether to run the top-3 AI
+            // compare, and the two calls race. A manual Analyze Job click
+            // always wins that race (real human reaction time between
+            // opening the panel and clicking), but the Auto-Bid flow calls
+            // analyzeJob() within about a second of opening the panel, with
+            // no such gap — so without this, _resumeScores can still be {}
+            // by the time getTopMatchIds() runs, silently skipping the
+            // compare even when 2+ resumes genuinely match this JD.
+            ranked.forEach(r => { _resumeScores[r.id] = r.score; });
             const top = ranked[0];
             const currentId = activeResumeId || _activeResumeId;
             if (top && top.score > 0 && top.id !== currentId) {
@@ -5886,7 +6013,12 @@
         break;
       case 'TRIGGER_ANALYZE':
         if (!panelOpen) togglePanel();
-        setTimeout(analyzeJob, 300);
+        // Wait for the JD to actually render (see waitForJobDescriptionReady's
+        // doc comment) rather than a fixed guess-and-hope delay, then run
+        // the normal Analyze Job flow. Fire-and-forget from this handler's
+        // point of view — sendResponse below just confirms delivery, not
+        // that analysis has finished.
+        waitForJobDescriptionReady().then(analyzeJob);
         sendResponse({ success: true });
         break;
       case 'TRIGGER_AUTOFILL':

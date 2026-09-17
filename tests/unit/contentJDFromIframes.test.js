@@ -54,7 +54,10 @@ beforeEach(() => {
   }
   const sendMessageSrc = src.slice(sendMessageStart, sendMessageEnd);
 
-  const jdStart = src.indexOf('function extractJobDescriptionConfident() {');
+  // Starts at jobPostingHtmlToText/extractJobDescriptionFromLdJson (defined
+  // just before extractJobDescriptionConfident, which now calls the latter
+  // as one of its fallback strategies — see contentJdFromLdJson.test.js).
+  const jdStart = src.indexOf('function jobPostingHtmlToText(html) {');
   const jdEnd = src.indexOf('/** @returns {string} The job title extracted from the page, or \'\'. */');
   if (jdStart === -1 || jdEnd === -1 || jdEnd <= jdStart) {
     throw new Error('content.js source anchors moved — update this test\'s JD-extraction extraction markers');

@@ -57,7 +57,18 @@ function doPost(e) {
       return jsonResponse({ success: true });
     }
 
-    return jsonResponse({ success: false, error: 'Request had neither test nor job.' });
+    if (data.listPending) {
+      // Auto-bid pipeline, step 1: the extension pulls rows the user has
+      // manually seeded with just a Link (and optionally a Title) — every
+      // other tracked column still blank — as a queue of postings it should
+      // open and analyze next. A row stops being "pending" the moment any
+      // of those columns gets filled in (by a real "Mark as Applied" sync,
+      // or by the user editing the sheet directly), so completed jobs never
+      // get re-picked.
+      return jsonResponse({ success: true, jobs: listPendingJobs(data.sheetName) });
+    }
+
+    return jsonResponse({ success: false, error: 'Request had neither test, job, nor listPending.' });
   } catch (err) {
     return jsonResponse({ success: false, error: String(err && err.message || err) });
   }
@@ -123,6 +134,33 @@ function appendJobRow(job, sheetName) {
     job.resume || '',                                       // ResumeNo
     typeof job.score === 'number' ? job.score : '',          // Score
   ]);
+}
+
+/**
+ * Finds rows that have a Link but nothing in Company/Location/Salary/
+ * ResumeNo yet — the extension's queue of postings still waiting to be
+ * opened and analyzed. Row 1 (the header) is always skipped.
+ * @param {string} [sheetName] Same fallback rule as getOrCreateSheet.
+ * @returns {Array<{row: number, title: string, link: string}>} `row` is the
+ *   1-indexed sheet row (for a human checking the sheet directly) — the
+ *   extension itself only needs `link`.
+ */
+function listPendingJobs(sheetName) {
+  const sheet = getOrCreateSheet(sheetName);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  const values = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length).getValues();
+  const pending = [];
+  values.forEach((row, i) => {
+    const [, title, link, company, location, salary, resumeNo] = row;
+    const hasLink = link !== '' && link !== null;
+    const isUntouched = !company && !location && !salary && !resumeNo;
+    if (hasLink && isUntouched) {
+      pending.push({ row: i + 2, title: String(title || ''), link: String(link) });
+    }
+  });
+  return pending;
 }
 
 function jsonResponse(obj) {

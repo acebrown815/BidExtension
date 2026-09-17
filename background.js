@@ -741,6 +741,175 @@ async function handleTestSheetsSync() {
   return postToSheetsWebApp({ test: true });
 }
 
+// ─── Auto-bid: analyze pending jobs from the sheet ─────────────────────────
+// Step 1 of the auto-bid pipeline (analysis only — no auto-apply yet). The
+// user seeds the sheet with rows that have just a Link (and optionally a
+// Title), leaving Company/Location/Salary/ResumeNo blank as a signal that
+// they're still pending. This pulls that queue from the Apps Script web
+// app, opens up to AUTO_BID_BATCH_SIZE pending postings in new tabs, and
+// triggers the same "Analyze Job" flow the side panel's button runs on each
+// — so every row gets its Company/Location/Salary/ResumeNo/Score filled in
+// the normal way (via the user reviewing the analysis and clicking Mark as
+// Applied) rather than any of this writing to the sheet directly.
+
+/**
+ * Fetches the queue of not-yet-analyzed job rows from the configured Apps
+ * Script web app.
+ * @async
+ * @throws {Error} Same conditions as postToSheetsWebApp (sync disabled/
+ *   misconfigured, unreachable, secret mismatch, etc.).
+ * @returns {Promise<Array<{row: number, title: string, link: string}>>}
+ */
+async function fetchPendingJobsFromSheet() {
+  const data = await postToSheetsWebApp({ listPending: true });
+  return Array.isArray(data.jobs) ? data.jobs : [];
+}
+
+/**
+ * Resolves once the given tab reaches the "complete" load state, or rejects
+ * if that never happens within timeoutMs. Needed because chrome.tabs.create
+ * resolves as soon as the tab is CREATED, long before the page (and this
+ * extension's content script) has actually loaded.
+ * @param {number} tabId
+ * @param {number} [timeoutMs=30000]
+ * @returns {Promise<void>}
+ */
+function waitForTabToLoad(tabId, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error('Timed out waiting for the job page to load.'));
+    }, timeoutMs);
+    function listener(id, changeInfo) {
+      if (id !== tabId || changeInfo.status !== 'complete') return;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+/**
+ * Sends TRIGGER_ANALYZE to a freshly-loaded tab, retrying briefly — right
+ * after a tab reports "complete" the content script may not have finished
+ * its own injection/setup yet, so the first send or two can fail with "no
+ * receiving end". Content.js's TRIGGER_ANALYZE handler opens the panel and
+ * calls analyzeJob() itself; this only needs to get the message delivered.
+ * @param {number} tabId
+ * @param {number} [attempts=6]
+ * @param {number} [delayMs=500]
+ */
+async function triggerAnalyzeOnTab(tabId, attempts = 6, delayMs = 500) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'TRIGGER_ANALYZE' }, { frameId: 0 });
+      return;
+    } catch (_) {
+      if (i === attempts - 1) throw new Error('The job page never became ready for analysis.');
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
+// Max postings opened per "Analyze Pending Jobs" click. Bounded rather than
+// opening the whole queue at once so a large backlog doesn't spawn dozens of
+// tabs (and AI calls) from a single click.
+const AUTO_BID_BATCH_SIZE = 10;
+
+// Delay between each tab's creation within a batch. Tabs are opened one
+// after another rather than all in the same instant — firing 10
+// simultaneous navigations (each followed by its own AI call once loaded)
+// would burst the network and the AI provider's rate limit all at once.
+// Staggering the START of each tab still finishes the whole batch far
+// faster than fully sequential (open, wait for the ENTIRE analysis, only
+// then open the next), since each tab's own load/JD-wait/analyze cycle
+// runs independently once it's opened — this delay only paces the opens
+// themselves, not the analyses.
+const AUTO_BID_OPEN_STAGGER_MS = 2000;
+
+/**
+ * Opens one pending job's link in a new BACKGROUND tab (active: false —
+ * opening up to AUTO_BID_BATCH_SIZE tabs shouldn't repeatedly steal window
+ * focus) and triggers analysis on it once the tab is ready.
+ *
+ * Some ATS platforms (confirmed on Dover, app.dover.com) defer their own
+ * job-description data fetch until the page believes it's actually
+ * visible — a reasonable-looking optimization that would otherwise defeat
+ * any background-tab automation, since the JD would never render in time
+ * for scanResumeMatch()/analyzeJob()'s resume ranking to have anything to
+ * score against (the AI analysis itself still "succeeds" regardless, via
+ * getJobDescriptionForAnalysis()'s last-resort body-text fallback — just
+ * against a much lower-quality result). lib/fakeVisible.js (a
+ * document_start content script, see manifest.json) neutralizes that by
+ * making every page always report itself as visible/focused, regardless of
+ * this tab's actual active/background state — so it renders the same way
+ * a real foreground tab would, without this needing to fight for the
+ * user's window focus at all.
+ * @param {{row: number, title: string, link: string}} job
+ * @throws {Error} If the row has no link, the page never finishes loading,
+ *   or the content script never becomes reachable.
+ * @returns {Promise<number>} The opened tab's id.
+ */
+async function openAndAnalyzeJob(job) {
+  if (!job.link) throw new Error(`Row ${job.row} is pending but has no Link to open.`);
+  const tab = await chrome.tabs.create({ url: job.link, active: false });
+  try {
+    await waitForTabToLoad(tab.id);
+    await triggerAnalyzeOnTab(tab.id);
+  } catch (err) {
+    // A tab that never finished loading (or whose content script never
+    // became reachable) will never get analyzed — leaving it open would
+    // just silently accumulate one stuck, useless tab per failure across
+    // repeated batches. Close it and let the failure surface in `results`
+    // instead.
+    try { await chrome.tabs.remove(tab.id); } catch (_) { /* already closed by the user, or removal itself failed — nothing more to do */ }
+    throw err;
+  }
+  return tab.id;
+}
+
+/**
+ * Pulls the pending-jobs queue and opens up to AUTO_BID_BATCH_SIZE of them
+ * in new background tabs, one after another (see AUTO_BID_OPEN_STAGGER_MS),
+ * triggering Analyze Job on each as soon as it's ready. A failure on one
+ * job (bad link, page never loads, etc.) doesn't stop the rest of the batch
+ * from opening. Repeat calls naturally pick up whatever's now first in the
+ * queue, since a row stops being pending as soon as its
+ * Company/Location/Salary/ResumeNo get filled in (normally via the user
+ * reviewing the analysis and clicking Mark as Applied).
+ * @async
+ * @returns {Promise<{total: number, started: number, remaining: number,
+ *   reason?: string, results: Array<{job: Object, ok: boolean, error?: string}>}>}
+ */
+async function handleAnalyzePendingJobs() {
+  const jobs = await fetchPendingJobsFromSheet();
+  if (jobs.length === 0) {
+    return {
+      total: 0, started: 0, remaining: 0, results: [],
+      reason: 'No pending jobs found — every row in the sheet already has Company/Location/Salary/ResumeNo filled in.',
+    };
+  }
+
+  const batch = jobs.slice(0, AUTO_BID_BATCH_SIZE);
+  const outcomes = await Promise.allSettled(batch.map((job, i) =>
+    new Promise(r => setTimeout(r, i * AUTO_BID_OPEN_STAGGER_MS)).then(() => openAndAnalyzeJob(job))
+  ));
+
+  const results = outcomes.map((outcome, i) => ({
+    job: batch[i],
+    ok: outcome.status === 'fulfilled',
+    error: outcome.status === 'rejected' ? (outcome.reason && outcome.reason.message) || String(outcome.reason) : undefined,
+  }));
+
+  return {
+    total: batch.length,
+    started: results.filter(r => r.ok).length,
+    remaining: jobs.length - batch.length,
+    results,
+  };
+}
+
 /**
  * Generates a tailored cover letter for a specific job using the AI.
  *
@@ -1272,6 +1441,9 @@ const handlers = {
   },
 
   'TEST_SHEETS_SYNC': (msg) => handleTestSheetsSync(),
+
+  'GET_PENDING_JOBS': (msg) => fetchPendingJobsFromSheet(),
+  'ANALYZE_PENDING_JOBS': (msg) => handleAnalyzePendingJobs(),
 
   'SAVE_QA_LIST': async (msg) => {
     if (msg.qaList && msg.qaList.length > 200) {

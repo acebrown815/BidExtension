@@ -209,7 +209,7 @@ function showResumeLoaded(fileName) {
  * handler below and handleHash() (URL-fragment deep-linking) so clicking a
  * tab and navigating straight to its #hash always do exactly the same
  * thing. Silently does nothing for an unknown tab name.
- * @param {string} tabName - 'profile' | 'qa' | 'saved' | 'stats' | 'settings'.
+ * @param {string} tabName - 'profile' | 'qa' | 'saved' | 'stats' | 'autobid' | 'settings'.
  */
 function activateTab(tabName) {
   const tabBtn = document.querySelector('[data-tab="' + tabName + '"]');
@@ -1821,6 +1821,58 @@ document.getElementById('testSheetsSyncBtn').addEventListener('click', async () 
   } catch (err) {
     resultEl.textContent = 'Sync failed: ' + err.message;
     resultEl.className   = 'test-result error';
+  }
+});
+
+/**
+ * "Analyze Pending Jobs" button handler — auto-bid pipeline step 1.
+ * Saves the current Sheets Sync settings first (same reasoning as Test
+ * Sync: use whatever's in the form, not just whatever was last saved), then
+ * asks the background service worker to pull the pending-jobs queue and
+ * open up to 10 of them in new tabs (opened one after another, not all at
+ * once, so it doesn't burst the network or the AI provider's rate limit),
+ * running Analyze Job on each. The background does the actual tab/analysis
+ * work — this only reports the outcome once every open in the batch has
+ * settled.
+ */
+document.getElementById('analyzePendingJobsBtn').addEventListener('click', async () => {
+  const resultEl = document.getElementById('autoBidResult');
+  resultEl.className     = 'test-result';
+  resultEl.style.display = 'none';
+
+  const settings = await saveSheetsSyncSettings();
+  if (!settings.webAppUrl) {
+    resultEl.textContent   = 'Enter and save a Web App URL first.';
+    resultEl.className     = 'test-result error';
+    resultEl.style.display = 'block';
+    return;
+  }
+
+  const btn = document.getElementById('analyzePendingJobsBtn');
+  btn.disabled = true;
+  resultEl.textContent   = 'Fetching pending jobs and opening them one after another...';
+  resultEl.className     = 'test-result loading';
+  resultEl.style.display = 'block';
+
+  try {
+    const result = await sendMessage({ type: 'ANALYZE_PENDING_JOBS' });
+    if (result.total === 0) {
+      resultEl.textContent = result.reason || 'Nothing to analyze.';
+      resultEl.className   = 'test-result error';
+    } else {
+      const failures = result.results.filter(r => !r.ok);
+      let msg = `Opened ${result.started} of ${result.total} pending job${result.total === 1 ? '' : 's'}. ${result.remaining} more still pending in the sheet.`;
+      if (failures.length) {
+        msg += ' Failed: ' + failures.map(f => `row ${f.job.row} (${f.error})`).join('; ');
+      }
+      resultEl.textContent = msg;
+      resultEl.className   = failures.length ? 'test-result error' : 'test-result success';
+    }
+  } catch (err) {
+    resultEl.textContent = 'Error: ' + err.message;
+    resultEl.className   = 'test-result error';
+  } finally {
+    btn.disabled = false;
   }
 });
 

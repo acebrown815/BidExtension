@@ -655,6 +655,7 @@
     <div class="tab" data-tab="qa">Q&A Answers</div>
     <div class="tab" data-tab="saved">Saved Jobs</div>
     <div class="tab" data-tab="stats">Stats</div>
+    <div class="tab" data-tab="autobid">Auto-Bid</div>
     <div class="tab" data-tab="settings">Settings</div>
   </div>
 
@@ -817,6 +818,24 @@
         <h2>Saved Jobs</h2>
         <div class="saved-count" id="savedCount"></div>
         <div id="savedJobsList"></div>
+      </div>
+    </div>
+
+    <!-- ─── Auto-Bid Tab ────────────────────────────────── -->
+    <div class="tab-content" id="tab-autobid">
+      <div class="card">
+        <h2 style="margin-bottom:3px;">Auto-Bid (Beta)</h2>
+        <p style="font-size:12px;color:#64748b;margin:0 0 12px;">
+          Add rows to your Google Sheet with just a <strong>Link</strong> (and optionally a
+          Title) — leave Company, Location, Salary, and ResumeNo blank to mark them as pending.
+          Clicking below opens up to 10 pending rows in new background tabs (one after another,
+          not all at once) and runs Analyze Job on each automatically. This step only analyzes
+          — review each result and click Mark as Applied yourself to fill in that row;
+          auto-apply isn't implemented yet. Requires Google Sheets Sync to be configured under
+          the Settings tab.
+        </p>
+        <button class="btn btn-primary" id="analyzePendingJobsBtn">Analyze Pending Jobs</button>
+        <div class="test-result" id="autoBidResult"></div>
       </div>
     </div>
 

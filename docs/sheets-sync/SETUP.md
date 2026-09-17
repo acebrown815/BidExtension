@@ -110,6 +110,31 @@ the same local record and retries the sync rather than adding a duplicate.
   one bound to the currently open sheet). Also double-check the tab name
   in the extension's **Sheet Tab Name** field for typos — a mismatched
   name just creates a new tab with that name rather than an error.
+
+## Auto-Bid: analyzing pending jobs (Beta)
+
+Once the sheet is set up, you can seed it with jobs to review: add rows
+with just a **Link** (and optionally a Title), leaving Company, Location,
+Salary, and ResumeNo blank. In the extension's **Auto-Bid** tab, click
+**Analyze Pending Jobs** — the extension opens up to 10 such rows' Links in
+new background tabs (one after another, not all at once, to avoid bursting
+the network or the AI provider's rate limit) and runs Analyze Job on each
+automatically. Tabs are opened in the background rather than stealing your
+window focus — `lib/fakeVisible.js` makes each page believe it's visible
+regardless, since some ATS platforms (Dover, confirmed) otherwise defer
+loading the job description until their tab is actually visible, which
+would make resume matching unreliable for a background-tab automation like
+this one. This only analyzes; it does not fill out or submit any
+application. Review each result yourself and click **Mark as Applied** to
+record it, the same as any other job — that's what fills in a row's
+Company/Location/Salary/ResumeNo/Score and makes it stop counting as
+pending. Click the button again to pick up the next batch.
+
+If you deployed `Code.gs` before this feature existed, you must re-deploy
+(step 6 above) to pick up the `listPending` support — otherwise "Analyze
+Next Pending Job" fails with "Request had neither test, job, nor
+listPending."
+
 - **A row gets added but most columns are blank, or values land under the
   wrong header** — almost always means `Code.gs`'s `doPost`/`appendJobRow`
   doesn't match what the extension actually sends. Two common causes: (1)
