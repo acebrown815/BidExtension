@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
-const SRC = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+const SRC = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
 
 const START_MARKER = 'async function autofillForm() {';
 const END_MARKER = '\n  // ─── Form field detection ─────────────────────────────────────';

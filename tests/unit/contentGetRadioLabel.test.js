@@ -37,7 +37,7 @@ const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 let getRadioLabel;
 
 beforeAll(() => {
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
   const startMarker = 'function getRadioLabel(input) {';
   const endMarker = '/**\n   * Resolves a human-readable label for a form input';
   const start = src.indexOf(startMarker);

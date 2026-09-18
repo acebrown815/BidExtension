@@ -45,7 +45,7 @@ let getJDFromIframes;
 let routes;
 
 beforeEach(() => {
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
 
   const sendMessageStart = src.indexOf('function sendMessage(msg) {');
   const sendMessageEnd = src.indexOf('\n  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {');

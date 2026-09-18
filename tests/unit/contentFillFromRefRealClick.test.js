@@ -22,7 +22,7 @@ const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 let fillRadioFromRef, fillCheckboxFromRef;
 
 beforeAll(() => {
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
   const startMarker = 'function fillRadioFromRef(radioRefs, selectedText) {';
   const endMarker = 'function fillInput(input, value) {';
   const start = src.indexOf(startMarker);

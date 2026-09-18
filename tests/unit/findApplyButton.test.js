@@ -20,7 +20,7 @@ const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 
 let findApplyButton;
 beforeAll(() => {
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
   const startMarker = 'function findApplyButton() {';
   const endMarker = '/**\n   * Initiates the autofill pipeline:';
   const start = src.indexOf(startMarker);

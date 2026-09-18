@@ -34,7 +34,7 @@ let jobPostingHtmlToText;
 let textExcludingForms;
 
 beforeAll(() => {
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
   const startMarker = 'function jobPostingHtmlToText(html) {';
   const endMarker = '/**\n   * Extracts the full job description text from the current page. Tries';
   const start = src.indexOf(startMarker);

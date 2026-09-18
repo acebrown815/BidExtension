@@ -62,7 +62,7 @@ beforeAll(async () => {
   // globalThis.JMRadioGroupLabel (see lib/radioGroupLabel.js) — must be
   // loaded before the extracted source below runs.
   await import('../../lib/radioGroupLabel.js');
-  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8');
+  const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
   const startMarker = 'function getFieldLabel(input) {';
   const endMarker = '// ─── Form filling (uses _fieldMap from detection) ────────────';
   const start = src.indexOf(startMarker);

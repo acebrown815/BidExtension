@@ -3969,7 +3969,6 @@
    * @async
    */
   async function autofillForm() {
-    console.log('[JobMatch AI] AutoFill button clicked');
     const btn = shadowRoot.getElementById('jmAutofill');
     if (!btn) { console.error('[JobMatch AI] AutoFill button not found'); return; }
     btn.disabled = true;
@@ -3989,9 +3988,7 @@
       // Step 1: detect fields and store DOM references
       _fieldMap = {};
       clearAutofillBadges(); // remove any badges left over from a previous run on this page
-      console.log('[JobMatch AI] Detecting form fields...');
       const questions = detectFormFields();
-      console.log(`[JobMatch AI] Found ${questions.length} form fields`);
 
       // Pass 0: Attach the active resume's file to any resume-upload field
       // found in this frame (no AI call — see attachResumeFile()). Runs
@@ -4005,7 +4002,6 @@
 
       if (questions.length === 0) {
         // No text/dropdown/radio/checkbox fields in top frame — try iframes via broadcast
-        console.log('[JobMatch AI] No fields in top frame, broadcasting to iframes...');
         setStatus('Found embedded form. Filling fields...', 'info');
         try {
           // Routes through the sendMessage wrapper so an invalidated extension
@@ -5059,10 +5055,17 @@
     input.focus();
     const openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
     clickElement(openTarget);
-    await sleep(600);
 
-    // Step 2: Read all visible option elements from the live DOM
-    const optionEls = findVisibleOptions(input);
+    // Step 2: Wait for the dropdown's options to actually render. Some
+    // custom dropdowns (React-based comboboxes) fetch or render their
+    // option list asynchronously after being opened — e.g. a State/Country
+    // list loaded on demand — and can take well over half a second. A
+    // single fixed sleep-then-check here used to give up on an otherwise
+    // fillable field the instant that guess was too short, with no retry.
+    // Polling instead means a fast dropdown still resolves quickly (most
+    // checks succeed well under the cap) while a slow one gets real time
+    // to finish rather than a coin-flip based on a fixed delay.
+    const optionEls = await waitForVisibleOptions(input);
     if (optionEls.length === 0) {
       // Close the dropdown
       document.body.click();
@@ -5128,6 +5131,25 @@
   }
 
   /**
+   * Polls findVisibleOptions() until it returns at least one option, or
+   * maxWaitMs elapses — whichever comes first. See fillCustomDropdown's
+   * call site for why this replaced a single fixed sleep-then-check.
+   * @param {HTMLElement} triggerEl
+   * @param {number} [maxWaitMs=5000]
+   * @param {number} [intervalMs=200]
+   * @returns {Promise<Array<{text: string, el: HTMLElement}>>}
+   */
+  async function waitForVisibleOptions(triggerEl, maxWaitMs = 5000, intervalMs = 200) {
+    const deadline = Date.now() + maxWaitMs;
+    let options = findVisibleOptions(triggerEl);
+    while (options.length === 0 && Date.now() < deadline) {
+      await sleep(intervalMs);
+      options = findVisibleOptions(triggerEl);
+    }
+    return options;
+  }
+
+  /**
    * Finds all visible option elements for an open custom dropdown.
    * Checks the aria-controls listbox, nearby parent containers, and
    * any floating listbox/option elements currently in the DOM.
@@ -5145,18 +5167,25 @@
       if (lb) collectOptions(lb.querySelectorAll('[role="option"]'), results, seen);
     }
 
-    // Strategy 2: Search nearby container
-    const container = triggerEl.closest(
+    // Strategy 2: Search nearby container. Start the closest() walk from the
+    // PARENT, not triggerEl itself — react-select (e.g. Greenhouse's
+    // job-boards.greenhouse.io forms) names its own trigger <input> with a
+    // class like "select__input", which contains "select" and would
+    // otherwise satisfy this selector immediately on triggerEl itself. An
+    // <input> can't have child elements, so querySelectorAll() on it as the
+    // "container" always silently returns nothing.
+    const container = triggerEl.parentElement?.closest(
       '[class*="select"], [class*="dropdown"], [class*="field"], [class*="combobox"], [data-testid]'
     ) || triggerEl.parentElement?.parentElement;
     if (container) {
       collectOptions(container.querySelectorAll('[role="option"], [class*="option"]:not([class*="options"])'), results, seen);
     }
 
-    // Strategy 3: Search entire document for visible options (dropdown might be portaled)
+    // Strategy 3: Search entire document for visible options (dropdown might be portaled,
+    // e.g. react-select with menuPortalTarget pointing at document.body)
     if (results.length === 0) {
       const allOptions = document.querySelectorAll(
-        '[role="option"], [role="listbox"] > *, .dropdown-option, [class*="menu-item"], [class*="listbox-option"]'
+        '[role="option"], [role="listbox"] > *, .dropdown-option, [class*="menu-item"], [class*="listbox-option"], [class*="option"]:not([class*="options"])'
       );
       collectOptions(allOptions, results, seen);
     }
@@ -6340,7 +6369,6 @@
             if (window.__jobMatchDirectFill) {
               const directResult = await window.__jobMatchDirectFill(qaList, profile);
               totalFilled += directResult.filled;
-              console.log(`[JobMatch AI] iframe Pass 1 (direct): filled ${directResult.filled} fields`);
             }
 
             // ── PASS 2: AI fill for remaining fields ──
@@ -6363,8 +6391,6 @@
               }
               return true;
             });
-
-            console.log(`[JobMatch AI] iframe Pass 2 (AI): ${emptyQuestions.length} of ${questions.length} fields need AI (${filledLabels.size} labels filled by Pass 1)`);
 
             if (emptyQuestions.length > 0) {
               const questionsForAI = emptyQuestions.map(q => {
