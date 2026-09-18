@@ -74,6 +74,23 @@
   // and bail instead of caching/rendering against the wrong URL (I3).
   let _analyzeGen = 0;
 
+  // True for the duration of checkPendingAutoBidAutofill()'s work — i.e.
+  // from the moment it restores currentAnalysis/_activeResumeId after an
+  // Auto-Bid Apply-click continuation, until autofillForm() finishes using
+  // them. Some ATS routers (confirmed on Dice) fire MORE THAN ONE
+  // history.pushState/replaceState update in quick succession while
+  // settling into the post-click route (e.g. normalizing the URL shortly
+  // after the initial route swap) — each one runs handleSpaUrlChanged(),
+  // which normally treats "URL changed" as "new job page, wipe
+  // currentAnalysis". Without this guard, a second such event landing
+  // WHILE autofillForm() is still running (its cover-letter generation
+  // alone involves an AI round-trip) wipes the just-restored
+  // currentAnalysis back to null mid-flight — confirmed live: the restore
+  // log showed matchScore=78, then buildCoverLetterFile() logged "no
+  // currentAnalysis" moments later, with nothing in between that should
+  // have touched it except this exact race.
+  let _autoBidContinuationActive = false;
+
   // AutoFill state
   let _fieldMap        = {};   // Map of question_id → { el, type, ... } built during field detection
   // Resume-upload <input type="file"> fields found by the most recent
@@ -81,6 +98,10 @@
   // these are filled locally from the active resume's raw file bytes — no
   // AI call, so they never go through GENERATE_AUTOFILL. See attachResumeFile().
   let _resumeFileFields = []; // [{ el: HTMLInputElement, label: string }, ...]
+  // Cover-letter-upload <input type="file"> fields found by the most recent
+  // detectFormFields() call — filled from an AI-generated cover letter (see
+  // attachCoverLetterFile()), same reasoning as _resumeFileFields above.
+  let _coverLetterFileFields = []; // [{ el: HTMLInputElement, label: string }, ...]
 
   // Autofill badges — fixed-position pills that don't affect page layout
   let _badges            = [];        // [{ badgeEl, fieldEl, place }] for repositioning + cleanup
@@ -2218,9 +2239,33 @@
    */
   async function switchSlot(id, opts) {
     const silent = !!(opts && opts.silent);
+    // Never switch resumes (or wipe currentAnalysis, below) while an
+    // Auto-Bid Apply-click continuation is active — see
+    // _autoBidContinuationActive's doc comment. Guarding ensureBestResumeSelected()
+    // alone wasn't enough: scanResumeMatch() (fired fire-and-forget from
+    // handleSpaUrlChanged's reset block, which runs BEFORE
+    // checkPendingAutoBidAutofill ever sets this flag) can already be
+    // mid-flight — its own await on getConfidentJobDescriptionForRanking()
+    // means it doesn't reach this call until AFTER the flag has since
+    // become true. Checking it here, centrally, catches every caller
+    // (ensureBestResumeSelected, scanResumeMatch, analyzeJob's auto-select,
+    // analyzeAndPickBest's winner switch) regardless of when each one
+    // started running — confirmed live: this exact race, via
+    // scanResumeMatch, was still wiping the just-restored currentAnalysis
+    // even after ensureBestResumeSelected's own guard was correctly
+    // bailing out.
+    if (_autoBidContinuationActive) return;
     if (id === _activeResumeId) return;
     try {
       const result = await chrome.storage.local.get('resumes');
+      // Re-check after the await above: this function can be CALLED before
+      // an Auto-Bid continuation starts (the flag was false at entry) and
+      // still be sitting on this very await when the continuation begins —
+      // confirmed live: the entry check alone let exactly this through,
+      // since it only ran once, before the flag had a chance to flip.
+      // Checking again here, right before any mutation, is what actually
+      // closes the race, not the entry check by itself.
+      if (_autoBidContinuationActive) return;
       const resumes = result.resumes || [];
       const target = resumes.find(r => r.id === id);
       if (!target) return;
@@ -2233,6 +2278,8 @@
         rawResumeBase64: target.rawResumeBase64 || null,
         resumeFileType: target.resumeFileType || null,
       });
+      // Same race, same fix — see the comment above the previous check.
+      if (_autoBidContinuationActive) return;
 
       _resumes = resumes;
       _activeResumeId = id;
@@ -2864,6 +2911,47 @@
       if (document.querySelector('form, input, select, textarea')) return;
       await new Promise(r => setTimeout(r, intervalMs));
     }
+  }
+
+  /**
+   * Waits until the DOM stops mutating for `quietMs` in a row, or
+   * maxWaitMs elapses overall — whichever comes first.
+   *
+   * Needed ALONGSIDE waitForFormFieldsReady() (not instead of it) for a
+   * client-side (SPA) route change specifically — confirmed on Dice, whose
+   * "Easy Apply" link swaps to /job-applications/.../wizard via
+   * history.pushState rather than a real navigation. waitForFormFieldsReady's
+   * "is there ANY form/input/select/textarea on the page" check matched
+   * instantly there: Dice's page chrome (nav search box, etc.) already has
+   * one before the click even happens, so it kept passing on page content
+   * left over from the PREVIOUS route — long before the wizard's own
+   * Resume/Cover-letter file inputs had actually rendered — and
+   * autofillForm() ran against a form that wasn't there yet, finding
+   * nothing to attach. Waiting for mutations to quiet down first is a
+   * content-agnostic way to tell "the route swap has finished rendering"
+   * without having to guess which selector will exist once it has.
+   * @param {number} [maxWaitMs=8000]
+   * @param {number} [quietMs=400]
+   * @returns {Promise<void>}
+   */
+  function waitForDomSettled(maxWaitMs = 8000, quietMs = 400) {
+    return new Promise(resolve => {
+      let settleTimer = null;
+      let hardTimer = null;
+      const finish = () => {
+        observer.disconnect();
+        clearTimeout(settleTimer);
+        clearTimeout(hardTimer);
+        resolve();
+      };
+      const observer = new MutationObserver(() => {
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(finish, quietMs);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      settleTimer = setTimeout(finish, quietMs); // nothing may mutate at all — don't wait forever for a first event
+      hardTimer = setTimeout(finish, maxWaitMs);
+    });
   }
 
   /** @returns {string} The job title extracted from the page, or ''. */
@@ -3949,18 +4037,89 @@
    * automated-flow-only decision.
    *
    * Matches short, exact "apply"-shaped link/button text (e.g. "Apply",
-   * "Apply Now", "Apply for this job") rather than a loose substring test,
-   * to avoid misfiring on unrelated page text that merely mentions "apply"
-   * (e.g. "Terms apply", a coupon-code "Apply" button).
+   * "Apply Now", "Apply for this job", "Easy Apply" — Dice's own CTA)
+   * rather than a loose substring test, to avoid misfiring on unrelated
+   * page text that merely mentions "apply" (e.g. "Terms apply", a
+   * coupon-code "Apply" button).
    * @returns {HTMLElement|null}
    */
   function findApplyButton() {
-    const applyRe = /^\s*apply(\s+now|\s+for\s+this\s+(job|position|role))?\s*$/i;
+    const applyRe = /^\s*(?:(?:easy|quick|1-click|one[-\s]click)\s+)?apply(\s+now|\s+for\s+this\s+(job|position|role))?\s*$/i;
     for (const el of document.querySelectorAll('a, button')) {
       const text = (el.innerText || el.textContent || '').trim();
       if (text && text.length <= 40 && applyRe.test(text)) return el;
     }
     return null;
+  }
+
+  // Hard cap on how many wizard steps AutoFill will click through in one
+  // run — a sanity bound in case a "Next"-labeled button ever fails to
+  // actually advance the form (e.g. a validation error silently blocks
+  // it), so a broken page can't loop indefinitely. Real multi-step ATS
+  // wizards seen so far (Dice's included) top out well under this.
+  const MAX_AUTOFILL_STEPS = 10;
+
+  /**
+   * Finds a multi-step application form's "advance to the next step"
+   * control — confirmed needed on Dice's application wizard, whose Resume
+   * & Cover Letter step (1 of 3) ends in a plain "Next" button rather than
+   * a final submit. Deliberately the mirror image of findApplyButton()'s
+   * conservatism: this must NEVER match anything that could be the
+   * application's FINAL submit action, since AutoFill clicking through a
+   * step is safe (it only reveals more fields to fill) but AutoFill
+   * clicking a real submit is not — that decision is always left for the
+   * user to make themselves after reviewing the filled form.
+   *
+   * A final-action word (submit, apply, finish, complete, review, send,
+   * done) disqualifies the button even if "next"-shaped wording is also
+   * present, so an ambiguous label (e.g. "Submit and Continue") is treated
+   * as "don't touch it" rather than guessed at. `type="submit"` on the
+   * button itself is NOT disqualifying — multi-step wizards commonly
+   * submit each step's own small form to advance to the next step without
+   * submitting the whole application (confirmed on Dice, whose "Next"
+   * button is a native type="submit").
+   * @returns {HTMLElement|null}
+   */
+  function findNextStepButton() {
+    const finalActionRe = /\b(submit|apply|finish|complete|review|send|done)\b/i;
+    const nextRe = /^\s*(next(\s+step)?|continue|proceed|save\s*(?:and|&)\s*(?:continue|next))\s*$/i;
+    for (const el of document.querySelectorAll('button, a, input[type="submit"], input[type="button"]')) {
+      if (el.disabled) continue;
+      const text = (el.value || el.innerText || el.textContent || '').trim();
+      if (!text || text.length > 40) continue;
+      if (finalActionRe.test(text)) continue;
+      if (nextRe.test(text)) return el;
+    }
+    return null;
+  }
+
+  /**
+   * True while AutoFill is running as part of Auto-Bid's own automated
+   * flow (autoClickApplyThenAutofillIfNeeded / checkPendingAutoBidAutofill)
+   * — false for every other trigger (the panel's "AutoFill Application"
+   * button, TRIGGER_AUTOFILL). Gates the multi-step wizard-navigation loop
+   * in autofillForm(): clicking through to the NEXT step of a form (as
+   * opposed to filling the one currently on screen) is an autonomous
+   * "keep going" decision, same category as Auto-Bid's own "click Apply
+   * Now" — appropriate for the unattended automated flow, but not
+   * something a manual AutoFill click should do on the user's behalf.
+   */
+  let _autoBidAutofillRun = false;
+
+  /**
+   * Detects whether the current step's form is showing a validation error
+   * — i.e. a required field AutoFill couldn't actually satisfy. Checked
+   * right after clicking a "Next"-style control: `[aria-invalid="true"]`
+   * and `role="alert"` are both standard, widely-used markers ATS forms
+   * use for exactly this (confirmed on Dice's wizard: clicking "Next" past
+   * an unfilled required "Location" field re-renders the SAME step with
+   * both `aria-invalid="true"` on the input and a `role="alert"` banner
+   * reading "Please correct the following errors: Location is required" —
+   * clicking Next again just repeats the same failure indefinitely).
+   * @returns {boolean}
+   */
+  function hasVisibleValidationErrors() {
+    return !!document.querySelector('[aria-invalid="true"], [role="alert"]');
   }
 
   /**
@@ -3978,144 +4137,36 @@
     if (_autofillWarning) _autofillWarning.style.display = 'none';
 
     try {
-      // Step 0: make sure "the active resume" is the best local ATS match
-      // for this JD before anything below reads it (file upload AND the
-      // Q&A/AI text passes both key off whichever resume is active).
-      try {
-        await ensureBestResumeSelected();
-      } catch (_) {}
-
-      // Step 1: detect fields and store DOM references
-      _fieldMap = {};
-      clearAutofillBadges(); // remove any badges left over from a previous run on this page
-      const questions = detectFormFields();
-
-      // Pass 0: Attach the active resume's file to any resume-upload field
-      // found in this frame (no AI call — see attachResumeFile()). Runs
-      // before the "no fields found" check below since a bare "upload your
-      // resume" page can have a file input and nothing else.
-      setStatus('Attaching resume...', 'info');
-      let resumeResult = { attached: 0, fileName: null };
-      try {
-        resumeResult = await attachResumeFile();
-      } catch (_) { /* best-effort — the rest of the pipeline still runs */ }
-
-      if (questions.length === 0) {
-        // No text/dropdown/radio/checkbox fields in top frame — try iframes via broadcast
-        setStatus('Found embedded form. Filling fields...', 'info');
-        try {
-          // Routes through the sendMessage wrapper so an invalidated extension
-          // context surfaces a clean error instead of an uncaught exception.
-          // The wrapper unwraps the {success, data} envelope, so we read
-          // .filled directly off the resolved value.
-          const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
-          const iframeFilled = iframeData?.filled || 0;
-          if (iframeFilled > 0 || resumeResult.attached > 0) {
-            let msg = `Filled ${iframeFilled} field${iframeFilled === 1 ? '' : 's'} in embedded form.`;
-            if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
-            setStatus(msg, 'success');
-            setTimeout(clearStatus, 5000);
-            return;
-          }
-        } catch (iframeErr) {
-          console.warn('[JobMatch AI] iframe broadcast error:', iframeErr);
+      // Fills one step, then — Auto-Bid's automated flow only, see
+      // _autoBidAutofillRun above — keeps clicking through a multi-step
+      // wizard's "Next"-style controls and re-filling each new step,
+      // confirmed needed on Dice's application wizard (Resume & Cover
+      // Letter is only step 1 of 3). findNextStepButton() is the safety
+      // boundary for WHICH button this can click: it can only ever match a
+      // genuine "advance to next step" control, never anything that could
+      // be the application's real, final submit. hasVisibleValidationErrors()
+      // is the safety boundary for WHEN to stop clicking it: without this,
+      // a required field AutoFill can't actually satisfy (e.g. Dice's
+      // Google-Places-backed "current city of residence" autocomplete,
+      // which needs a suggestion selected, not just text typed in) made
+      // this loop click "Next" straight into the same validation error on
+      // every single one of its MAX_AUTOFILL_STEPS iterations — not a true
+      // infinite loop, but indistinguishable from one in practice.
+      for (let step = 1; step <= MAX_AUTOFILL_STEPS; step++) {
+        await fillCurrentAutofillStep();
+        if (!_autoBidAutofillRun) break;
+        const nextBtn = findNextStepButton();
+        if (!nextBtn) break;
+        btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
+        nextBtn.click();
+        await waitForDomSettled();
+        await waitForFormFieldsReady();
+        if (hasVisibleValidationErrors()) {
+          setStatus('A required field could not be filled automatically — please complete it and continue manually.', 'error');
+          break;
         }
-        if (resumeResult.attached > 0) {
-          setStatus(`Attached resume (${resumeResult.fileName}). No other form fields found.`, 'success');
-          setTimeout(clearStatus, 5000);
-        } else {
-          setStatus('No form fields found on this page.', 'error');
-        }
-        return;
+        btn.innerHTML = '<span class="jm-spinner"></span> Scanning form...';
       }
-
-      // Pass 1: Direct fill from Q&A (no AI)
-      setStatus('Filling from Q&A...', 'info');
-      let directFilled = 0;
-      if (window.__jobMatchDirectFill) {
-        try {
-          const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
-          const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
-          const directResult = await window.__jobMatchDirectFill(qaList, profile);
-          directFilled = directResult.filled;
-        } catch (_) {}
-      }
-
-      setStatus(`Direct fill: ${directFilled}. Sending rest to AI...`, 'info');
-
-      // Pass 2: AI fill for remaining empty fields. Skip anything Pass 1
-      // (direct Q&A fill) already answered — checked via
-      // window.__jobMatchFilledLabels, the same label-based check the
-      // iframe autofill path below already uses.
-      //
-      // The previous `q._el` check here was always a no-op: detectFormFields()
-      // never actually assigns `_el` onto any questions[] item (it's only
-      // ever read/deleted, never set), so `if (!el) return true` was always
-      // true and every field — including ones Pass 1 already filled
-      // correctly — was unconditionally resent to the AI. For an
-      // exclusive-choice radio group, a wrong AI guess on the redundant
-      // resend can silently un-select whatever Pass 1 already got right,
-      // since checking a different radio in the same name-group natively
-      // unchecks the first.
-      const filledLabels = new Set();
-      if (window.__jobMatchFilledLabels) {
-        window.__jobMatchFilledLabels.forEach(l => filledLabels.add(l.toLowerCase()));
-      }
-      const questionsForAI = questions.filter(q => {
-        const qText = (q.question_text || '').toLowerCase();
-        if (qText && filledLabels.has(qText)) return false;
-        for (const filled of filledLabels) {
-          if (filled.length > 5 && (qText.includes(filled) || filled.includes(qText))) return false;
-        }
-        return true;
-      }).map(q => {
-        const clean = { ...q };
-        delete clean._el;
-        delete clean._radios;
-        return clean;
-      });
-
-      console.log('[JobMatch AI] Sending to AI for autofill...');
-      const response = await sendMessage({
-        type: 'GENERATE_AUTOFILL',
-        formFields: questionsForAI,
-        resumeId: _activeResumeId
-      });
-      console.log('[JobMatch AI] AI response received');
-
-      // Step 3: write the AI's proposed answers straight into the form —
-      // no review/confirm gate. Any answer the AI couldn't produce
-      // (NEEDS_USER_INPUT / blank) is simply left for the user to fill in.
-      const answers = response.answers || response;
-      const { filled, skipped } = await fillFormFromAnswers(Array.isArray(answers) ? answers : []);
-      let totalFilled = directFilled + filled;
-
-      // Also try any iframes on the page, even though the top frame DID
-      // have fields to fill above. The old code only broadcast to iframes
-      // when the top frame found ZERO fields — but a page can have both: an
-      // unrelated top-frame field (e.g. this site's own "Search For:" nav
-      // search box) makes questions.length > 0, while the REAL application
-      // form sits inside a cross-origin ATS iframe (Greenhouse's embed
-      // widget, etc. — same one worked around for JD extraction in
-      // getJDFromIframes()) and would otherwise be silently skipped
-      // entirely. Cheap when there are no iframes, or none with our content
-      // script/fillable fields — see AUTOFILL_IN_FRAMES in background.js.
-      let iframeFilled = 0;
-      try {
-        const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
-        iframeFilled = iframeData?.filled || 0;
-        totalFilled += iframeFilled;
-      } catch (_) { /* best-effort — top-frame fill above still stands */ }
-
-      let msg = `Filled ${totalFilled} field${totalFilled === 1 ? '' : 's'}.`;
-      if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
-      if (iframeFilled > 0) msg += ` (${iframeFilled} in an embedded form.)`;
-      if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
-      setStatus(msg, 'success');
-      setTimeout(clearStatus, 4000);
-
-      const warningEl = shadowRoot && shadowRoot.getElementById('jmAutofillWarning');
-      if (warningEl) warningEl.style.display = 'flex';
     } catch (err) {
       console.error('[JobMatch AI] AutoFill error:', err);
       setStatus('Error: ' + err.message, 'error');
@@ -4123,6 +4174,171 @@
       btn.disabled = false;
       btn.innerHTML = 'AutoFill Application';
     }
+  }
+
+  /**
+   * Fills every fillable field on the CURRENT step of the form — one pass
+   * of detect/attach/direct-fill/AI-fill, no wizard-navigation concerns of
+   * its own (see autofillForm(), which loops this across "Next"-button
+   * steps). Split out of autofillForm() specifically so that loop can call
+   * this once per step without re-managing the AutoFill button's
+   * disabled/spinner state on every iteration.
+   * @async
+   */
+  async function fillCurrentAutofillStep() {
+    // Step 0: make sure "the active resume" is the best local ATS match
+    // for this JD before anything below reads it (file upload AND the
+    // Q&A/AI text passes both key off whichever resume is active).
+    try {
+      await ensureBestResumeSelected();
+    } catch (_) {}
+
+    // Step 1: detect fields and store DOM references
+    _fieldMap = {};
+    clearAutofillBadges(); // remove any badges left over from a previous run on this page
+    const questions = detectFormFields();
+
+    // Pass 0: Attach the active resume's file — and, if this page also has
+    // a cover-letter upload field, an AI-generated cover letter — to any
+    // matching upload field found in this frame (no AI call for the
+    // resume; one AI call for the cover letter text, only when a
+    // cover-letter field is actually present — see attachResumeFile() /
+    // attachCoverLetterFile()). Runs before the "no fields found" check
+    // below since a bare "upload your documents" page (e.g. Dice's
+    // Resume & Cover Letter wizard step) can have nothing else on it.
+    setStatus('Attaching resume...', 'info');
+    let resumeResult = { attached: 0, fileName: null };
+    try {
+      resumeResult = await attachResumeFile();
+    } catch (e) { console.warn('[JobMatch AI][Auto-Bid] attachResumeFile threw:', e && e.message); }
+    let coverLetterResult = { attached: 0, fileName: null };
+    if (_coverLetterFileFields.length > 0) {
+      setStatus('Generating cover letter...', 'info');
+      try {
+        coverLetterResult = await attachCoverLetterFile();
+      } catch (e) { console.warn('[JobMatch AI][Auto-Bid] attachCoverLetterFile threw:', e && e.message); }
+    }
+
+    if (questions.length === 0) {
+      // No text/dropdown/radio/checkbox fields in top frame — try iframes via broadcast
+      setStatus('Found embedded form. Filling fields...', 'info');
+      try {
+        // Routes through the sendMessage wrapper so an invalidated extension
+        // context surfaces a clean error instead of an uncaught exception.
+        // The wrapper unwraps the {success, data} envelope, so we read
+        // .filled directly off the resolved value.
+        const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
+        const iframeFilled = iframeData?.filled || 0;
+        if (iframeFilled > 0 || resumeResult.attached > 0 || coverLetterResult.attached > 0) {
+          let msg = `Filled ${iframeFilled} field${iframeFilled === 1 ? '' : 's'} in embedded form.`;
+          if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
+          if (coverLetterResult.attached > 0) msg += ` Attached cover letter (${coverLetterResult.fileName}).`;
+          setStatus(msg, 'success');
+          setTimeout(clearStatus, 5000);
+          return;
+        }
+      } catch (iframeErr) {
+        console.warn('[JobMatch AI] iframe broadcast error:', iframeErr);
+      }
+      if (resumeResult.attached > 0 || coverLetterResult.attached > 0) {
+        const parts = [];
+        if (resumeResult.attached > 0) parts.push(`resume (${resumeResult.fileName})`);
+        if (coverLetterResult.attached > 0) parts.push(`cover letter (${coverLetterResult.fileName})`);
+        setStatus(`Attached ${parts.join(' and ')}. No other form fields found.`, 'success');
+        setTimeout(clearStatus, 5000);
+      } else {
+        setStatus('No form fields found on this page.', 'error');
+      }
+      return;
+    }
+
+    // Pass 1: Direct fill from Q&A (no AI)
+    setStatus('Filling from Q&A...', 'info');
+    let directFilled = 0;
+    if (window.__jobMatchDirectFill) {
+      try {
+        const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
+        const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
+        const directResult = await window.__jobMatchDirectFill(qaList, profile);
+        directFilled = directResult.filled;
+      } catch (_) {}
+    }
+
+    setStatus(`Direct fill: ${directFilled}. Sending rest to AI...`, 'info');
+
+    // Pass 2: AI fill for remaining empty fields. Skip anything Pass 1
+    // (direct Q&A fill) already answered — checked via
+    // window.__jobMatchFilledLabels, the same label-based check the
+    // iframe autofill path below already uses.
+    //
+    // The previous `q._el` check here was always a no-op: detectFormFields()
+    // never actually assigns `_el` onto any questions[] item (it's only
+    // ever read/deleted, never set), so `if (!el) return true` was always
+    // true and every field — including ones Pass 1 already filled
+    // correctly — was unconditionally resent to the AI. For an
+    // exclusive-choice radio group, a wrong AI guess on the redundant
+    // resend can silently un-select whatever Pass 1 already got right,
+    // since checking a different radio in the same name-group natively
+    // unchecks the first.
+    const filledLabels = new Set();
+    if (window.__jobMatchFilledLabels) {
+      window.__jobMatchFilledLabels.forEach(l => filledLabels.add(l.toLowerCase()));
+    }
+    const questionsForAI = questions.filter(q => {
+      const qText = (q.question_text || '').toLowerCase();
+      if (qText && filledLabels.has(qText)) return false;
+      for (const filled of filledLabels) {
+        if (filled.length > 5 && (qText.includes(filled) || filled.includes(qText))) return false;
+      }
+      return true;
+    }).map(q => {
+      const clean = { ...q };
+      delete clean._el;
+      delete clean._radios;
+      return clean;
+    });
+
+    console.log('[JobMatch AI] Sending to AI for autofill...');
+    const response = await sendMessage({
+      type: 'GENERATE_AUTOFILL',
+      formFields: questionsForAI,
+      resumeId: _activeResumeId
+    });
+    console.log('[JobMatch AI] AI response received');
+
+    // Step 3: write the AI's proposed answers straight into the form —
+    // no review/confirm gate. Any answer the AI couldn't produce
+    // (NEEDS_USER_INPUT / blank) is simply left for the user to fill in.
+    const answers = response.answers || response;
+    const { filled, skipped } = await fillFormFromAnswers(Array.isArray(answers) ? answers : []);
+    let totalFilled = directFilled + filled;
+
+    // Also try any iframes on the page, even though the top frame DID
+    // have fields to fill above. The old code only broadcast to iframes
+    // when the top frame found ZERO fields — but a page can have both: an
+    // unrelated top-frame field (e.g. this site's own "Search For:" nav
+    // search box) makes questions.length > 0, while the REAL application
+    // form sits inside a cross-origin ATS iframe (Greenhouse's embed
+    // widget, etc. — same one worked around for JD extraction in
+    // getJDFromIframes()) and would otherwise be silently skipped
+    // entirely. Cheap when there are no iframes, or none with our content
+    // script/fillable fields — see AUTOFILL_IN_FRAMES in background.js.
+    let iframeFilled = 0;
+    try {
+      const iframeData = await sendMessage({ type: 'AUTOFILL_IN_FRAMES' });
+      iframeFilled = iframeData?.filled || 0;
+      totalFilled += iframeFilled;
+    } catch (_) { /* best-effort — top-frame fill above still stands */ }
+
+    let msg = `Filled ${totalFilled} field${totalFilled === 1 ? '' : 's'}.`;
+    if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
+    if (iframeFilled > 0) msg += ` (${iframeFilled} in an embedded form.)`;
+    if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
+    setStatus(msg, 'success');
+    setTimeout(clearStatus, 4000);
+
+    const warningEl = shadowRoot && shadowRoot.getElementById('jmAutofillWarning');
+    if (warningEl) warningEl.style.display = 'flex';
   }
 
   // ─── Form field detection ─────────────────────────────────────
@@ -4143,6 +4359,7 @@
     let qIndex = 0;
     const seen = new Set(); // track qids to avoid duplicates
     _resumeFileFields = []; // reset — repopulated by the file-input pass below
+    _coverLetterFileFields = []; // reset — repopulated by the file-input pass below
 
     // ── Helper: build select option data ──
     function buildSelectOptions(selectEl) {
@@ -4196,6 +4413,72 @@
       }
       return optTexts;
     }
+
+    // ── Helper: detects the standard "visually hidden but present for
+    // native semantics" CSS pattern (clip-rect / clip-path-based hiding
+    // with a 1px box) — used by many accessible component libraries
+    // (React Aria Components among them, confirmed on Dice's "Work
+    // Authorization" field) to keep a real, functional <select> in the
+    // DOM for a11y/native-form purposes while a separate custom-styled
+    // trigger button + listbox popover handles the actual visible
+    // interaction. Walks a few ancestor levels since the hiding style is
+    // usually applied to a WRAPPING container, not the <select> itself.
+    function isVisuallyHiddenElement(el) {
+      let node = el;
+      for (let i = 0; i < 4 && node && node !== document.body; i++, node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.clipPath === 'inset(50%)') return true;
+        if (/rect\(0px,?\s*0px,?\s*0px,?\s*0px\)/.test(style.clip)) return true;
+      }
+      return false;
+    }
+
+    // ── 0. <select> elements hidden behind a custom trigger button (React
+    // Aria Components' <Select> and similar accessible-component-library
+    // patterns) — MUST run before the plain <select> pass below, since it
+    // claims this select's qid via `seen` so that pass skips it.
+    //
+    // The real <select> exists purely for native form semantics; it's
+    // driven entirely by the library's own internal React state, so
+    // setting its .value directly and firing a 'change' event (the normal
+    // native-dropdown fill path) does NOT reliably update that state — the
+    // library's next render can silently revert the select back to
+    // whatever it still internally believes is selected. Confirmed live:
+    // this is exactly why AutoFill kept "choosing" the same wrong option
+    // ("Have H1 Visa") no matter what the AI/deterministic matcher
+    // correctly decided — the fill technically happened, but the
+    // library's own state (and the visible custom UI reflecting it) never
+    // actually changed. The user only ever interacts with a separate
+    // trigger button (aria-haspopup="listbox") + listbox popover, so
+    // that's what needs to be clicked, exactly like any other custom ARIA
+    // dropdown — see fillCustomDropdown().
+    document.querySelectorAll('select').forEach(sel => {
+      if (!isVisuallyHiddenElement(sel)) return;
+      const container = sel.closest('[data-rac], [class*="group"], [class*="field"]') || sel.parentElement?.parentElement;
+      if (!container) return;
+      const trigger = container.querySelector('button[aria-haspopup="listbox"], [role="button"][aria-haspopup="listbox"]');
+      if (!trigger) return;
+
+      const qid = sel.id || sel.name;
+      if (!qid || seen.has(qid)) return;
+      if (!isFieldEligible(sel)) return;
+      const label = getFieldLabel(sel) || getFieldLabel(trigger);
+      if (!label && !sel.id && !sel.name) return;
+
+      const { optTexts } = buildSelectOptions(sel);
+      if (optTexts.length === 0) return;
+
+      seen.add(qid);
+      questions.push({
+        question_id: qid,
+        question_text: label || sel.name || '',
+        field_type: 'custom_dropdown',
+        required: sel.required,
+        available_options: optTexts
+      });
+      _fieldMap[qid] = { el: trigger, type: 'custom_dropdown', optionTexts: optTexts, questionText: label || sel.name || '' };
+      qIndex++;
+    });
 
     // ── 1. ALL <select> elements (visible AND hidden) ──
     document.querySelectorAll('select').forEach(sel => {
@@ -4359,17 +4642,22 @@
       qIndex++;
     });
 
-    // ── 5. Resume-upload file inputs ──
-    // Filled locally from the active resume's raw file bytes (see
-    // attachResumeFile()) — never sent to the AI, so these are collected
-    // into _resumeFileFields rather than pushed onto `questions`.
+    // ── 5. Resume- and cover-letter-upload file inputs ──
+    // Filled locally — resumes from the active resume's raw file bytes
+    // (see attachResumeFile()), cover letters from an AI-generated letter
+    // (see attachCoverLetterFile()) — never sent to the AI as a question,
+    // so these are collected into _resumeFileFields/_coverLetterFileFields
+    // rather than pushed onto `questions`.
     document.querySelectorAll('input[type="file"]').forEach(fileEl => {
       if (fileEl.offsetParent === null) return;
       if (!isFieldEligible(fileEl)) return;
       if (fileEl.files && fileEl.files.length > 0) return; // already has a file — don't clobber it
       const label = getFieldLabel(fileEl);
-      if (!looksLikeResumeUpload(fileEl, label)) return;
-      _resumeFileFields.push({ el: fileEl, label });
+      if (looksLikeResumeUpload(fileEl, label)) {
+        _resumeFileFields.push({ el: fileEl, label });
+      } else if (looksLikeCoverLetterUpload(fileEl, label)) {
+        _coverLetterFileFields.push({ el: fileEl, label });
+      }
     });
 
     return questions;
@@ -4397,6 +4685,25 @@
   }
 
   /**
+   * Heuristic: does this file input look like a cover-letter upload field
+   * (as opposed to a resume, portfolio, transcript, or "additional
+   * documents" upload)? Mirrors looksLikeResumeUpload's conservatism in the
+   * other direction — resume-ish wording anywhere in the probe text
+   * disqualifies the field, since attaching a generated cover letter to
+   * the wrong upload field would be worse than leaving it unfilled.
+   * @param {HTMLInputElement} el
+   * @param {string} label
+   * @returns {boolean}
+   */
+  function looksLikeCoverLetterUpload(el, label) {
+    const probe = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (!probe) return false;
+    if (/resum[eé]|\bcv\b|curriculum vitae|portfolio|transcript|writing[\s_-]?sample|references?\b/i.test(probe)) return false;
+    return /cover[\s_-]?letter|coverletter/i.test(probe);
+  }
+
+  /**
    * Re-affirms (or updates) the active resume as the best local
    * ATS-keyword match for the current job description, before AutoFill
    * reads "the active resume" for both the file-upload attachment and the
@@ -4417,6 +4724,20 @@
    */
   async function ensureBestResumeSelected() {
     if (_manualResumeSelection) return;
+    // Never second-guess resume selection during an Auto-Bid Apply-click
+    // continuation (see _autoBidContinuationActive's doc comment) — we
+    // already know exactly which resume the ORIGINAL page's analysis used
+    // (just restored into _activeResumeId), and re-ranking here against
+    // THIS page's own JD/title extraction is both redundant and risky: a
+    // wizard-style page (e.g. Dice's) often extracts a slightly different
+    // (or empty) title than the original job page did, which can be enough
+    // to flip rankResumes()'s top pick to a different resume. When that
+    // happens, switchSlot(id, {silent:true}) below unconditionally wipes
+    // currentAnalysis back to null (no cached analysis exists yet for
+    // this resume+URL) — confirmed live: this was silently destroying the
+    // just-restored analysis moments before attachCoverLetterFile() needed
+    // it, with no second SPA navigation event involved at all.
+    if (_autoBidContinuationActive) return;
     try {
       // Confident/cached JD only — never the raw last-resort scrape (see
       // getConfidentJobDescriptionForRanking). This is exactly what fixed
@@ -4731,6 +5052,21 @@
     // 6. name attribute (humanized)
     if (input.name) return input.name.replace(/[_-]/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
 
+    // 7. Nearest preceding sibling's short text (last resort) — covers
+    // "label card" layouts where the field's name lives in a sibling
+    // container placed BEFORE the input entirely, rather than wrapping it
+    // or being referenced by any ARIA attribute. Seen on Dice's application
+    // wizard: its Resume/Cover-letter upload cards put the field name in a
+    // small header div, then an upload button, then a description div, all
+    // as siblings preceding a bare <input type="file"> with no id/name/
+    // aria-label/aria-labelledby of its own (aria-describedby points only
+    // at the generic "File types supported..." description, not the name).
+    const prevSibling = input.previousElementSibling;
+    if (prevSibling) {
+      const text = prevSibling.textContent.trim();
+      if (text && text.length < 200) return text;
+    }
+
     return '';
   }
 
@@ -4911,12 +5247,32 @@
     // anything; dropdown types are queued for the phases below.
     for (const ans of answers) {
       const val = ans.selected_option || ans.generated_text || '';
-      if (!val || val === 'NEEDS_USER_INPUT') {
-        skipped.push(ans.question_id);
-        continue;
-      }
       const qid = ans.question_id;
       const ref = _fieldMap[qid];
+
+      // custom_dropdown fields never actually use `val` for the fill
+      // decision — look at the Phase 3 loop below: it calls
+      // fillCustomDropdown(ref.el, ref.questionText || val), where `val`
+      // is only ever a questionText FALLBACK. fillCustomDropdown() always
+      // independently re-derives the answer itself, via its own
+      // MATCH_DROPDOWN call against the dropdown's LIVE options — which
+      // tries the deterministic Q&A/profile matcher before ever falling
+      // back to AI. So gating a custom_dropdown field on the BULK answer
+      // being non-empty is simply wrong: it silently discards every case
+      // where the bulk AI correctly said NEEDS_USER_INPUT for a
+      // personal/ambiguous question ("Work Authorization", "What is your
+      // current city of residence?") that the deterministic matcher (or
+      // fillCustomDropdown's own zip-code shortcut) could have answered
+      // perfectly well on its own — confirmed live: "Work Authorization"
+      // was never even attempted, so the correct saved answer ("US
+      // Citizen") never got a chance to be applied, no matter how
+      // correctly the matcher itself was already working.
+      const isCustomDropdownField = !!(ref && ref.type === 'custom_dropdown');
+
+      if ((!val || val === 'NEEDS_USER_INPUT') && !isCustomDropdownField) {
+        skipped.push(qid);
+        continue;
+      }
       if (!ref) {
         skipped.push(qid);
         continue;
@@ -5034,6 +5390,26 @@
   // to pick one, then click the matching element and wait for it to register.
 
   /**
+   * Looks for a saved Q&A answer specifically about the candidate's
+   * ZIP/postal code — used only when a location-autocomplete field's OWN
+   * placeholder says a postal code is an acceptable alternative to a city
+   * name (see fillCustomDropdown's placeholder check). Matches by the
+   * SAVED question's own wording, not the form field's label: the field
+   * itself asks about city ("What is your current city of residence?"),
+   * not zip code, so the usual label-to-saved-question matching
+   * (qaQuestionMatchesLabel) would never connect the two — this is a
+   * narrow, self-contained exception for that one specific field shape.
+   * @param {Array<{question: string, answer: string}>} qaList
+   * @returns {string} The saved answer, or '' if none found.
+   */
+  function findSavedZipCodeAnswer(qaList) {
+    if (!Array.isArray(qaList)) return '';
+    const zipRe = /\bzip\s*code\b|\bzipcode\b|\bpostal\s*code\b/i;
+    const match = qaList.find(qa => qa && qa.answer && zipRe.test(qa.question || ''));
+    return (match && match.answer || '').trim();
+  }
+
+  /**
    * Fills a custom ARIA dropdown by: opening it, reading its options,
    * sending them to the AI, and clicking the AI's chosen option.
    * @async
@@ -5042,6 +5418,37 @@
    * @returns {Promise<boolean>} true if successfully filled, false otherwise.
    */
   async function fillCustomDropdown(input, questionText) {
+    // Some location-autocomplete fields (Google-Places-backed, common on
+    // ATS wizards — confirmed on Dice) explicitly accept a raw ZIP/postal
+    // code as an alternative to a city name: Dice's own placeholder spells
+    // this out — "Enter your city or postal code (e.g., Denver, CO or
+    // 80202)". Typing the saved zip DOES trigger the live Google Places
+    // widget to render a matching address suggestion (confirmed live) —
+    // but the field's own validation isn't satisfied by typed text alone;
+    // it needs an actual suggestion selected, the same as a human would
+    // click. So this types the zip, then falls into the SAME
+    // wait-for-options/click-an-option flow below as any other custom
+    // dropdown, rather than returning early.
+    if (/\b(?:zip|postal)\s*code\b/i.test(input.placeholder || '')) {
+      try {
+        const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
+        const zip = findSavedZipCodeAnswer(qaList);
+        if (zip) {
+          fillInput(input, zip);
+          const suggestions = await waitForVisibleOptions(input);
+          if (suggestions.length > 0) {
+            // The first suggestion is Google Places' own best match for
+            // what was just typed — exactly what a human would click first.
+            clickElement(suggestions[0].el);
+            return true;
+          }
+          // No suggestion ever rendered — the typed zip is still in the
+          // field, which is better than leaving it empty even if this
+          // particular widget's validation doesn't accept it.
+          return true;
+        }
+      } catch (_) { /* fall through to the normal dropdown flow below */ }
+    }
 
     // Step 1: Click to open the dropdown. Click the nearest react-select-style
     // "control" wrapper when there is one, not just the trigger input —
@@ -5084,10 +5491,10 @@
         resumeId: _activeResumeId
       });
     } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: MATCH_DROPDOWN threw:', e && e.message);
       document.body.click();
       return false;
     }
-
 
     if (!aiChoice || aiChoice === 'SKIP' || aiChoice === 'NEEDS_USER_INPUT') {
       document.body.click();
@@ -5126,6 +5533,7 @@
       }
     }
 
+    console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: no option matched aiChoice="%s" against optionTexts=%o', aiChoice, optionTexts);
     document.body.click();
     return false;
   }
@@ -5196,6 +5604,21 @@
   /**
    * Collects visible, non-placeholder option elements from a node list.
    * Skips hidden elements (zero bounding rect) and placeholder text like "Select…".
+   *
+   * Uses `.innerText` (falling back to `.textContent` only where innerText
+   * isn't available, e.g. happy-dom in tests) specifically because some
+   * component libraries render an option as a single template reused for
+   * BOTH the trigger's "currently selected" display AND the listbox's own
+   * option row, wrapping both in one element with the unused variant
+   * hidden via CSS (confirmed on Dice's "Work Authorization" field, built
+   * with React Aria Components: each option's DOM contains a
+   * `slot="selection"` copy of the label — `display:none` via a `.hidden`
+   * class — right next to the real, visible `slot="option"` copy).
+   * `.textContent` ignores CSS entirely and concatenates both copies
+   * ("US CitizenUS Citizen"), which broke every downstream matching
+   * strategy (deterministic AND AI) since nothing in the saved answer or
+   * AI's response would ever equal that doubled string. `.innerText`
+   * respects `display:none` and reads only the genuinely visible copy.
    * @param {NodeList|Array} nodeList - DOM elements to scan.
    * @param {Array}          results  - Accumulator array of {text, el} objects.
    * @param {Set}            seen     - Set of already-collected text values (dedup).
@@ -5204,7 +5627,7 @@
     for (const el of nodeList) {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
-      const text = el.textContent.trim();
+      const text = (el.innerText || el.textContent || '').trim();
       if (!text || seen.has(text)) continue;
       if (/^(select|choose|--|pick|search)/i.test(text)) continue;
       seen.add(text);
@@ -5301,7 +5724,7 @@
       }
     }
 
-    // 4. Best fuzzy match — word overlap + prefix scoring
+    // 5. Best fuzzy match — word overlap + prefix scoring
     let bestOpt = null;
     let bestScore = 0;
     const words = textLower.split(/[\s,\/\-_]+/).filter(Boolean);
@@ -5538,6 +5961,44 @@
   }
 
   /**
+   * Calls the AI to write a cover letter for the current job. Requires a
+   * completed analysis (currentAnalysis must be non-null) — returns '' if
+   * one hasn't run yet, rather than throwing, so callers that are OK with
+   * silently skipping (e.g. attachCoverLetterFile()) don't need a try/catch
+   * just for this one precondition.
+   *
+   * Extracted out of generateCoverLetter() (the "✎ Cover Letter" button's
+   * handler) so attachCoverLetterFile() can generate the same text without
+   * going through that button's UI (spinner, panel section, scroll).
+   * @async
+   * @returns {Promise<string>}
+   */
+  async function generateCoverLetterText() {
+    if (!currentAnalysis) return '';
+    const jd = await getJobDescriptionForAnalysis();
+    // Re-scrape company fresh (cached value may be stale or wrong)
+    const freshCompany = extractCompany() || currentAnalysis.company || '';
+    const freshTitle = extractJobTitle() || currentAnalysis.title || '';
+    const clResult = await sendMessage({
+      type: 'GENERATE_COVER_LETTER',
+      jobDescription: jd,
+      resumeId: _activeResumeId,
+      analysis: {
+        matchingSkills: currentAnalysis.matchingSkills,
+        matchScore: currentAnalysis.matchScore
+      },
+      jobMeta: {
+        title: freshTitle,
+        company: freshCompany,
+        location: currentAnalysis.location || '',
+        salary: currentAnalysis.salary || ''
+      }
+    });
+    // Support both old string and new object response format
+    return typeof clResult === 'string' ? clResult : (clResult && clResult.text) || '';
+  }
+
+  /**
    * Generates a tailored cover letter for the current job via the AI and
    * displays it in the Cover Letter section of the panel.
    * Requires a completed analysis (currentAnalysis must be non-null).
@@ -5549,28 +6010,7 @@
     btn.innerHTML = '<span class="jm-spinner"></span> Writing...';
     try {
       if (!currentAnalysis) throw new Error('Analyze the job first.');
-      const jd = await getJobDescriptionForAnalysis();
-      // Re-scrape company fresh (cached value may be stale or wrong)
-      const freshCompany = extractCompany() || currentAnalysis.company || '';
-      const freshTitle = extractJobTitle() || currentAnalysis.title || '';
-      const clResult = await sendMessage({
-        type: 'GENERATE_COVER_LETTER',
-        jobDescription: jd,
-        resumeId: _activeResumeId,
-        analysis: {
-          matchingSkills: currentAnalysis.matchingSkills,
-          matchScore: currentAnalysis.matchScore
-        },
-        jobMeta: {
-          title: freshTitle,
-          company: freshCompany,
-          location: currentAnalysis.location || '',
-          salary: currentAnalysis.salary || ''
-        }
-      });
-      // Support both old string and new object response format
-      const text = typeof clResult === 'string' ? clResult : clResult.text;
-      const clTruncated = typeof clResult === 'object' && clResult.truncated;
+      const text = await generateCoverLetterText();
       shadowRoot.getElementById('jmCoverLetterText').textContent = text;
       const section = shadowRoot.getElementById('jmCoverLetterSection');
       section.style.display = 'block';
@@ -5581,6 +6021,121 @@
       btn.disabled = false;
       btn.innerHTML = '&#9993; Cover Letter';
     }
+  }
+
+  /**
+   * Builds a File for a freshly AI-generated cover letter — the
+   * cover-letter equivalent of buildActiveResumeFile(). Always generates
+   * fresh text (rather than reusing whatever's already shown in the panel's
+   * Cover Letter section) so an auto-attached cover letter is never stale
+   * from a previous job. Defaults to PDF, matching buildActiveResumeFile's
+   * own default for a resume with no saved format preference.
+   * @async
+   * @returns {Promise<{file: File, fileName: string, mime: string}|null>}
+   *   null when there's no analysis yet, generation failed, or the file
+   *   couldn't be built.
+   */
+  async function buildCoverLetterFile() {
+    if (!currentAnalysis) {
+      console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: no currentAnalysis — skipping cover letter generation.');
+      return null;
+    }
+    let text;
+    try {
+      text = await generateCoverLetterText();
+    } catch (err) {
+      console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: generateCoverLetterText threw:', err && err.message);
+      return null;
+    }
+    if (!text || !text.trim()) {
+      console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: generateCoverLetterText returned empty text.');
+      return null;
+    }
+
+    // Keep the panel's Cover Letter section in sync, so opening it after
+    // AutoFill shows the exact letter that was attached rather than
+    // appearing empty or prompting the user to generate one again.
+    const textEl = shadowRoot.getElementById('jmCoverLetterText');
+    if (textEl) textEl.textContent = text;
+
+    try {
+      const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
+      const result = await sendMessage({
+        type: 'BUILD_COVER_LETTER_FILE',
+        format: 'pdf',
+        text,
+        header: {
+          name: (profile?.name || '').trim(),
+          contactLine: buildContactLine(profile),
+        },
+        today: formatLongDate(new Date()),
+        jobMeta: {
+          company: currentAnalysis.company || '',
+          title: currentAnalysis.title || '',
+        },
+      });
+      if (!result || !result.bytesBase64) {
+        console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: BUILD_COVER_LETTER_FILE returned no bytes.', result);
+        return null;
+      }
+      const blob = base64ToBlob(result.bytesBase64, result.mime);
+      // A short, fixed name here (not the descriptive
+      // CoverLetter_<Company>_<Title>_<Date>.pdf the manual download button
+      // uses) — an ATS upload widget shows this name back to the user
+      // right next to "Resume_<Name>.docx", and a plain "cover_letter.pdf"
+      // reads cleanly there, whereas the long descriptive name is more
+      // useful for a file the user is saving to disk themselves.
+      const fileName = 'cover_letter.pdf';
+      const file = new File([blob], fileName, { type: result.mime });
+      return { file, fileName, mime: result.mime };
+    } catch (err) {
+      console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: could not build File object:', err && err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Attaches a freshly AI-generated cover letter to every detected
+   * cover-letter-upload field (see _coverLetterFileFields) — the
+   * cover-letter equivalent of attachResumeFile(). Only ever does work when
+   * the page actually has a cover-letter upload field; on every other page
+   * this is a no-op (empty _coverLetterFileFields, generateCoverLetterText
+   * never called).
+   * @async
+   * @returns {Promise<{attached: number, fileName: string|null}>}
+   */
+  async function attachCoverLetterFile() {
+    if (!_coverLetterFileFields.length) return { attached: 0, fileName: null };
+
+    const built = await buildCoverLetterFile();
+    if (!built) return { attached: 0, fileName: null };
+    const { file, fileName, mime } = built;
+
+    let attached = 0;
+    for (const { el } of _coverLetterFileFields) {
+      if (!el.isConnected) continue;
+      if (!fileAcceptsType(el, 'pdf', mime)) continue;
+      try {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        try {
+          const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
+          ['dragenter', 'dragover', 'drop'].forEach(type => {
+            dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+          });
+        } catch (_) { /* best-effort only */ }
+
+        showAutofillBadge(el);
+        attached++;
+      } catch (err) {
+        console.warn('[JobMatch AI] Could not attach cover letter file to field:', err.message);
+      }
+    }
+
+    return { attached, fileName: attached > 0 ? fileName : null };
   }
 
   // ─── Bullet rewriter ──────────────────────────────────────────
@@ -6131,52 +6686,75 @@
    * @async
    */
   async function autoClickApplyThenAutofillIfNeeded() {
-    // Defer to autofillForm()'s own detection (top frame, then its
-    // existing iframe-broadcast fallback) whenever there's ANY chance a
-    // form exists — either directly, or embedded in an iframe it already
-    // knows how to reach. Only look for an Apply button to click through
-    // when we're confident there's truly nothing to fill on this page at
-    // all: no detected fields AND no iframes worth checking.
-    const hasTopFrameFields = detectFormFields().length > 0;
-    const hasIframes = document.querySelectorAll('iframe').length > 0;
-    console.log('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded: hasTopFrameFields=%s hasIframes=%s', hasTopFrameFields, hasIframes);
-    if (hasTopFrameFields || hasIframes) {
-      await autofillForm();
-      return;
-    }
-    const applyBtn = findApplyButton();
-    console.log('[JobMatch AI][Auto-Bid] findApplyButton() ->', applyBtn ? `<${applyBtn.tagName.toLowerCase()}> "${(applyBtn.innerText || applyBtn.textContent || '').trim()}" href=${applyBtn.getAttribute('href')}` : 'null');
-    if (!applyBtn) {
-      await autofillForm(); // no form and no Apply button — let it report "No form fields found" as usual
-      return;
-    }
-    // target="_blank" would open a NEW tab whose id we have no way to
-    // connect back to this one — the pending-autofill flag below is keyed
-    // by tab id, so it would never be picked up. Leave this case as
-    // analysis-only rather than guess at rewriting the link's target.
-    if ((applyBtn.getAttribute('target') || '').toLowerCase() === '_blank') {
-      console.log('[JobMatch AI][Auto-Bid] Apply link targets _blank — skipping automatic click.');
-      return;
-    }
+    // Every autofillForm() call this function makes is part of Auto-Bid's
+    // own automated flow — see _autoBidAutofillRun's doc comment for why
+    // that's what gates AutoFill's multi-step wizard navigation.
+    _autoBidAutofillRun = true;
     try {
-      const setResult = await sendMessage({ type: 'SET_PENDING_AUTOFILL' });
-      console.log('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL ->', setResult);
-    } catch (e) {
-      console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL failed:', e && e.message);
+      // Fields actually detected in THIS frame are the one fully reliable
+      // signal — if we have them, just fill them.
+      const hasTopFrameFields = detectFormFields().length > 0;
+      if (hasTopFrameFields) {
+        await autofillForm();
+        return;
+      }
+      // No top-frame fields. Look for an explicit Apply CTA before falling
+      // back to guessing that some stray <iframe> on the page (chat widget,
+      // ad, reCAPTCHA, an unrelated embedded widget) is secretly the real
+      // application form — merely counting <iframe> tags used to be enough
+      // to defer here, but that misfired on pages (e.g. Dice job listings)
+      // that carry unrelated third-party iframes yet only reveal their real
+      // form after an explicit "Apply"/"Easy Apply" click: it kept clicking
+      // nothing, broadcast into those unrelated iframes, found 0 fields, and
+      // reported "No form fields found" instead of ever clicking through. An
+      // explicit, apply-shaped CTA is a stronger signal than "an iframe
+      // exists somewhere on the page."
+      const applyBtn = findApplyButton();
+      if (!applyBtn) {
+        // No CTA to click through — either the form is already embedded in
+        // an iframe (try filling it) or there's genuinely nothing here.
+        await autofillForm(); // reports "No form fields found" as usual if the iframe broadcast also comes up empty
+        return;
+      }
+      // target="_blank" would open a NEW tab whose id we have no way to
+      // connect back to this one — the pending-autofill flag below is keyed
+      // by tab id, so it would never be picked up. Leave this case as
+      // analysis-only rather than guess at rewriting the link's target.
+      if ((applyBtn.getAttribute('target') || '').toLowerCase() === '_blank') {
+        return;
+      }
+      try {
+        // Carry the analysis result (matchScore, matchingSkills, company,
+        // title, ...) and the active resume id across this navigation —
+        // clicking applyBtn destroys this content-script instance and every
+        // module-level variable in it, so the FRESH instance that loads on
+        // the new page (see checkPendingAutoBidAutofill) has no way to know
+        // which job/resume it's even looking at otherwise. That new page
+        // often has no visible job description of its own at all (e.g.
+        // Dice's application wizard just shows a title/company summary), so
+        // without this, a cover-letter-upload field there could never
+        // generate a real cover letter.
+        await sendMessage({ type: 'SET_PENDING_AUTOFILL', analysis: currentAnalysis, activeResumeId: _activeResumeId });
+      } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL failed:', e && e.message);
+      }
+      applyBtn.click();
+    } finally {
+      _autoBidAutofillRun = false;
     }
-    console.log('[JobMatch AI][Auto-Bid] clicking Apply button now.');
-    applyBtn.click();
   }
 
   /**
    * Auto-Bid's fully-automated analyze step: waits for the JD to render,
    * runs the normal Analyze Job flow, and — only if that produced a strong
-   * match — also runs AutoFill automatically, exactly as if the user had
-   * clicked the AutoFill button themselves (clicking through an "Apply
+   * match — also runs AutoFill automatically (clicking through an "Apply
    * Now" link first if needed — see autoClickApplyThenAutofillIfNeeded).
-   * This never submits anything; AutoFill only fills the form's fields,
-   * leaving the actual application submission for the user to review and
-   * send.
+   * Unlike a manual AutoFill click, this also clicks through a multi-step
+   * wizard's "Next"-style controls between steps — see
+   * _autoBidAutofillRun's doc comment for why that's Auto-Bid-only. This
+   * never submits anything either way; AutoFill only fills each step's
+   * fields (and advances to the next one, under Auto-Bid), leaving the
+   * actual application submission for the user to review and send.
    *
    * The score threshold reuses MIN_SCORE_TO_APPLY (75) — the same bar that
    * already gates the "Mark as Applied" button — so "good enough to
@@ -6195,7 +6773,6 @@
     await waitForJobDescriptionReady();
     await analyzeJob();
     const score = currentAnalysis && typeof currentAnalysis.matchScore === 'number' ? currentAnalysis.matchScore : null;
-    console.log('[JobMatch AI][Auto-Bid] autoAnalyzeAndMaybeAutofill: matchScore=%s (threshold=%s) url=%s', score, MIN_SCORE_TO_APPLY, window.location.href);
     if (score !== null && score > MIN_SCORE_TO_APPLY) {
       try { await autoClickApplyThenAutofillIfNeeded(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded threw:', e && e.message); }
     }
@@ -6213,18 +6790,50 @@
    * @async
    */
   async function checkPendingAutoBidAutofill() {
-    let pending = false;
+    let result = { pending: false, analysis: null, activeResumeId: null };
     try {
-      pending = await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' });
+      result = await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' });
     } catch (e) {
       console.warn('[JobMatch AI][Auto-Bid] GET_AND_CLEAR_PENDING_AUTOFILL failed:', e && e.message);
     }
-    console.log('[JobMatch AI][Auto-Bid] checkPendingAutoBidAutofill: pending=%s url=%s', pending, window.location.href);
+    const { pending, analysis, activeResumeId } = result || {};
     if (!pending) return;
-    if (!panelOpen) togglePanel();
-    await waitForFormFieldsReady();
-    console.log('[JobMatch AI][Auto-Bid] form fields ready (or timed out) — running autofillForm() now.');
-    try { await autofillForm(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autofillForm() threw:', e && e.message); }
+    // Restore the previous page's analysis/resume selection. Whether the
+    // Apply click caused a real navigation (a fresh content-script
+    // instance with none of this state — confirmed on CATS) or a
+    // client-side route change (the SAME instance, but handleSpaUrlChanged
+    // just reset currentAnalysis to null because the URL changed —
+    // confirmed on Dice), either way this page has lost it, and often has
+    // no visible job description of its own (e.g. Dice's application
+    // wizard), so without this a cover-letter-upload field here would have
+    // nothing to generate against. See the doc comment on
+    // SET_PENDING_AUTOFILL in background.js.
+    if (analysis) currentAnalysis = analysis;
+    if (activeResumeId) _activeResumeId = activeResumeId;
+    // Held for the rest of this function so a SECOND SPA URL-change event
+    // firing mid-flight (confirmed on Dice — its router settles into the
+    // post-click route across more than one pushState/replaceState update)
+    // can't wipe currentAnalysis back to null before autofillForm() gets to
+    // use it. See _autoBidContinuationActive's doc comment.
+    _autoBidContinuationActive = true;
+    try {
+      if (!panelOpen) togglePanel();
+      // Wait for the route swap to actually finish rendering before trusting
+      // waitForFormFieldsReady()'s generic "is there ANY input on the page"
+      // check — on a client-side (SPA) route change, that check can already
+      // be true from page chrome that predates the click (nav search box,
+      // etc.), well before the new route's own form has rendered. See
+      // waitForDomSettled's doc comment.
+      await waitForDomSettled();
+      await waitForFormFieldsReady();
+      // This continuation is always part of Auto-Bid's automated flow —
+      // see _autoBidAutofillRun's doc comment.
+      _autoBidAutofillRun = true;
+      try { await autofillForm(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autofillForm() threw:', e && e.message); }
+      finally { _autoBidAutofillRun = false; }
+    } finally {
+      _autoBidContinuationActive = false;
+    }
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -6354,9 +6963,6 @@
               detectFormFields();
               const resumeResult = await attachResumeFile();
               totalFilled += resumeResult.attached;
-              if (resumeResult.attached > 0) {
-                console.log(`[JobMatch AI] iframe Pass 0 (resume file): attached ${resumeResult.fileName}`);
-              }
             } catch (_) {}
 
             // ── PASS 1: Direct fill from Q&A (no AI, instant, accurate) ──
@@ -6404,7 +7010,6 @@
               for (let i = 0; i < questionsForAI.length; i += BATCH_SIZE) {
                 const batch = questionsForAI.slice(i, i + BATCH_SIZE);
                 const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-                console.log(`[JobMatch AI] iframe AI batch ${batchNum} (${batch.length} fields)`);
                 try {
                   const response = await sendMessage({ type: 'GENERATE_AUTOFILL', formFields: batch, resumeId: _activeResumeId });
                   const answers = Array.isArray(response) ? response : (response.answers || []);
@@ -6447,12 +7052,21 @@
   function handleSpaUrlChanged() {
     const currentUrl = normalizeUrl(window.location.href);
     const isDifferentJob = currentUrl !== _lastUrl;
-    console.log('[JobMatch AI][Auto-Bid] handleSpaUrlChanged: raw=%s normalized=%s isDifferentJob=%s', window.location.href, currentUrl, isDifferentJob);
     if (isDifferentJob) {
       _lastUrl = currentUrl;
       // Bump the analyze generation so any in-flight analyzeJob() against
       // the previous URL becomes stale and bails before touching the UI (I3).
       _analyzeGen++;
+      // Skip the state wipe/UI reset below while an Auto-Bid Apply-click
+      // continuation is actively running (see _autoBidContinuationActive's
+      // doc comment) — some ATS routers (confirmed on Dice) fire more than
+      // one pushState/replaceState update while settling into the
+      // post-click route, and a second one landing mid-continuation would
+      // otherwise wipe the currentAnalysis that continuation just restored
+      // out from under it, right before it's used to generate a cover
+      // letter. _lastUrl above still updates either way, so a LATER,
+      // genuinely new navigation is still tracked correctly.
+      if (_autoBidContinuationActive) return;
       currentAnalysis = null;
       _fieldMap = {};
       clearAutofillBadges();

@@ -24,16 +24,21 @@
 // "gender identity" doesn't accidentally match the broader "gender" bucket.
 
 const TOPIC_PATTERNS = {
+  // More specific gender identity questions (cis/trans identity) — must
+  // come BEFORE the broader "gender" topic below: /\bgender\b/i also
+  // matches inside "gender identity", so checking gender first would
+  // mis-classify every gender_identity question as plain "gender" (the
+  // insertion order here previously contradicted this file's own stated
+  // ordering rule and did exactly that).
+  gender_identity: [
+    /\bgender.?identity\b/i, /\bcisgender\b/i, /\btransgender\b/i,
+    /\bi identify as\b/i
+  ],
+
   // Standard male/female gender question — very common on job applications
   gender: [
     /\bgender\b/i, /\bsex\b/i, /\bman\b.*\bwoman\b/i,
     /\bi identify my gender\b/i, /\bmale\b.*\bfemale\b/i
-  ],
-
-  // More specific gender identity questions (cis/trans identity)
-  gender_identity: [
-    /\bgender.?identity\b/i, /\bcisgender\b/i, /\btransgender\b/i,
-    /\bi identify as\b/i
   ],
 
   // Sexual orientation EEO questions
@@ -141,8 +146,19 @@ const ANSWER_SYNONYMS = {
   // ── Yes / No ──
   // Used as a fallback for any yes/no field before the more specific
   // veteran/disability/work_auth handling in matchAnswerToOption().
-  'yes': ['yes', 'true', '1'],
-  'no':  ['no', 'false', '0'],
+  //
+  // Deliberately does NOT include bare '1'/'0': matchAnswerToOption's
+  // Strategy 3 checks these as SUBSTRINGS of the option text
+  // (`optLower.includes(syn)`), and a bare digit is far too common inside
+  // unrelated option labels to use safely that way — confirmed live: a
+  // saved "Yes" answer for a DIFFERENT work-authorization question matched
+  // the option "Have H1 Visa" purely because "H1" contains the digit "1",
+  // nothing to do with yes/no semantics at all. 'yes'/'true' and 'no'/
+  // 'false' are already reasonably safe as substrings; the numeral forms
+  // add real collision risk for negligible benefit (a saved answer that's
+  // literally the bare digit "1" or "0" instead of a word is rare).
+  'yes': ['yes', 'true'],
+  'no':  ['no', 'false'],
 
   // ── Race / Ethnicity ──
   // Users typically save a short common term ("indian", "black") but ATS
@@ -203,24 +219,41 @@ function detectTopic(questionText) {
 // ─── Core: find a saved answer via the Q&A list ──────────────────────────────
 
 /**
- * Searches the user's saved Q&A entries for one that matches the given topic,
- * and returns the saved answer string if found.
+ * Searches the user's saved Q&A entries for every one that matches the given
+ * topic's keywords, and returns ALL of their saved answers (not just the
+ * first) — in list order, most-recently-checked last.
+ *
+ * Returning every candidate — rather than stopping at the first keyword hit
+ * — matters because one broad topic can legitimately cover multiple,
+ * differently-SHAPED saved questions: e.g. "work_auth" matches both
+ * "Are you legally authorized to work in the United States?" (a plain
+ * Yes/No question) and "Work authorization status" (a multi-choice
+ * citizenship/visa-category question). Which one is actually USABLE
+ * depends on the specific dropdown's own option list — a "Yes" answer
+ * cannot map onto a citizenship-category dropdown (US Citizen / Green
+ * Card / H-1B / ...) no matter how it's phrased, and would previously
+ * make deterministic matching fail outright (falling through to the AI)
+ * even when a perfectly good, differently-shaped saved answer for the same
+ * topic existed further down the list. The caller (deterministicFieldMatcher)
+ * now tries each candidate against matchAnswerToOption() in turn and uses
+ * the first one that actually resolves to a real option on THIS field.
  *
  * The lookup works by checking whether the saved question text contains any of
  * the keywords associated with the topic in TOPIC_TO_QA_KEYWORDS.
  *
  * @param {string} topic - A topic key returned by detectTopic().
  * @param {Array<{question: string, answer: string}>} qaList - The user's Q&A entries.
- * @returns {string|null} The trimmed saved answer, or null if none found.
+ * @returns {string[]} The trimmed saved answers of every matching entry, in list order.
  */
-function findQAAnswer(topic, qaList) {
+function findQAAnswers(topic, qaList) {
   // Guard: nothing to search if the list is absent or empty
-  if (!qaList || !qaList.length) return null;
+  if (!qaList || !qaList.length) return [];
 
   // Look up which keywords identify this topic in a Q&A question string
   const keywords = TOPIC_TO_QA_KEYWORDS[topic];
-  if (!keywords) return null;
+  if (!keywords) return [];
 
+  const answers = [];
   for (const qa of qaList) {
     // Skip entries that have no answer saved yet
     if (!qa.answer || !qa.answer.trim()) continue;
@@ -228,13 +261,12 @@ function findQAAnswer(topic, qaList) {
     const qLower = qa.question.toLowerCase();
 
     // Check every keyword for this topic against the saved question text
-    for (const kw of keywords) {
-      if (qLower.includes(kw)) return qa.answer.trim();
+    if (keywords.some(kw => qLower.includes(kw))) {
+      answers.push(qa.answer.trim());
     }
   }
 
-  // No matching Q&A entry found for this topic
-  return null;
+  return answers;
 }
 
 // ─── Core: find a saved answer from the structured profile object ─────────────
@@ -268,18 +300,31 @@ function findProfileAnswer(topic, profile) {
 
 /**
  * Normalizes a string for case- and punctuation-insensitive comparison.
- * Lowercases the input, strips all non-alphanumeric characters (except spaces),
- * and collapses runs of whitespace to a single space.
+ * Lowercases the input and strips ALL non-alphanumeric characters,
+ * including spaces — not just collapsing them.
+ *
+ * Spaces are stripped (not preserved as single spaces) specifically so
+ * word-boundary punctuation quirks can't cause a false mismatch: a saved
+ * answer of "U.S.Citizen" (no space after the abbreviation's period) used
+ * to normalize to "uscitizen" while the option "US Citizen" normalized to
+ * "us citizen" — same content, different word-boundary punctuation, and
+ * the leftover space made them compare unequal, so this deterministic
+ * match silently failed and fell through to the AI, which then had to
+ * guess from resume content alone (and guessed wrong: "Have H1 Visa"
+ * instead of "US Citizen"). Stripping spaces too makes the comparison
+ * content-only: "U.S.Citizen" and "US Citizen" both become "uscitizen".
  *
  * @param {string} str - The raw string to normalize.
  * @returns {string} The normalized string.
  *
  * @example
- *   normalize("South Asian (India)") // → "south asian india"
- *   normalize("Straight/Heterosexual") // → "straightheterosexual"  ← slash removed
+ *   normalize("South Asian (India)") // → "southasianindia"
+ *   normalize("Straight/Heterosexual") // → "straightheterosexual"
+ *   normalize("U.S.Citizen") // → "uscitizen"
+ *   normalize("US Citizen") // → "uscitizen"
  */
 function normalize(str) {
-  return str.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  return str.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
 // ─── Core: match a saved answer to the best available option ─────────────────
@@ -497,20 +542,27 @@ function deterministicFieldMatcher(questionText, options, qaList, profile) {
     return { matched: false, option: null, topic: null };
   }
 
-  // ── Step 2: Find the user's saved answer for this topic ───────────────────
-  // Try the Q&A list first (most authoritative), then fall back to any
-  // relevant field on the structured profile object.
-  let savedAnswer = findQAAnswer(topic, qaList);
-  if (!savedAnswer) {
-    savedAnswer = findProfileAnswer(topic, profile);
-  }
+  // ── Step 2: Find the user's saved answer(s) for this topic ─────────────────
+  // Try every Q&A entry matching this topic (most authoritative — see
+  // findQAAnswers' doc comment for why one topic can have multiple,
+  // differently-shaped candidates), then fall back to the structured
+  // profile object if none of them panned out.
+  const candidateAnswers = findQAAnswers(topic, qaList);
+  const profileAnswer = findProfileAnswer(topic, profile);
+  if (profileAnswer) candidateAnswers.push(profileAnswer);
 
-  // ── Step 3: Map the saved answer to an available option ───────────────────
-  // Only attempted when we actually have a saved answer to work from.
-  if (savedAnswer) {
+  // ── Step 3: Map each candidate answer to an available option, in order ────
+  // Confirmed live: a saved "Are you legally authorized to work in the US?"
+  // → "Yes" and a saved "Work authorization status" → "US Citizen" both
+  // match the work_auth topic, but only the second one can ever resolve to
+  // an option on a citizenship-category dropdown (US Citizen / Green Card /
+  // H-1B / ...) — "Yes" doesn't map to any of those no matter how it's
+  // phrased. Trying every candidate instead of just the first keyword hit
+  // means a later, better-shaped candidate isn't shadowed by an earlier,
+  // unusable one for THIS specific field's options.
+  for (const savedAnswer of candidateAnswers) {
     const match = matchAnswerToOption(savedAnswer, options, topic);
     if (match) {
-      // Successfully matched — return immediately, no need for further steps
       return { matched: true, option: match, topic };
     }
   }
@@ -521,17 +573,18 @@ function deterministicFieldMatcher(questionText, options, qaList, profile) {
   // This ensures the form can be submitted without leaving required EEO fields
   // blank.
   //
-  // IMPORTANT: We only use the decline option when savedAnswer is null/empty.
-  // If the user DID save an answer but it failed to match any option (e.g.,
-  // due to an unusual option label on this particular ATS), we fall through to
-  // the AI pipeline instead of silently overriding their preference with "decline".
+  // IMPORTANT: We only use the decline option when there was no candidate
+  // answer at all. If the user DID save one or more answers but NONE of them
+  // matched any option (e.g., due to an unusual option label on this
+  // particular ATS), we fall through to the AI pipeline instead of silently
+  // overriding their preference with "decline".
   const demographicTopics = [
     'gender', 'gender_identity', 'sexual_orientation', 'race_ethnicity',
     'veteran', 'disability', 'hispanic_latino', 'pronouns'
   ];
   if (demographicTopics.includes(topic)) {
     const decline = findDeclineOption(options);
-    if (decline && !savedAnswer) {
+    if (decline && candidateAnswers.length === 0) {
       // Use decline only when the user has no saved answer at all
       return { matched: true, option: decline, topic };
     }

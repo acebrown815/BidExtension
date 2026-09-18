@@ -1614,36 +1614,46 @@ const handlers = {
   },
 
   // ── Auto-Bid: "click Apply Now, then AutoFill" continuation ────────────
-  // Some ATS platforms (confirmed on CATS, catsone.com) put the real
-  // application form on a SEPARATE page reached only by clicking an
-  // "Apply Now" link — a genuine navigation, not a same-page reveal — so
-  // content.js's own execution context is destroyed the moment it clicks
-  // that link. Same problem CACHE_TAB_JD above solves for JD text: stash a
-  // flag here, keyed by tab id, that survives the navigation; the FRESH
-  // content-script instance that loads on the new page (still the same
-  // tab) checks for it on init and runs AutoFill itself if it's set. Only
-  // ever set by the Auto-Bid automated flow (autoAnalyzeAndMaybeAutofill /
+  // Some ATS platforms (confirmed on CATS, catsone.com, and Dice) put the
+  // real application form on a SEPARATE page reached only by clicking an
+  // "Apply Now"/"Easy Apply" link — a genuine navigation, not a same-page
+  // reveal — so content.js's own execution context (and every module-level
+  // variable in it, including currentAnalysis and _activeResumeId) is
+  // destroyed the moment it clicks that link. Same problem CACHE_TAB_JD
+  // above solves for JD text: stash state here, keyed by tab id, that
+  // survives the navigation; the FRESH content-script instance that loads
+  // on the new page (still the same tab) checks for it on init and runs
+  // AutoFill itself if it's set — restoring currentAnalysis/activeResumeId
+  // first so a cover-letter-upload field on that new page can still be
+  // generated against the SAME job/resume the original page analyzed,
+  // even though that new page itself has no visible job description at
+  // all (e.g. Dice's application wizard). Only ever set by the Auto-Bid
+  // automated flow (autoAnalyzeAndMaybeAutofill /
   // autoClickApplyThenAutofillIfNeeded in content.js) — never by a manual
   // Analyze/AutoFill click.
   'SET_PENDING_AUTOFILL': async (msg, sender) => {
     const tabId = sender && sender.tab && sender.tab.id;
-    console.log('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL for tabId=%s', tabId);
     if (!tabId) return { set: false };
-    await chrome.storage.session.set({ [`pendingAutofill_${tabId}`]: true });
+    await chrome.storage.session.set({
+      [`pendingAutofill_${tabId}`]: {
+        analysis: msg.analysis || null,
+        activeResumeId: msg.activeResumeId || null,
+      }
+    });
     return { set: true };
   },
 
   'GET_AND_CLEAR_PENDING_AUTOFILL': async (msg, sender) => {
     const tabId = sender && sender.tab && sender.tab.id;
-    if (!tabId) return false;
+    if (!tabId) return { pending: false, analysis: null, activeResumeId: null };
     const key = `pendingAutofill_${tabId}`;
     const result = await chrome.storage.session.get(key);
-    console.log('[JobMatch AI][Auto-Bid] GET_AND_CLEAR_PENDING_AUTOFILL for tabId=%s -> %s', tabId, !!result[key]);
-    if (result[key]) {
+    const stored = result[key];
+    if (stored) {
       await chrome.storage.session.remove(key);
-      return true;
+      return { pending: true, analysis: stored.analysis || null, activeResumeId: stored.activeResumeId || null };
     }
-    return false;
+    return { pending: false, analysis: null, activeResumeId: null };
   },
 };
 
@@ -1837,7 +1847,6 @@ async function migrateProfileSlotsToResumes() {
 // the event to the specific frame whose URL changed; the content script
 // there compares against its own window.location.href and resets if needed.
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
-  console.log('[JobMatch AI][Auto-Bid] onHistoryStateUpdated: tabId=%s frameId=%s url=%s', details.tabId, details.frameId, details.url);
   // Best-effort delivery — the content script may not be loaded in this
   // frame (e.g. cross-origin iframes our manifest doesn't match).
   chrome.tabs.sendMessage(

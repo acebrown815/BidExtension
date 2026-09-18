@@ -21,10 +21,15 @@
 //
 // content.js is a large content script that isn't practical to load
 // wholesale under happy-dom (see contentRadioGroupLabel.test.js). This
-// extracts just autofillForm() by source range and evals it with small
-// stand-ins for its dependencies (detectFormFields, attachResumeFile,
-// fillFormFromAnswers, sendMessage) so the test exercises the real control
-// flow without needing a real DOM form or a real AI call.
+// extracts autofillForm() AND fillCurrentAutofillStep() (autofillForm is
+// now a thin per-step-loop wrapper around the latter — see the multi-step
+// wizard navigation feature) by source range and evals them with small
+// stand-ins for their dependencies (detectFormFields, attachResumeFile,
+// fillFormFromAnswers, sendMessage, findNextStepButton) so the test
+// exercises the real control flow without needing a real DOM form or a
+// real AI call. findNextStepButton stubbed to always return null here —
+// this suite is about the single-step iframe-broadcast behavior, not
+// wizard-step navigation (see findNextStepButton.test.js for that).
 import {
   describe, it, expect, beforeEach,
 } from 'vitest';
@@ -67,10 +72,20 @@ function buildAutofillForm({
     `
     let _fieldMap = {};
     let _activeResumeId = 'r1';
+    let _resumeFileFields = [];
+    let _coverLetterFileFields = [];
+    let currentAnalysis = null;
+    let _autoBidAutofillRun = true;
+    const MAX_AUTOFILL_STEPS = 10;
+    function findNextStepButton() { return null; }
+    async function waitForDomSettled() {}
+    async function waitForFormFieldsReady() {}
+    function hasVisibleValidationErrors() { return false; }
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}
     function detectFormFields() { return topFrameQuestions; }
     async function attachResumeFile() { return { attached: 0, fileName: null }; }
+    async function attachCoverLetterFile() { return { attached: 0, fileName: null }; }
     async function fillFormFromAnswers(answers) { return { filled: aiFilled, skipped: [] }; }
     function setStatus(msg) { statusMessages.push(msg); }
     function clearStatus() {}

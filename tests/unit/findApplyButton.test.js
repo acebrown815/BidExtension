@@ -57,6 +57,26 @@ describe('findApplyButton — finds the real CTA', () => {
     document.body.innerHTML = '<a href="/apply">Apply for this position</a>';
     expect(findApplyButton()).not.toBeNull();
   });
+
+  it('finds Dice\'s "Easy Apply" link, verbatim from the live page', () => {
+    document.body.innerHTML = `
+      <a data-testid="apply-button" href="/job-applications/af0a85ca-02cc-4410-a627-e47ff3619fb9/wizard" target="_self">
+        <span class="flex items-center justify-center gap-2 align-middle">Easy Apply</span>
+      </a>
+    `;
+    const el = findApplyButton();
+    expect(el).not.toBeNull();
+    expect(el.tagName).toBe('A');
+    expect(el.getAttribute('href')).toBe('/job-applications/af0a85ca-02cc-4410-a627-e47ff3619fb9/wizard');
+  });
+
+  it('matches "Quick Apply" and "1-Click Apply" variants', () => {
+    document.body.innerHTML = '<button>Quick Apply</button>';
+    expect(findApplyButton()).not.toBeNull();
+
+    document.body.innerHTML = '<button>1-Click Apply</button>';
+    expect(findApplyButton()).not.toBeNull();
+  });
 });
 
 describe('findApplyButton — avoids false positives', () => {

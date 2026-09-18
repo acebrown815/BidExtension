@@ -147,3 +147,48 @@ describe('findVisibleOptions — react-select-style markup (Greenhouse job-board
     expect(options.map(o => o.text)).toEqual(['Hispanic or Latino', 'Not Hispanic or Latino']);
   });
 });
+
+describe('collectOptions — ignores CSS-hidden duplicate text (Dice "Work Authorization" case)', () => {
+  // Regression test for a real bug: Dice's Work Authorization field (React
+  // Aria Components) renders each listbox option by reusing ONE template
+  // for both the trigger's "currently selected" display AND the listbox's
+  // own option row — both copies of the label sit in the DOM at once, with
+  // the unused "selection" copy hidden via a `.hidden` (display:none)
+  // class, right next to the real, visible "option" copy.
+  //
+  // collectOptions() used `el.textContent`, which ignores CSS entirely and
+  // concatenated BOTH copies ("US CitizenUS Citizen") — confirmed live via
+  // console logging. That doubled string broke every downstream matching
+  // strategy (the deterministic Q&A matcher AND the AI's own JSON
+  // response), so the field kept "choosing" whatever the AI guessed from
+  // resume content alone ("Have H1 Visa") no matter how correct the saved
+  // Q&A answer and its matcher were.
+  //
+  // Fix: use `.innerText` (which DOES respect display:none) instead,
+  // falling back to `.textContent` only where innerText isn't available.
+  function makeDuplicatedTemplateOption(text) {
+    const el = document.createElement('div');
+    el.setAttribute('role', 'option');
+    el.innerHTML = `
+      <div class="hidden" style="display:none">${text}</div>
+      <div>${text}</div>
+    `;
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('reads the option\'s text once, not doubled, when a hidden duplicate sits in the same element', () => {
+    document.body.innerHTML = '<input id="trigger" aria-controls="listbox">';
+    const listbox = document.createElement('div');
+    listbox.id = 'listbox';
+    listbox.setAttribute('role', 'listbox');
+    document.body.appendChild(listbox);
+    listbox.appendChild(makeDuplicatedTemplateOption('US Citizen'));
+    listbox.appendChild(makeDuplicatedTemplateOption('Have H1 Visa'));
+
+    const trigger = document.getElementById('trigger');
+    const options = findVisibleOptions(trigger);
+
+    expect(options.map(o => o.text)).toEqual(['US Citizen', 'Have H1 Visa']);
+  });
+});
