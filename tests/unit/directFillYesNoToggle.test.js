@@ -6,7 +6,7 @@
 // elements are two <button>s, with a hidden, tabindex="-1" checkbox that
 // only mirrors state and never drives it — the bug this handler exists
 // to work around.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -31,6 +31,15 @@ function loadDirectFill() {
 }
 
 describe('Ashby-style Yes/No toggle direct-fill', () => {
+  // Loaded once — dynamic import() caches by URL, so deleting and
+  // re-importing globalThis.JMQaMatch per test (the way JMFieldFilter is
+  // deliberately deleted below, to force its fallback) wouldn't actually
+  // re-run this module's side effect and would leave JMQaMatch undefined
+  // for every test after the first.
+  beforeAll(async () => {
+    await import('../../lib/qaMatch.js');
+  });
+
   beforeEach(() => {
     document.body.innerHTML = ASHBY_HTML;
     delete window.__jobMatchDirectFill;

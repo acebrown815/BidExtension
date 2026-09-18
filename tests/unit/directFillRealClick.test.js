@@ -15,12 +15,23 @@
 // have failed against the old code even though `.checked` ended up correct
 // — which is exactly the discrepancy that let the old bug hide behind
 // "the code says filled" while a React re-render silently reverted it.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const DIRECT_FILL_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'directFill.js');
+
+// Loaded once for the whole file — directFill.js's matchQA() now delegates
+// to globalThis.JMQaMatch (see lib/qaMatch.js), and getRadioGroupLabel()
+// now delegates to globalThis.JMRadioGroupLabel (see
+// lib/radioGroupLabel.js); without them loaded, matching/label resolution
+// silently falls back to "never matches" / the raw single-element
+// resolver, and every test below would find no Q&A answer to fill.
+beforeAll(async () => {
+  await import('../../lib/qaMatch.js');
+  await import('../../lib/radioGroupLabel.js');
+});
 
 // Same shape as the user's real, live Ashby gender-identity fieldset, but
 // with non-digit-leading option ids (sidesteps an unrelated happy-dom

@@ -9,12 +9,23 @@
 // fix, EVERY radio group with per-option labels (gender, race, veteran
 // status, disability, and other EEO-style questions) silently failed to
 // match its Q&A entry and was never filled at all.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const DIRECT_FILL_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'directFill.js');
+
+// Loaded once for the whole file — directFill.js's matchQA() now delegates
+// to globalThis.JMQaMatch (see lib/qaMatch.js), and getRadioGroupLabel()
+// now delegates to globalThis.JMRadioGroupLabel (see
+// lib/radioGroupLabel.js); without them loaded, matching/label resolution
+// silently falls back to "never matches" / the raw single-element
+// resolver, and every test below would find no Q&A answer to fill.
+beforeAll(async () => {
+  await import('../../lib/qaMatch.js');
+  await import('../../lib/radioGroupLabel.js');
+});
 
 // The user's real Ashby "What is your gender identity?" field, verbatim.
 const GENDER_IDENTITY_HTML = `

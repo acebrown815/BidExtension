@@ -89,55 +89,17 @@
   /**
    * Resolves the QUESTION label for a radio group — e.g. "What is your
    * gender identity?" — as distinct from any individual option's own
-   * label. Many ATSs (seen on Ashby) give each radio option its own
-   * `<label for="optionId">` purely for the option's visible text ("Man",
-   * "Woman", ...), inside a <fieldset> whose own <label>/<legend> carries
-   * the actual question. getElementLabel's `label[for]` strategy has no
-   * way to tell those apart — called on any one radio, it always finds
-   * that radio's own option label first and returns e.g. "Man" instead of
-   * the question, so the group can never match a Q&A entry at all.
+   * label. See lib/radioGroupLabel.js for the full rationale (shared with
+   * content.js, which needs the exact same resolution for the AI-facing
+   * question_text it sends).
    * @param {HTMLInputElement[]} radios all radios in one group (same name)
    * @returns {string}
    */
-  function findRadioGroupContainer(radios) {
-    // Walk up from the radio's PARENT, not the radio itself — a naive
-    // `.closest('fieldset, [role="radiogroup"], [class*="radio-group"]')`
-    // called on the radio matches the radio's own class (or its immediate
-    // per-option wrapper div's class) before ever reaching the real group
-    // container, because ATS markup (seen on Ashby) names those
-    // "...-radio-group-option-radio" / "...-radio-group-option" — both
-    // contain "radio-group" as a literal substring. Skip any ancestor
-    // whose own class marks it as an option-level wrapper instead of the
-    // group container itself.
-    let node = radios[0].parentElement;
-    while (node) {
-      const tag = node.tagName;
-      const cls = typeof node.className === 'string' ? node.className : '';
-      const role = node.getAttribute && node.getAttribute('role');
-      const isOptionWrapper = /-option(-|$)/i.test(cls) || /\boption\b/i.test(cls);
-      if (!isOptionWrapper && (tag === 'FIELDSET' || role === 'radiogroup' || /radio-?group/i.test(cls))) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return null;
-  }
-
   function getRadioGroupLabel(radios) {
-    const container = findRadioGroupContainer(radios);
-    if (container) {
-      const radioIds = new Set(radios.map(r => r.id).filter(Boolean));
-      for (const cand of container.querySelectorAll('label, legend')) {
-        const forId = cand.getAttribute('for');
-        if (forId && radioIds.has(forId)) continue; // an option's own label, not the question
-        if (radios.some(r => cand.contains(r))) continue; // wraps a radio directly — also an option label
-        const text = cleanLabel(cand.textContent);
-        if (text) return text;
-      }
-    }
-    // No fieldset/legend structure found — fall back to the generic
-    // single-element resolver (covers radio groups with only a group-level
-    // aria-label/wrapper and no per-option labels to get confused by).
+    const shared = globalThis.JMRadioGroupLabel;
+    if (shared) return cleanLabel(shared.getRadioGroupLabel(radios, getElementLabel));
+    // Defensive only — lib/radioGroupLabel.js is always loaded ahead of
+    // directFill.js per manifest.json; this never runs in practice.
     return getElementLabel(radios[0]);
   }
 
@@ -194,53 +156,12 @@
       return profileMap[l];
     }
 
-    // ── Q&A matching (strict) ──
+    // ── Q&A matching (strict — see lib/qaMatch.js for the algorithm and
+    // why it's shared with aiService.js's hint-matcher) ──
     if (!qaList || qaList.length === 0) return null;
-
-    // 1. Exact question match
-    const exact = qaList.find(qa => qa.answer && qa.question.toLowerCase().trim() === l);
-    if (exact) return exact.answer;
-
-    // 2. Very high similarity: label and Q&A question are nearly identical
-    //    Both must be short (< 50 chars) and one must contain the other fully
-    const highSim = qaList.find(qa => {
-      if (!qa.answer) return false;
-      const q = qa.question.toLowerCase().trim();
-      // Both short and one contains the other
-      if (q.length < 50 && l.length < 50) {
-        if (q === l) return true;
-        // Q contains label but label must be substantial (>= 6 chars)
-        if (l.length >= 6 && q.includes(l)) return true;
-        // Label contains Q but Q must be substantial
-        if (q.length >= 6 && l.includes(q)) return true;
-      }
-      return false;
-    });
-    if (highSim) return highSim.answer;
-
-    // 3. For LONG labels (questions), check if the core meaning matches
-    //    Only match if the label is clearly about the same topic
-    //    Skip this for short generic labels to avoid false matches
-    if (l.length > 20) {
-      // Extract the key noun phrases, ignoring common words
-      const stopWords = new Set(['the', 'a', 'an', 'is', 'are', 'do', 'does', 'did', 'you',
-        'your', 'have', 'has', 'will', 'would', 'in', 'on', 'at', 'to', 'for', 'of', 'or',
-        'and', 'from', 'with', 'by', 'this', 'that', 'what', 'how', 'which', 'who', 'where',
-        'when', 'please', 'select', 'enter', 'provide', 'currently', 'now', 'not', 'been',
-        'being', 'most', 'any', 'if', 'can', 'may', 'need', 'order', 'job', 'posted']);
-
-      const labelWords = l.split(/[\s,?/()]+/).filter(w => w.length > 2 && !stopWords.has(w));
-      if (labelWords.length >= 2) {
-        const match = qaList.find(qa => {
-          if (!qa.answer) return false;
-          const qWords = qa.question.toLowerCase().split(/[\s,?/()]+/).filter(w => w.length > 2 && !stopWords.has(w));
-          // Require at least 50% of Q&A keywords present in label
-          const overlap = qWords.filter(qw => labelWords.some(lw => lw === qw || (lw.length > 4 && qw.includes(lw)) || (qw.length > 4 && lw.includes(qw))));
-          return qWords.length > 0 && overlap.length >= Math.ceil(qWords.length * 0.5) && overlap.length >= 2;
-        });
-        if (match) return match.answer;
-      }
-    }
+    const matchesLabel = (globalThis.JMQaMatch && globalThis.JMQaMatch.qaQuestionMatchesLabel) || (() => false);
+    const match = qaList.find(qa => qa.answer && matchesLabel(qa.question, l));
+    if (match) return match.answer;
 
     return null;
   }

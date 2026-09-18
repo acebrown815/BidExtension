@@ -4689,62 +4689,21 @@
     return '';
   }
 
-  function findRadioGroupContainer(radios) {
-    // Walk up from the radio's PARENT, not the radio itself — a naive
-    // `.closest('fieldset, [role="radiogroup"], [class*="radio-group"]')`
-    // called on the radio matches the radio's own class (or its immediate
-    // per-option wrapper div's class) before ever reaching the real group
-    // container, because ATS markup (seen on Ashby) names those
-    // "...-radio-group-option-radio" / "...-radio-group-option" — both
-    // contain "radio-group" as a literal substring. Skip any ancestor
-    // whose own class marks it as an option-level wrapper instead of the
-    // group container itself.
-    let node = radios[0].parentElement;
-    while (node) {
-      const tag = node.tagName;
-      const cls = typeof node.className === 'string' ? node.className : '';
-      const role = node.getAttribute && node.getAttribute('role');
-      const isOptionWrapper = /-option(-|$)/i.test(cls) || /\boption\b/i.test(cls);
-      if (!isOptionWrapper && (tag === 'FIELDSET' || role === 'radiogroup' || /radio-?group/i.test(cls))) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return null;
-  }
-
   /**
    * Like getFieldLabel, but for an entire radio GROUP rather than one
    * element — resolves the group's own question label (e.g. "What is
    * your gender identity?"), not any single option's own label (e.g.
-   * "Man"). Some ATSs (seen on Ashby) give each radio option its own
-   * <label for="optionId"> for the option's visible text, inside a
-   * <fieldset> whose own <label>/<legend> carries the real question;
-   * getFieldLabel's `label[for]` strategy, called on any one radio,
-   * always finds that radio's own option label first — mislabeling the
-   * AI-facing question_text (the AI then has no idea what it's actually
-   * being asked) and, for exclusive-choice radios, risking a confused AI
-   * answer silently un-selecting an option Pass 1 (direct Q&A fill)
-   * already correctly chose, since checking a different radio in the
-   * same name-group natively unchecks the first.
+   * "Man"). See lib/radioGroupLabel.js for the full rationale (shared with
+   * directFill.js, which needs the exact same resolution for its own,
+   * separate Q&A-matching pass).
    * @param {HTMLInputElement[]} radios all radios in one group (same name)
    * @returns {string}
    */
   function getRadioGroupLabel(radios) {
-    const container = findRadioGroupContainer(radios);
-    if (container) {
-      const radioIds = new Set(radios.map(r => r.id).filter(Boolean));
-      for (const cand of container.querySelectorAll('label, legend')) {
-        const forId = cand.getAttribute('for');
-        if (forId && radioIds.has(forId)) continue; // an option's own label, not the question
-        if (radios.some(r => cand.contains(r))) continue; // wraps a radio directly — also an option label
-        const text = cand.textContent.trim();
-        if (text) return text;
-      }
-    }
-    // No fieldset/legend structure found — fall back to the generic
-    // single-element resolver (covers radio groups with only a group-level
-    // aria-label/wrapper and no per-option labels to get confused by).
+    const shared = globalThis.JMRadioGroupLabel;
+    if (shared) return shared.getRadioGroupLabel(radios, getFieldLabel);
+    // Defensive only — lib/radioGroupLabel.js is always loaded ahead of
+    // content.js per manifest.json; this never runs in practice.
     return getFieldLabel(radios[0]);
   }
 
