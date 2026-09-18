@@ -2842,6 +2842,30 @@
     }
   }
 
+  /**
+   * Polls until the current page appears to have SOME form fields, or
+   * maxWaitMs elapses — whichever comes first. Used by Auto-Bid's
+   * automated flow after clicking an "Apply Now" link (see
+   * autoClickApplyThenAutofillIfNeeded) to give the resulting page a
+   * moment to load before running the real AutoFill pipeline, the same way
+   * waitForJobDescriptionReady does for JD text on a freshly-opened job
+   * tab. Uses a lightweight generic selector rather than the full
+   * detectFormFields() scan (which has side effects — resets
+   * _resumeFileFields — better reserved for the one real scan AutoFill
+   * itself performs) since this only needs to know WHEN to stop waiting,
+   * not what the fields actually are.
+   * @param {number} [maxWaitMs=10000]
+   * @param {number} [intervalMs=400]
+   * @returns {Promise<void>}
+   */
+  async function waitForFormFieldsReady(maxWaitMs = 10000, intervalMs = 400) {
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      if (document.querySelector('form, input, select, textarea')) return;
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+  }
+
   /** @returns {string} The job title extracted from the page, or ''. */
   function extractJobTitle() {
     const selectors = [
@@ -3913,6 +3937,31 @@
   //   1. Detect — detectFormFields() scans the page and builds _fieldMap.
   //   2. AI     — GENERATE_AUTOFILL sends questions to background, gets answers.
   //   3. Fill   — fillFormFromAnswers() immediately writes answers into the form.
+
+  /**
+   * Finds a page's "Apply Now"-style call-to-action link/button. Used only
+   * by Auto-Bid's automated flow (see autoClickApplyThenAutofillIfNeeded)
+   * when the current page has a strong match but no application form yet —
+   * e.g. CATS (catsone.com) job postings, whose actual form lives on a
+   * SEPARATE page reached only by clicking "Apply Now" (a plain <a href>
+   * navigation, not a same-page reveal). Never invoked for a manual
+   * Analyze/AutoFill click — clicking anything on the user's behalf is an
+   * automated-flow-only decision.
+   *
+   * Matches short, exact "apply"-shaped link/button text (e.g. "Apply",
+   * "Apply Now", "Apply for this job") rather than a loose substring test,
+   * to avoid misfiring on unrelated page text that merely mentions "apply"
+   * (e.g. "Terms apply", a coupon-code "Apply" button).
+   * @returns {HTMLElement|null}
+   */
+  function findApplyButton() {
+    const applyRe = /^\s*apply(\s+now|\s+for\s+this\s+(job|position|role))?\s*$/i;
+    for (const el of document.querySelectorAll('a, button')) {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text && text.length <= 40 && applyRe.test(text)) return el;
+    }
+    return null;
+  }
 
   /**
    * Initiates the autofill pipeline: detects fields, asks AI for answers,
@@ -6027,12 +6076,78 @@
   }
 
   /**
+   * If the current page has a strong match but no application form yet —
+   * e.g. CATS (catsone.com) job postings, whose real form lives on a
+   * SEPARATE page reached only by clicking "Apply Now" — clicks that link
+   * and arranges for the resulting page's own AutoFill to run
+   * automatically, then returns. Otherwise just runs autofillForm()
+   * directly on the current page.
+   *
+   * "Apply Now" is a genuine <a href> navigation on the ATS platforms this
+   * targets (confirmed on CATS), not a same-page JS reveal — so clicking
+   * it destroys this tab's current content-script instance once navigation
+   * begins. There is no way to "wait, then keep going" within this same
+   * function call; instead, a flag is stashed in the background service
+   * worker's chrome.storage.session, keyed by this tab's id (the same
+   * pattern CACHE_TAB_JD/GET_CACHED_TAB_JD already use for a JD cache that
+   * needs to survive a same-tab navigation — see background.js). The FRESH
+   * content-script instance that loads on the new page checks for that
+   * flag on init (see checkPendingAutoBidAutofill, called only from the
+   * isRealTopFrame() init branch) and runs AutoFill itself once the new
+   * page's form has had a moment to appear.
+   *
+   * Never submits the resulting form — this only ever fills it in, exactly
+   * like a normal AutoFill run; someone still has to review and click
+   * Submit themselves.
+   * @async
+   */
+  async function autoClickApplyThenAutofillIfNeeded() {
+    // Defer to autofillForm()'s own detection (top frame, then its
+    // existing iframe-broadcast fallback) whenever there's ANY chance a
+    // form exists — either directly, or embedded in an iframe it already
+    // knows how to reach. Only look for an Apply button to click through
+    // when we're confident there's truly nothing to fill on this page at
+    // all: no detected fields AND no iframes worth checking.
+    const hasTopFrameFields = detectFormFields().length > 0;
+    const hasIframes = document.querySelectorAll('iframe').length > 0;
+    console.log('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded: hasTopFrameFields=%s hasIframes=%s', hasTopFrameFields, hasIframes);
+    if (hasTopFrameFields || hasIframes) {
+      await autofillForm();
+      return;
+    }
+    const applyBtn = findApplyButton();
+    console.log('[JobMatch AI][Auto-Bid] findApplyButton() ->', applyBtn ? `<${applyBtn.tagName.toLowerCase()}> "${(applyBtn.innerText || applyBtn.textContent || '').trim()}" href=${applyBtn.getAttribute('href')}` : 'null');
+    if (!applyBtn) {
+      await autofillForm(); // no form and no Apply button — let it report "No form fields found" as usual
+      return;
+    }
+    // target="_blank" would open a NEW tab whose id we have no way to
+    // connect back to this one — the pending-autofill flag below is keyed
+    // by tab id, so it would never be picked up. Leave this case as
+    // analysis-only rather than guess at rewriting the link's target.
+    if ((applyBtn.getAttribute('target') || '').toLowerCase() === '_blank') {
+      console.log('[JobMatch AI][Auto-Bid] Apply link targets _blank — skipping automatic click.');
+      return;
+    }
+    try {
+      const setResult = await sendMessage({ type: 'SET_PENDING_AUTOFILL' });
+      console.log('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL ->', setResult);
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL failed:', e && e.message);
+    }
+    console.log('[JobMatch AI][Auto-Bid] clicking Apply button now.');
+    applyBtn.click();
+  }
+
+  /**
    * Auto-Bid's fully-automated analyze step: waits for the JD to render,
    * runs the normal Analyze Job flow, and — only if that produced a strong
    * match — also runs AutoFill automatically, exactly as if the user had
-   * clicked the AutoFill button themselves. This never submits anything;
-   * AutoFill only fills the form's fields, leaving the actual application
-   * submission for the user to review and send.
+   * clicked the AutoFill button themselves (clicking through an "Apply
+   * Now" link first if needed — see autoClickApplyThenAutofillIfNeeded).
+   * This never submits anything; AutoFill only fills the form's fields,
+   * leaving the actual application submission for the user to review and
+   * send.
    *
    * The score threshold reuses MIN_SCORE_TO_APPLY (75) — the same bar that
    * already gates the "Mark as Applied" button — so "good enough to
@@ -6040,28 +6155,47 @@
    * consistent number instead of two separate opinions about what counts
    * as a strong match.
    *
-   * "Does this page have a form to submit" is decided implicitly by
-   * autofillForm() itself, not by any separate check here: it already
-   * detects form fields (top frame, then embedded iframes) before doing
-   * anything else, and cleanly no-ops with a "No form fields found" status
-   * if there's nothing to fill — e.g. a JD-only overview page reached
-   * before ever clicking through to an actual application form. Reusing
-   * that existing, already-exercised detection avoids a second, possibly
-   * inconsistent definition of "has a form".
-   *
    * Only reached via TRIGGER_ANALYZE, which today is exclusively sent by
    * background.js's Auto-Bid feature — a manual "Analyze Job" click in the
-   * panel always calls analyzeJob() directly and never autofills on its
-   * own; that stays an explicit, separate action the user takes themselves
-   * after reviewing the score.
+   * panel always calls analyzeJob() directly and never autofills (or
+   * clicks anything) on its own; that stays an explicit, separate action
+   * the user takes themselves after reviewing the score.
    * @async
    */
   async function autoAnalyzeAndMaybeAutofill() {
     await waitForJobDescriptionReady();
     await analyzeJob();
-    if (currentAnalysis && typeof currentAnalysis.matchScore === 'number' && currentAnalysis.matchScore > MIN_SCORE_TO_APPLY) {
-      try { await autofillForm(); } catch (_) { /* best-effort — a failed autofill still leaves the analysis visible for manual review */ }
+    const score = currentAnalysis && typeof currentAnalysis.matchScore === 'number' ? currentAnalysis.matchScore : null;
+    console.log('[JobMatch AI][Auto-Bid] autoAnalyzeAndMaybeAutofill: matchScore=%s (threshold=%s) url=%s', score, MIN_SCORE_TO_APPLY, window.location.href);
+    if (score !== null && score > MIN_SCORE_TO_APPLY) {
+      try { await autoClickApplyThenAutofillIfNeeded(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded threw:', e && e.message); }
     }
+  }
+
+  /**
+   * Checked once, on every fresh top-frame page load — see the
+   * isRealTopFrame() init branch below. Picks up the flag
+   * autoClickApplyThenAutofillIfNeeded left in the background service
+   * worker before clicking an "Apply Now" link, and — only if it was
+   * actually set — opens the panel, waits for this new page's form to
+   * appear, and runs AutoFill automatically. A no-op (one cheap message
+   * round-trip) on every other page load, which is the overwhelming
+   * majority of them.
+   * @async
+   */
+  async function checkPendingAutoBidAutofill() {
+    let pending = false;
+    try {
+      pending = await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] GET_AND_CLEAR_PENDING_AUTOFILL failed:', e && e.message);
+    }
+    console.log('[JobMatch AI][Auto-Bid] checkPendingAutoBidAutofill: pending=%s url=%s', pending, window.location.href);
+    if (!pending) return;
+    if (!panelOpen) togglePanel();
+    await waitForFormFieldsReady();
+    console.log('[JobMatch AI][Auto-Bid] form fields ready (or timed out) — running autofillForm() now.');
+    try { await autofillForm(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autofillForm() threw:', e && e.message); }
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -6138,6 +6272,11 @@
       // appear on a page in the wild.
       console.error('[JobMatch AI] init error:', e && (e.stack || e.message || e));
     }
+    // Auto-Bid's "click Apply Now, then AutoFill the resulting page"
+    // continuation (see autoClickApplyThenAutofillIfNeeded /
+    // checkPendingAutoBidAutofill) — a cheap no-op on every page load
+    // except the one immediately following such a click.
+    checkPendingAutoBidAutofill();
     // Note: a previous version of this code had a MutationObserver +
     // setInterval that aggressively re-appended our hosts whenever a page
     // detached them. On heavily-React-driven sites (Greenhouse job boards
@@ -6281,43 +6420,65 @@
 
   function handleSpaUrlChanged() {
     const currentUrl = normalizeUrl(window.location.href);
-    if (currentUrl === _lastUrl) return;
-    _lastUrl = currentUrl;
-    // Bump the analyze generation so any in-flight analyzeJob() against
-    // the previous URL becomes stale and bails before touching the UI (I3).
-    _analyzeGen++;
-    currentAnalysis = null;
-    _fieldMap = {};
-    clearAutofillBadges();
-    // A new posting — any manual resume pick was for the PREVIOUS job, so
-    // let auto-select freshly re-evaluate which resume fits this one best.
-    _manualResumeSelection = false;
-    if (shadowRoot && panelOpen) {
-      const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
-      if (analyzeBtn && analyzeBtn.textContent === 'Re-Analyze') analyzeBtn.textContent = 'Analyze Job';
-      const autofillBtn = shadowRoot.getElementById('jmAutofill');
-      if (autofillBtn) { autofillBtn.innerHTML = 'AutoFill Application'; autofillBtn.onclick = null; }
-      [
-        'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
-        'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice',
-        'jmAutofillWarning', 'jmCoverLetterSection', 'jmBulletSection',
-        'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn'
-      ].forEach(id => {
-        const el = shadowRoot.getElementById(id);
-        if (el) el.style.display = 'none';
-      });
-      loadJobNotes();
-      loadResumeState();
-      previewJobMeta();
-      scanResumeMatch(); // re-scan the new job's JD for resume match
-      // Re-check Applied/Saved status for the NEW job immediately, rather
-      // than leaving the buttons' stale text/class from the previous job
-      // sitting there (merely hidden) until the panel is next toggled.
-      checkIfApplied();
-      checkIfSaved();
-      setStatus('New job detected — click Analyze Job.', 'info');
-      setTimeout(clearStatus, 3000);
+    const isDifferentJob = currentUrl !== _lastUrl;
+    console.log('[JobMatch AI][Auto-Bid] handleSpaUrlChanged: raw=%s normalized=%s isDifferentJob=%s', window.location.href, currentUrl, isDifferentJob);
+    if (isDifferentJob) {
+      _lastUrl = currentUrl;
+      // Bump the analyze generation so any in-flight analyzeJob() against
+      // the previous URL becomes stale and bails before touching the UI (I3).
+      _analyzeGen++;
+      currentAnalysis = null;
+      _fieldMap = {};
+      clearAutofillBadges();
+      // A new posting — any manual resume pick was for the PREVIOUS job, so
+      // let auto-select freshly re-evaluate which resume fits this one best.
+      _manualResumeSelection = false;
+      if (shadowRoot && panelOpen) {
+        const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
+        if (analyzeBtn && analyzeBtn.textContent === 'Re-Analyze') analyzeBtn.textContent = 'Analyze Job';
+        const autofillBtn = shadowRoot.getElementById('jmAutofill');
+        if (autofillBtn) { autofillBtn.innerHTML = 'AutoFill Application'; autofillBtn.onclick = null; }
+        [
+          'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
+          'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice',
+          'jmAutofillWarning', 'jmCoverLetterSection', 'jmBulletSection',
+          'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn'
+        ].forEach(id => {
+          const el = shadowRoot.getElementById(id);
+          if (el) el.style.display = 'none';
+        });
+        loadJobNotes();
+        loadResumeState();
+        previewJobMeta();
+        scanResumeMatch(); // re-scan the new job's JD for resume match
+        // Re-check Applied/Saved status for the NEW job immediately, rather
+        // than leaving the buttons' stale text/class from the previous job
+        // sitting there (merely hidden) until the panel is next toggled.
+        checkIfApplied();
+        checkIfSaved();
+        setStatus('New job detected — click Analyze Job.', 'info');
+        setTimeout(clearStatus, 3000);
+      }
     }
+    // Auto-Bid's "click Apply Now, then AutoFill" continuation (see
+    // autoClickApplyThenAutofillIfNeeded) must run on EVERY SPA navigation
+    // this handler is invoked for — deliberately OUTSIDE the
+    // `isDifferentJob` block above. Clicking through to an ATS's own
+    // /apply (or /application) step of the SAME posting is exactly the
+    // case normalizeUrl() now collapses to the SAME cache key (see
+    // lib/urlKey.js's Ashby/CATS suffix-stripping), so isDifferentJob is
+    // FALSE for it — but that collapsed-URL step is precisely where the
+    // pending-autofill flag needs to be picked up. Some ATS career sites
+    // (confirmed on a CATS/catsone.com site, built with React Router —
+    // data-discover attributes and __reactRouter references in its own
+    // markup) intercept the Apply link's click and do a CLIENT-SIDE route
+    // change instead of a real page navigation, so this content-script
+    // instance survives it and the one-time init-time check never fires
+    // again for it. checkPendingAutoBidAutofill() is a cheap no-op (one
+    // message round-trip) whenever the pending flag isn't actually set,
+    // which is every SPA navigation except the one right after such a
+    // click.
+    checkPendingAutoBidAutofill();
   }
 
   checkIfApplied();

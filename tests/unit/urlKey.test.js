@@ -79,14 +79,30 @@ describe('normalizeUrlForCache — preserves job identifiers', () => {
     expect(application).toBe(overview);
   });
 
-  it('does not touch /application suffix on non-Ashby hosts', () => {
-    const k = normalizeUrlForCache('https://acme.com/jobs/123/application');
-    expect(k).toBe('https://acme.com/jobs/123/application');
+  it('collapses a CATS (catsone.com) job page and its separate /apply page to one key', () => {
+    const overview = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer?jr_id=6a4c4722971cd25b06f9a307');
+    const apply = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer/apply');
+    expect(apply).toBe(overview);
+  });
+
+  it('strips /application and /apply suffixes regardless of hostname (not Ashby/CATS-specific)', () => {
+    const withSuffix = normalizeUrlForCache('https://acme.com/jobs/123/application');
+    const withoutSuffix = normalizeUrlForCache('https://acme.com/jobs/123');
+    expect(withSuffix).toBe(withoutSuffix);
+
+    const withApply = normalizeUrlForCache('https://acme.com/jobs/123/apply');
+    expect(withApply).toBe(withoutSuffix);
   });
 
   it('keeps two different Ashby job ids distinct', () => {
     const a = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/aaa/application');
     const b = normalizeUrlForCache('https://jobs.ashbyhq.com/timely/bbb/application');
+    expect(a).not.toBe(b);
+  });
+
+  it('keeps two different CATS job ids distinct', () => {
+    const a = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/111-aaa/apply');
+    const b = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/222-bbb/apply');
     expect(a).not.toBe(b);
   });
 });

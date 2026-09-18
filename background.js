@@ -1612,14 +1612,47 @@ const handlers = {
     const result = await chrome.storage.session.get(key);
     return result[key] || null;
   },
+
+  // ── Auto-Bid: "click Apply Now, then AutoFill" continuation ────────────
+  // Some ATS platforms (confirmed on CATS, catsone.com) put the real
+  // application form on a SEPARATE page reached only by clicking an
+  // "Apply Now" link — a genuine navigation, not a same-page reveal — so
+  // content.js's own execution context is destroyed the moment it clicks
+  // that link. Same problem CACHE_TAB_JD above solves for JD text: stash a
+  // flag here, keyed by tab id, that survives the navigation; the FRESH
+  // content-script instance that loads on the new page (still the same
+  // tab) checks for it on init and runs AutoFill itself if it's set. Only
+  // ever set by the Auto-Bid automated flow (autoAnalyzeAndMaybeAutofill /
+  // autoClickApplyThenAutofillIfNeeded in content.js) — never by a manual
+  // Analyze/AutoFill click.
+  'SET_PENDING_AUTOFILL': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    console.log('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL for tabId=%s', tabId);
+    if (!tabId) return { set: false };
+    await chrome.storage.session.set({ [`pendingAutofill_${tabId}`]: true });
+    return { set: true };
+  },
+
+  'GET_AND_CLEAR_PENDING_AUTOFILL': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (!tabId) return false;
+    const key = `pendingAutofill_${tabId}`;
+    const result = await chrome.storage.session.get(key);
+    console.log('[JobMatch AI][Auto-Bid] GET_AND_CLEAR_PENDING_AUTOFILL for tabId=%s -> %s', tabId, !!result[key]);
+    if (result[key]) {
+      await chrome.storage.session.remove(key);
+      return true;
+    }
+    return false;
+  },
 };
 
-// Drop a tab's cached job description as soon as the tab itself closes —
-// "unless we close the tab, the job description isn't lost" is the whole
-// point of this cache, so it shouldn't quietly persist (even in
-// memory-only session storage) past that point.
+// Drop a tab's cached job description (and any pending-autofill flag) as
+// soon as the tab itself closes — neither should quietly outlive the tab
+// they were captured in, even in memory-only session storage.
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.session.remove(`tabJD_${tabId}`).catch(() => {});
+  chrome.storage.session.remove(`pendingAutofill_${tabId}`).catch(() => {});
 });
 
 /**
@@ -1804,6 +1837,7 @@ async function migrateProfileSlotsToResumes() {
 // the event to the specific frame whose URL changed; the content script
 // there compares against its own window.location.href and resets if needed.
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  console.log('[JobMatch AI][Auto-Bid] onHistoryStateUpdated: tabId=%s frameId=%s url=%s', details.tabId, details.frameId, details.url);
   // Best-effort delivery — the content script may not be loaded in this
   // frame (e.g. cross-origin iframes our manifest doesn't match).
   chrome.tabs.sendMessage(

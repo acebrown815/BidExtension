@@ -24,6 +24,10 @@ const cases = [
   'https://acme.com/jobs/123#anchor',
   'https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510',
   'https://jobs.ashbyhq.com/timely/98a7a1f6-13e7-499c-be53-728d0e86e510/application',
+  'https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer?jr_id=6a4c4722971cd25b06f9a307',
+  'https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer/apply',
+  'https://acme.com/jobs/123/apply',
+  'https://acme.com/apply',
   'not a url',
   '',
 ];
