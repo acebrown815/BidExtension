@@ -758,7 +758,7 @@ async function handleTestSheetsSync() {
  * @async
  * @throws {Error} Same conditions as postToSheetsWebApp (sync disabled/
  *   misconfigured, unreachable, secret mismatch, etc.).
- * @returns {Promise<Array<{row: number, title: string, link: string}>>}
+ * @returns {Promise<Array<{row: number, link: string}>>}
  */
 async function fetchPendingJobsFromSheet() {
   const data = await postToSheetsWebApp({ listPending: true });
@@ -855,7 +855,7 @@ const AUTO_BID_OPEN_STAGGER_MS = 2000;
  * this tab's actual active/background state — so it renders the same way
  * a real foreground tab would, without this needing to fight for the
  * user's window focus at all.
- * @param {{row: number, title: string, link: string}} job
+ * @param {{row: number, link: string}} job
  * @throws {Error} If the row has no link, the page never finishes loading,
  *   or the content script never becomes reachable.
  * @returns {Promise<number>} The opened tab's id.

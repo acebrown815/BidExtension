@@ -85,14 +85,16 @@ target tab (the one you named in **Sheet Tab Name**, or "Applications" if
 left blank), in this exact column order: Date, Title, Link (a
 clickable link to the job posting), Company, Location, Salary, ResumeNo
 (whichever saved resume was active for that job's analysis), Score (the AI
-match score). If a row already has this same Title and Link — e.g. one you
-seeded ahead of time with just a Link for the Auto-Bid pipeline to pick up
-— that row's Date/Company/Location/Salary/ResumeNo/Score are updated in
-place instead of a new row being appended alongside it. If you customize
-the sheet layout, `appendJobRow`/`updateJobRow` in `Code.gs` must list
-their values in the SAME order as your header row — both fill columns
-positionally with no awareness of header text, so a mismatched order
-silently shifts every value into the wrong column.
+match score). If a row already has this same Link — e.g. one you seeded
+ahead of time with just a Link for the Auto-Bid pipeline to pick up — that
+row's Date/Title/Company/Location/Salary/ResumeNo/Score are updated in
+place instead of a new row being appended alongside it. Matching is by
+Link alone, deliberately not Title too, since a seeded row's Title is
+still blank at that point — it's one of the fields this very sync fills
+in. If you customize the sheet layout, `appendJobRow`/`updateJobRow` in
+`Code.gs` must list their values in the SAME order as your header row —
+both fill columns positionally with no awareness of header text, so a
+mismatched order silently shifts every value into the wrong column.
 
 Note: the side panel's button only switches to the locked "Applied" state
 once the row is *confirmed* written to your sheet. If the sync fails (or
@@ -118,17 +120,20 @@ the same local record and retries the sync rather than adding a duplicate.
 ## Auto-Bid: analyzing pending jobs (Beta)
 
 Once the sheet is set up, you can seed it with jobs to review: add rows
-with just a **Link** (and optionally a Title), leaving Company, Location,
-Salary, and ResumeNo blank. In the extension's **Auto-Bid** tab, click
-**Analyze Pending Jobs** — the extension opens up to 10 such rows' Links in
-new background tabs (one after another, not all at once, to avoid bursting
-the network or the AI provider's rate limit) and runs Analyze Job on each
-automatically. Tabs are opened in the background rather than stealing your
-window focus — `lib/fakeVisible.js` makes each page believe it's visible
-regardless, since some ATS platforms (Dover, confirmed) otherwise defer
-loading the job description until their tab is actually visible, which
-would make resume matching unreliable for a background-tab automation like
-this one.
+with just a **Link**, leaving Title, Company, Location, Salary, and
+ResumeNo blank — the extension pulls only the Link column for this queue
+(see `listPendingJobs` in `Code.gs`) and fills in Title along with
+everything else once you click Mark as Applied, so anything you type into
+those other columns ahead of time is ignored rather than read back. In the
+extension's **Auto-Bid** tab, click **Analyze Pending Jobs** — the
+extension opens up to 10 such rows' Links in new background tabs (one
+after another, not all at once, to avoid bursting the network or the AI
+provider's rate limit) and runs Analyze Job on each automatically. Tabs
+are opened in the background rather than stealing your window focus —
+`lib/fakeVisible.js` makes each page believe it's visible regardless,
+since some ATS platforms (Dover, confirmed) otherwise defer loading the
+job description until their tab is actually visible, which would make
+resume matching unreliable for a background-tab automation like this one.
 
 If a job's analysis scores above 75% — the same threshold that already
 gates the "Mark as Applied" button — the extension also autofills that
@@ -165,14 +170,16 @@ listPending."
 
 - **A pre-seeded pending row gets a brand-new row appended next to it
   instead of being filled in** — `findExistingRow` in `Code.gs` matches on
-  Title AND Link being *exactly* equal (case/whitespace-insensitive) to
-  what's already in the sheet. If you re-deployed an older `Code.gs` that
-  predates `upsertJobRow`, re-deploy again (step 6) to pick up the match/
-  update logic. If you're already on a current deploy, the usual cause is
-  the Link not actually matching — e.g. the ATS redirected/canonicalized
-  the URL after the page loaded, so the analyzed job's link differs from
-  what you originally pasted into the sheet. The extension records the
-  sheet's own Link value for anything opened via "Analyze Next Pending
-  Job" specifically so this can't happen; a mismatch instead usually means
-  the row was opened and analyzed by hand (pasting the link into a new
-  tab yourself) rather than through the pending-jobs queue.
+  Link alone being *exactly* equal (case/whitespace-insensitive) to what's
+  already in the sheet — Title is never part of the match, since a
+  pending row's Title is still blank at match time. If you re-deployed an
+  older `Code.gs` that predates `upsertJobRow`, re-deploy again (step 6) to
+  pick up the match/update logic. If you're already on a current deploy,
+  the usual cause is the Link not actually matching — e.g. the ATS
+  redirected/canonicalized the URL after the page loaded, so the analyzed
+  job's link differs from what you originally pasted into the sheet. The
+  extension records the sheet's own Link value for anything opened via
+  "Analyze Next Pending Job" specifically so this can't happen; a mismatch
+  instead usually means the row was opened and analyzed by hand (pasting
+  the link into a new tab yourself) rather than through the pending-jobs
+  queue.

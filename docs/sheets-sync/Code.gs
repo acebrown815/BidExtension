@@ -3,9 +3,9 @@
  *
  * Deploy this bound to the Google Sheet you want applied jobs pushed to.
  * The extension POSTs one job at a time; this script validates a shared
- * secret, then updates the matching row (by Title + Link) if one already
- * exists or appends a new one otherwise. See SETUP.md in this same folder
- * for the full one-time deploy walkthrough.
+ * secret, then updates the matching row (by Link alone — see
+ * findExistingRow) if one already exists or appends a new one otherwise.
+ * See SETUP.md in this same folder for the full one-time deploy walkthrough.
  *
  * Why a webhook instead of a Google API key: the Sheets API can't write to
  * a private spreadsheet with a bare API key — only OAuth or a script
@@ -60,12 +60,15 @@ function doPost(e) {
 
     if (data.listPending) {
       // Auto-bid pipeline, step 1: the extension pulls rows the user has
-      // manually seeded with just a Link (and optionally a Title) — every
-      // other tracked column still blank — as a queue of postings it should
-      // open and analyze next. A row stops being "pending" the moment any
-      // of those columns gets filled in (by a real "Mark as Applied" sync,
-      // or by the user editing the sheet directly), so completed jobs never
-      // get re-picked.
+      // manually seeded with just a Link — every other tracked column
+      // (including Title) still blank — as a queue of postings it should
+      // open and analyze next. Title deliberately isn't pulled here: it
+      // comes from the extension's own analysis of the page, and only gets
+      // written back to the sheet once Mark Applied fires (see
+      // updateJobRow), same as Date/Company/Location/Salary/ResumeNo/Score.
+      // A row stops being "pending" the moment any of those columns gets
+      // filled in (by a real "Mark as Applied" sync, or by the user editing
+      // the sheet directly), so completed jobs never get re-picked.
       return jsonResponse({ success: true, jobs: listPendingJobs(data.sheetName) });
     }
 
@@ -117,17 +120,20 @@ function hyperlinkFormula(url) {
 }
 
 /**
- * Writes one job to the sheet: if a row already has this exact Title AND
- * Link (case-insensitive, trimmed), its Date/Company/Location/Salary/
+ * Writes one job to the sheet: if a row already has this exact Link
+ * (case-insensitive, trimmed), its Date/Title/Company/Location/Salary/
  * ResumeNo/Score are updated in place; otherwise a brand-new row is
  * appended. This is what makes the Auto-Bid pipeline work end-to-end — the
  * user seeds a row with just a Link (see listPendingJobs), the extension
  * opens it, and Mark Applied's sync fills in the rest of THAT SAME row
- * instead of appending a second one alongside it.
+ * instead of appending a second one alongside it. Matching is Link-only —
+ * deliberately NOT Title too — since the pending row's Title is blank
+ * until this exact call fills it in, so requiring it to already match
+ * would never find the row it's supposed to update.
  */
 function upsertJobRow(job, sheetName) {
   const sheet = getOrCreateSheet(sheetName);
-  const rowIndex = findExistingRow(sheet, job.title, job.url);
+  const rowIndex = findExistingRow(sheet, job.url);
   if (rowIndex) {
     updateJobRow(sheet, rowIndex, job);
   } else {
@@ -135,32 +141,30 @@ function upsertJobRow(job, sheetName) {
   }
 }
 
-/** Case/whitespace-insensitive comparison key for Title/Link matching. */
+/** Case/whitespace-insensitive comparison key for Link matching. */
 function normalizeForMatch(value) {
   return String(value || '').trim().toLowerCase();
 }
 
 /**
- * Finds the 1-indexed row (2+, header excluded) whose Title and Link both
- * match the given job, or null if there's no such row (or the job is
- * missing either field to match on). A HYPERLINK() formula cell (see
- * hyperlinkFormula) reads back via getValues() as its visible text, which
- * this script always sets to the plain URL — so it compares equal to a
- * job.url passed in as plain text, same as a manually-pasted link would.
+ * Finds the 1-indexed row (2+, header excluded) whose Link matches the
+ * given job, or null if there's no such row (or the job has no url to
+ * match on). A HYPERLINK() formula cell (see hyperlinkFormula) reads back
+ * via getValues() as its visible text, which this script always sets to
+ * the plain URL — so it compares equal to a job.url passed in as plain
+ * text, same as a manually-pasted link would.
  */
-function findExistingRow(sheet, title, url) {
-  const wantTitle = normalizeForMatch(title);
+function findExistingRow(sheet, url) {
   const wantLink = normalizeForMatch(url);
-  if (!wantTitle || !wantLink) return null;
+  if (!wantLink) return null;
 
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return null;
 
   const values = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length).getValues();
   for (let i = 0; i < values.length; i++) {
-    const rowTitle = values[i][COLUMNS.indexOf('Title')];
     const rowLink = values[i][COLUMNS.indexOf('Link')];
-    if (normalizeForMatch(rowTitle) === wantTitle && normalizeForMatch(rowLink) === wantLink) {
+    if (normalizeForMatch(rowLink) === wantLink) {
       return i + 2;
     }
   }
@@ -188,12 +192,15 @@ function appendJobRow(sheet, job) {
 }
 
 /**
- * Updates an already-existing row's Date/Company/Location/Salary/ResumeNo/
- * Score in place. Title and Link are left untouched — they're what
- * identified this row as the match in the first place, via findExistingRow.
+ * Updates an already-existing row's Date/Title/Company/Location/Salary/
+ * ResumeNo/Score in place. Link is left untouched — it's what identified
+ * this row as the match in the first place, via findExistingRow.
  */
 function updateJobRow(sheet, rowIndex, job) {
-  sheet.getRange(rowIndex, COLUMNS.indexOf('Date') + 1).setValue(job.date || '');
+  sheet.getRange(rowIndex, COLUMNS.indexOf('Date') + 1, 1, 2).setValues([[
+    job.date || '',                                         // Date
+    job.title || '',                                        // Title
+  ]]);
   sheet.getRange(rowIndex, COLUMNS.indexOf('Company') + 1, 1, 4).setValues([[
     job.company || '',                                      // Company
     job.location || '',                                     // Location
@@ -206,11 +213,16 @@ function updateJobRow(sheet, rowIndex, job) {
 /**
  * Finds rows that have a Link but nothing in Company/Location/Salary/
  * ResumeNo yet — the extension's queue of postings still waiting to be
- * opened and analyzed. Row 1 (the header) is always skipped.
+ * opened and analyzed. Row 1 (the header) is always skipped. Title is
+ * deliberately NOT returned (or required to be blank) here — the extension
+ * gets the Title from analyzing the page itself, and only writes it back
+ * to the sheet once Mark Applied fires (see updateJobRow); pulling
+ * whatever a user may or may not have typed into that column ahead of
+ * time would just be discarded anyway.
  * @param {string} [sheetName] Same fallback rule as getOrCreateSheet.
- * @returns {Array<{row: number, title: string, link: string}>} `row` is the
- *   1-indexed sheet row (for a human checking the sheet directly) — the
- *   extension itself only needs `link`.
+ * @returns {Array<{row: number, link: string}>} `row` is the 1-indexed
+ *   sheet row (for a human checking the sheet directly) — the extension
+ *   itself only needs `link`.
  */
 function listPendingJobs(sheetName) {
   const sheet = getOrCreateSheet(sheetName);
@@ -220,11 +232,11 @@ function listPendingJobs(sheetName) {
   const values = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length).getValues();
   const pending = [];
   values.forEach((row, i) => {
-    const [, title, link, company, location, salary, resumeNo] = row;
+    const [, , link, company, location, salary, resumeNo] = row;
     const hasLink = link !== '' && link !== null;
     const isUntouched = !company && !location && !salary && !resumeNo;
     if (hasLink && isUntouched) {
-      pending.push({ row: i + 2, title: String(title || ''), link: String(link) });
+      pending.push({ row: i + 2, link: String(link) });
     }
   });
   return pending;
