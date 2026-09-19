@@ -80,18 +80,22 @@ Sync**:
 - Click **Test Sync** — it should say "Sync successful!" without adding any
   row to your sheet (the test call is a connectivity/secret check only).
 
-From then on, every "Mark as Applied" click also appends a row to your
+From then on, every "Mark as Applied" click also writes a row to your
 target tab (the one you named in **Sheet Tab Name**, or "Applications" if
 left blank), in this exact column order: Date, Title, Link (a
 clickable link to the job posting), Company, Location, Salary, ResumeNo
 (whichever saved resume was active for that job's analysis), Score (the AI
-match score). If you customize the sheet layout, `appendJobRow` in
-`Code.gs` must list its values in the SAME order as your header row —
-`appendRow` fills columns positionally with no awareness of header text, so
-a mismatched order silently shifts every value into the wrong column.
+match score). If a row already has this same Title and Link — e.g. one you
+seeded ahead of time with just a Link for the Auto-Bid pipeline to pick up
+— that row's Date/Company/Location/Salary/ResumeNo/Score are updated in
+place instead of a new row being appended alongside it. If you customize
+the sheet layout, `appendJobRow`/`updateJobRow` in `Code.gs` must list
+their values in the SAME order as your header row — both fill columns
+positionally with no awareness of header text, so a mismatched order
+silently shifts every value into the wrong column.
 
 Note: the side panel's button only switches to the locked "Applied" state
-once the row is *confirmed* appended to your sheet. If the sync fails (or
+once the row is *confirmed* written to your sheet. If the sync fails (or
 Sheets Sync isn't enabled/configured yet), the button stays as "Mark as
 Applied" so you can click it again after fixing your settings — it reuses
 the same local record and retries the sync rather than adding a duplicate.
@@ -144,16 +148,31 @@ Next Pending Job" fails with "Request had neither test, job, nor
 listPending."
 
 - **A row gets added but most columns are blank, or values land under the
-  wrong header** — almost always means `Code.gs`'s `doPost`/`appendJobRow`
-  doesn't match what the extension actually sends. Two common causes: (1)
-  reading fields off the POST body directly (`data.title`) instead of off
-  the nested `job` object the extension sends (`data.job.title`) — see the
-  shape below; (2) `appendRow`'s array not being in the same left-to-right
-  order as your header row, which silently shifts every value one or more
-  columns over. The extension POSTs
+  wrong header** — almost always means `Code.gs`'s
+  `doPost`/`appendJobRow`/`updateJobRow` doesn't match what the extension
+  actually sends. Two common causes: (1) reading fields off the POST body
+  directly (`data.title`) instead of off the nested `job` object the
+  extension sends (`data.job.title`) — see the shape below; (2)
+  `appendRow`'s array not being in the same left-to-right order as your
+  header row, which silently shifts every value one or more columns over.
+  The extension POSTs
   `{ secret, job: { title, company, location, salary, url, resume, score,
   date, id } }` for a real "Mark as Applied", and `{ secret, test: true }`
   (no `job`) for the Settings page's "Test Sync" button — a script that
   doesn't check for `test` and skip appending will add a near-empty row
   (just today's date, from the `new Date()` fallback) every time someone
   clicks Test Sync.
+
+- **A pre-seeded pending row gets a brand-new row appended next to it
+  instead of being filled in** — `findExistingRow` in `Code.gs` matches on
+  Title AND Link being *exactly* equal (case/whitespace-insensitive) to
+  what's already in the sheet. If you re-deployed an older `Code.gs` that
+  predates `upsertJobRow`, re-deploy again (step 6) to pick up the match/
+  update logic. If you're already on a current deploy, the usual cause is
+  the Link not actually matching — e.g. the ATS redirected/canonicalized
+  the URL after the page loaded, so the analyzed job's link differs from
+  what you originally pasted into the sheet. The extension records the
+  sheet's own Link value for anything opened via "Analyze Next Pending
+  Job" specifically so this can't happen; a mismatch instead usually means
+  the row was opened and analyzed by hand (pasting the link into a new
+  tab yourself) rather than through the pending-jobs queue.

@@ -797,13 +797,22 @@ function waitForTabToLoad(tabId, timeoutMs = 30000) {
  * receiving end". Content.js's TRIGGER_ANALYZE handler opens the panel and
  * calls analyzeJob() itself; this only needs to get the message delivered.
  * @param {number} tabId
+ * @param {string} [originalLink] The exact Link value pulled from the
+ *   sheet's pending-jobs queue. Some ATS platforms redirect/canonicalize a
+ *   job-board URL once it loads (tracking-param stripping, a search-result
+ *   link resolving to a different canonical job-detail URL, etc.), so
+ *   window.location.href at analysis time can end up differing from the
+ *   link the user actually seeded the row with. Passing it through lets
+ *   content.js record this value as the job's link instead, so a later
+ *   Mark Applied sync's Title+Link lookup still finds the same row it came
+ *   from rather than appending a duplicate.
  * @param {number} [attempts=6]
  * @param {number} [delayMs=500]
  */
-async function triggerAnalyzeOnTab(tabId, attempts = 6, delayMs = 500) {
+async function triggerAnalyzeOnTab(tabId, originalLink, attempts = 6, delayMs = 500) {
   for (let i = 0; i < attempts; i++) {
     try {
-      await chrome.tabs.sendMessage(tabId, { type: 'TRIGGER_ANALYZE' }, { frameId: 0 });
+      await chrome.tabs.sendMessage(tabId, { type: 'TRIGGER_ANALYZE', originalLink }, { frameId: 0 });
       return;
     } catch (_) {
       if (i === attempts - 1) throw new Error('The job page never became ready for analysis.');
@@ -856,7 +865,7 @@ async function openAndAnalyzeJob(job) {
   const tab = await chrome.tabs.create({ url: job.link, active: false });
   try {
     await waitForTabToLoad(tab.id);
-    await triggerAnalyzeOnTab(tab.id);
+    await triggerAnalyzeOnTab(tab.id, job.link);
   } catch (err) {
     // A tab that never finished loading (or whose content script never
     // became reachable) will never get analyzed — leaving it open would

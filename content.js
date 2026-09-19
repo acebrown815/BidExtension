@@ -120,6 +120,15 @@
   // on a genuine job change (handleSpaUrlChanged) so a new posting still
   // gets a fresh auto-pick.
   let _manualResumeSelection = false;
+  // Set from TRIGGER_ANALYZE's originalLink (background.js's Auto-Bid
+  // pending-jobs opener) when this tab was opened from a sheet row rather
+  // than by the user browsing directly. Some ATS platforms
+  // redirect/canonicalize a job-board URL once it loads, so
+  // window.location.href at analysis time can drift from the Link the row
+  // was actually seeded with — analyzeJob() prefers this value for
+  // currentAnalysis.url so a later Mark Applied sync's Title+Link lookup
+  // still finds that same row instead of appending a duplicate.
+  let _autoBidOriginalLink = null;
   let _resumes = [];          // [{id, name, profile}, ...] — all saved resumes
   // Local (no-AI) ATS-keyword-match score per resume id, 0..1, for the
   // current JD (skills + certifications + project technologies — see
@@ -3274,12 +3283,15 @@
     // (utm_*, gh_src, token, etc.) down to just the allowlisted job-id param
     // so the same posting reached via different links/sources hits one cache
     // entry. It is NOT what gets saved as the job's link: rawPageUrl (the
-    // untouched window.location.href) is what's stored on currentAnalysis.url
-    // and flows into Save Job / Mark Applied, so the link the user can click
-    // back to still has every param the page needs to actually load
-    // (e.g. Greenhouse embeds require `token`/`for`, not just `gh_jid`).
+    // untouched window.location.href, or the sheet's own Link value when
+    // this tab was opened by Auto-Bid — see _autoBidOriginalLink) is what's
+    // stored on currentAnalysis.url and flows into Save Job / Mark Applied,
+    // so the link the user can click back to still has every param the page
+    // needs to actually load (e.g. Greenhouse embeds require `token`/`for`,
+    // not just `gh_jid`), and Mark Applied's Google Sheets sync matches back
+    // to the exact row it came from instead of appending a duplicate.
     const pageUrl = normalizeUrl(window.location.href);
-    const rawPageUrl = window.location.href;
+    const rawPageUrl = _autoBidOriginalLink || window.location.href;
     // Capture a generation token. If the user SPA-navigates while we're
     // awaiting the AI response, the SPA observer bumps _analyzeGen and we
     // detect the mismatch below — preventing a stale analysis from rendering
@@ -6844,6 +6856,7 @@
         break;
       case 'TRIGGER_ANALYZE':
         if (!panelOpen) togglePanel();
+        _autoBidOriginalLink = message.originalLink || null;
         // Fire-and-forget from this handler's point of view — sendResponse
         // below just confirms delivery, not that analysis/autofill has
         // finished (see autoAnalyzeAndMaybeAutofill's doc comment).
@@ -7073,6 +7086,11 @@
       // A new posting — any manual resume pick was for the PREVIOUS job, so
       // let auto-select freshly re-evaluate which resume fits this one best.
       _manualResumeSelection = false;
+      // Likewise, the sheet-seeded original link (if any) was for the
+      // PREVIOUS job's URL — a genuinely new posting must fall back to this
+      // page's own window.location.href rather than keep stamping the old
+      // job's link onto a different one.
+      _autoBidOriginalLink = null;
       if (shadowRoot && panelOpen) {
         const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
         if (analyzeBtn && analyzeBtn.textContent === 'Re-Analyze') analyzeBtn.textContent = 'Analyze Job';

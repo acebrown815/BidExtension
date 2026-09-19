@@ -3,8 +3,9 @@
  *
  * Deploy this bound to the Google Sheet you want applied jobs pushed to.
  * The extension POSTs one job at a time; this script validates a shared
- * secret and appends a row. See SETUP.md in this same folder for the full
- * one-time deploy walkthrough.
+ * secret, then updates the matching row (by Title + Link) if one already
+ * exists or appends a new one otherwise. See SETUP.md in this same folder
+ * for the full one-time deploy walkthrough.
  *
  * Why a webhook instead of a Google API key: the Sheets API can't write to
  * a private spreadsheet with a bare API key — only OAuth or a script
@@ -31,7 +32,7 @@ const SHEET_NAME = 'Applications';
 
 /**
  * Handles POST requests from the extension: either a connectivity/secret
- * check ({ test: true }) or an actual job row to append ({ job: {...} }).
+ * check ({ test: true }) or an actual job row to upsert ({ job: {...} }).
  *
  * Sent with Content-Type: text/plain by the extension (avoids a CORS
  * preflight Apps Script web apps don't handle), so the body is parsed from
@@ -53,7 +54,7 @@ function doPost(e) {
     }
 
     if (data.job) {
-      appendJobRow(data.job, data.sheetName);
+      upsertJobRow(data.job, data.sheetName);
       return jsonResponse({ success: true });
     }
 
@@ -116,14 +117,64 @@ function hyperlinkFormula(url) {
 }
 
 /**
- * Appends one job as a row, in the same column order as COLUMNS.
+ * Writes one job to the sheet: if a row already has this exact Title AND
+ * Link (case-insensitive, trimmed), its Date/Company/Location/Salary/
+ * ResumeNo/Score are updated in place; otherwise a brand-new row is
+ * appended. This is what makes the Auto-Bid pipeline work end-to-end — the
+ * user seeds a row with just a Link (see listPendingJobs), the extension
+ * opens it, and Mark Applied's sync fills in the rest of THAT SAME row
+ * instead of appending a second one alongside it.
+ */
+function upsertJobRow(job, sheetName) {
+  const sheet = getOrCreateSheet(sheetName);
+  const rowIndex = findExistingRow(sheet, job.title, job.url);
+  if (rowIndex) {
+    updateJobRow(sheet, rowIndex, job);
+  } else {
+    appendJobRow(sheet, job);
+  }
+}
+
+/** Case/whitespace-insensitive comparison key for Title/Link matching. */
+function normalizeForMatch(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+/**
+ * Finds the 1-indexed row (2+, header excluded) whose Title and Link both
+ * match the given job, or null if there's no such row (or the job is
+ * missing either field to match on). A HYPERLINK() formula cell (see
+ * hyperlinkFormula) reads back via getValues() as its visible text, which
+ * this script always sets to the plain URL — so it compares equal to a
+ * job.url passed in as plain text, same as a manually-pasted link would.
+ */
+function findExistingRow(sheet, title, url) {
+  const wantTitle = normalizeForMatch(title);
+  const wantLink = normalizeForMatch(url);
+  if (!wantTitle || !wantLink) return null;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+
+  const values = sheet.getRange(2, 1, lastRow - 1, COLUMNS.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const rowTitle = values[i][COLUMNS.indexOf('Title')];
+    const rowLink = values[i][COLUMNS.indexOf('Link')];
+    if (normalizeForMatch(rowTitle) === wantTitle && normalizeForMatch(rowLink) === wantLink) {
+      return i + 2;
+    }
+  }
+  return null;
+}
+
+/**
+ * Appends one job as a new row, in the same column order as COLUMNS.
  * IMPORTANT: this array's order must exactly match your sheet's header row —
  * appendRow fills columns left-to-right positionally, with no awareness of
  * header text, so a mismatched order (or a missing/extra entry) silently
  * shifts every value into the wrong column.
  */
-function appendJobRow(job, sheetName) {
-  const sheet = getOrCreateSheet(sheetName);
+function appendJobRow(sheet, job) {
   sheet.appendRow([
     job.date || '',                                         // Date
     job.title || '',                                       // Title
@@ -134,6 +185,22 @@ function appendJobRow(job, sheetName) {
     job.resume || '',                                       // ResumeNo
     typeof job.score === 'number' ? job.score : '',          // Score
   ]);
+}
+
+/**
+ * Updates an already-existing row's Date/Company/Location/Salary/ResumeNo/
+ * Score in place. Title and Link are left untouched — they're what
+ * identified this row as the match in the first place, via findExistingRow.
+ */
+function updateJobRow(sheet, rowIndex, job) {
+  sheet.getRange(rowIndex, COLUMNS.indexOf('Date') + 1).setValue(job.date || '');
+  sheet.getRange(rowIndex, COLUMNS.indexOf('Company') + 1, 1, 4).setValues([[
+    job.company || '',                                      // Company
+    job.location || '',                                     // Location
+    job.salary || '',                                       // Salary
+    job.resume || '',                                       // ResumeNo
+  ]]);
+  sheet.getRange(rowIndex, COLUMNS.indexOf('Score') + 1).setValue(typeof job.score === 'number' ? job.score : '');
 }
 
 /**
