@@ -7079,7 +7079,18 @@
       // out from under it, right before it's used to generate a cover
       // letter. _lastUrl above still updates either way, so a LATER,
       // genuinely new navigation is still tracked correctly.
-      if (_autoBidContinuationActive) return;
+      //
+      // Also skip it while _autoBidAutofillRun is true — autofillForm()'s
+      // own multi-step wizard loop (see findNextStepButton) clicks a
+      // "Next"-style control between steps, and on ATS wizards that route
+      // each step via pushState (confirmed on Dice) that click itself fires
+      // this same handler. Without this, the SPA URL change from step 1 to
+      // step 2 (and beyond) was silently mistaken for the user navigating
+      // to a completely different job posting: it wiped currentAnalysis,
+      // hid the Mark as Applied button, and reset the panel straight back
+      // to "Analyze Job" mid-wizard — even though it's still the same
+      // application, now one step further along.
+      if (_autoBidContinuationActive || _autoBidAutofillRun) return;
       currentAnalysis = null;
       _fieldMap = {};
       clearAutofillBadges();
