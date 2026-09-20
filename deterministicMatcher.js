@@ -338,9 +338,12 @@ function normalize(str) {
  *   1. Exact case-insensitive match
  *   2. Normalized exact match (punctuation/whitespace stripped)
  *   3. Synonym-based substring match (uses ANSWER_SYNONYMS)
- *   4. Containment match (answer in option, or option in answer)
- *   5. Race/ethnicity word-level match (topic-specific; handles long option labels)
- *   6. Yes/No heuristic (topic-specific; handles natural-language yes/no answers)
+ *   4. Yes/No heuristic (topic-specific; handles natural-language yes/no answers
+ *      — runs BEFORE containment specifically so a negated sentence like
+ *      "I am not a protected veteran" can't be caught by containment
+ *      matching its bare "veteran" substring against an affirmative option)
+ *   5. Containment match (answer in option, or option in answer)
+ *   6. Race/ethnicity word-level match (topic-specific; handles long option labels)
  *
  * @param {string} savedAnswer - The answer the user has saved for this question type.
  * @param {string[]} options - All available option labels for the current form field.
@@ -396,46 +399,30 @@ function matchAnswerToOption(savedAnswer, options, topic) {
     }
   }
 
-  // ── Strategy 4: Containment match ────────────────────────────────────────
-  // One string is a substring of the other. Catches cases like:
-  //   saved "heterosexual" ↔ option "Heterosexual / Straight"
-  for (const opt of options) {
-    const optLower = opt.toLowerCase().trim();
-    if (optLower.includes(answerLower) || answerLower.includes(optLower)) return opt;
-  }
-
-  // ── Strategy 5: Word-level matching for race/ethnicity ───────────────────
-  // Race/ethnicity options are often written as long, parenthetical strings
-  // such as "South Asian (inclusive of India, Pakistan, Sri Lanka, etc.)".
-  // The generic containment check above may not catch all variants, so this
-  // dedicated pass re-checks both the raw answer and its synonyms against the
-  // full option string, which can include parenthetical country lists.
-  // Note: this block intentionally duplicates some logic from strategies 3/4
-  // to ensure nothing is missed for this particularly variable topic.
-  if (['race_ethnicity', 'disability', 'veteran'].includes(topic)) {
-    for (const opt of options) {
-      const optLower = opt.toLowerCase();
-
-      // Check if the answer word itself appears anywhere in the option text
-      if (optLower.includes(answerLower)) return opt;
-
-      // Also check every synonym against the full option text
-      for (const syn of synonyms) {
-        if (optLower.includes(syn)) return opt;
-      }
-    }
-  }
-
-  // ── Strategy 6: Yes/No matching for binary compliance questions ───────────
+  // ── Strategy 4: Yes/No matching for binary compliance questions ──────────
   // Topics like veteran status, disability, work authorization, and sponsorship
-  // are answered with a simple yes/no. However the stored answer might be a
-  // natural-language phrase ("I am a veteran", "I do not require sponsorship")
-  // and the option label might start with "Yes" or contain "I am not", etc.
-  // This block normalizes both sides to yes/no semantics.
+  // are answered with a simple yes/no. However the stored answer is usually a
+  // full natural-language SENTENCE ("I am not a protected veteran", "I am not
+  // a Veteran or active member") rather than a bare "yes"/"no" — so this
+  // checks for a LEADING yes/no phrase, not that the whole saved answer IS
+  // that phrase, and both sides are matched (option label might start with
+  // "Yes" or contain "I am not", etc.).
+  //
+  // This must run BEFORE the generic containment check below (previously
+  // Strategy 4, now 5) — confirmed live: a saved answer of "I am not a
+  // protected veteran" contains the bare substring "veteran", which the
+  // containment check would otherwise match against the short AFFIRMATIVE
+  // option "Veteran" (`answerLower.includes(optLower)`), silently selecting
+  // the opposite of what the user actually said. Detecting the negation up
+  // front and matching it against a negative-shaped option ("Not a Veteran")
+  // takes priority over that riskier generic substring check.
   if (['veteran', 'disability', 'hispanic_latino', 'work_auth', 'sponsorship'].includes(topic)) {
-    // Detect whether the saved answer is semantically "yes" or "no"
-    const isYes = /^(yes|true|1|i am|i do|i have)$/i.test(answerLower);
-    const isNo  = /^(no|false|0|i am not|i do not|i don't|i have not)$/i.test(answerLower);
+    // Detect whether the saved answer OPENS with a "yes" or "no" sentiment —
+    // anchored at the start only (not the whole string) so a full sentence
+    // still counts, but a "no"/"not" appearing later in an otherwise
+    // affirmative sentence doesn't flip the reading.
+    const isNo  = /^(no|false|0)\b|^i am not\b|^i do not\b|^i don'?t\b|^i have not\b|^i haven'?t\b|^not a\b/i.test(answerLower);
+    const isYes = !isNo && (/^(yes|true|1)\b/i.test(answerLower) || /^i am\b|^i do\b|^i have\b/i.test(answerLower));
 
     if (isYes || isNo) {
       for (const opt of options) {
@@ -450,8 +437,9 @@ function matchAnswerToOption(savedAnswer, options, topic) {
           optLower.includes('i do')
         )) return opt;
 
-        // Negative option patterns: starts with "No", or uses first-person
-        // negative phrasing.
+        // Negative option patterns: starts with "No" (also catches "Not a
+        // Veteran", since "not" itself starts with "no"), or uses
+        // first-person negative phrasing.
         if (isNo && (
           optLower.startsWith('no') ||
           optLower.includes('i am not') ||
@@ -459,6 +447,36 @@ function matchAnswerToOption(savedAnswer, options, topic) {
           optLower.includes('i do not') ||
           optLower.includes("i don't")
         )) return opt;
+      }
+    }
+  }
+
+  // ── Strategy 5: Containment match ────────────────────────────────────────
+  // One string is a substring of the other. Catches cases like:
+  //   saved "heterosexual" ↔ option "Heterosexual / Straight"
+  for (const opt of options) {
+    const optLower = opt.toLowerCase().trim();
+    if (optLower.includes(answerLower) || answerLower.includes(optLower)) return opt;
+  }
+
+  // ── Strategy 6: Word-level matching for race/ethnicity ───────────────────
+  // Race/ethnicity options are often written as long, parenthetical strings
+  // such as "South Asian (inclusive of India, Pakistan, Sri Lanka, etc.)".
+  // The generic containment check above may not catch all variants, so this
+  // dedicated pass re-checks both the raw answer and its synonyms against the
+  // full option string, which can include parenthetical country lists.
+  // Note: this block intentionally duplicates some logic from strategies 3/5
+  // to ensure nothing is missed for this particularly variable topic.
+  if (['race_ethnicity', 'disability', 'veteran'].includes(topic)) {
+    for (const opt of options) {
+      const optLower = opt.toLowerCase();
+
+      // Check if the answer word itself appears anywhere in the option text
+      if (optLower.includes(answerLower)) return opt;
+
+      // Also check every synonym against the full option text
+      for (const syn of synonyms) {
+        if (optLower.includes(syn)) return opt;
       }
     }
   }

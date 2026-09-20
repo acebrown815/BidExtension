@@ -110,6 +110,38 @@ describe('deterministicFieldMatcher — the real Dice bug', () => {
   });
 });
 
+describe('deterministicFieldMatcher — Jobvite veteran status (the real bug)', () => {
+  // Confirmed live on jobs.jobvite.com: a saved answer negating veteran
+  // status contains the bare substring "veteran" ("...protected veteran"),
+  // which the old containment strategy matched against the short
+  // AFFIRMATIVE option "Veteran" before the yes/no heuristic ever got a
+  // chance to run — silently selecting the opposite of what the user said.
+  const veteranOptions = [
+    'Special Disabled Veteran', 'Vietnam Era Veteran', 'Newly Separated Veteran',
+    'Other Protected Veteran', 'Not a Veteran', 'Decline To Self Identify',
+    'Veteran', 'Disabled veteran', 'Veteran Other',
+    'Armed Forces service medal veteran', 'Recently separated veteran',
+  ];
+
+  it('matches "I am not a protected veteran" to "Not a Veteran", not the affirmative "Veteran" option', () => {
+    const qaList = [{ question: 'Veteran status', answer: 'I am not a protected veteran' }];
+    const result = deterministicFieldMatcher('Veteran Status', veteranOptions, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'Not a Veteran', topic: 'veteran' });
+  });
+
+  it('matches "I am not a Veteran or active member." to "Not a Veteran" too (second real saved answer for the same field)', () => {
+    const qaList = [{ question: 'Are you a veteran or active member of the United States Armed Forces?', answer: 'I am not a Veteran or active member.' }];
+    const result = deterministicFieldMatcher('Veteran Status', veteranOptions, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'Not a Veteran', topic: 'veteran' });
+  });
+
+  it('still matches an affirmative veteran answer to the plain "Veteran" option (no regression)', () => {
+    const qaList = [{ question: 'Veteran status', answer: 'I am a veteran' }];
+    const result = deterministicFieldMatcher('Veteran Status', veteranOptions, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'Veteran', topic: 'veteran' });
+  });
+});
+
 describe('deterministicFieldMatcher — demographic decline-to-answer fallback', () => {
   it('selects the decline option when no saved answer exists for a demographic topic', () => {
     const options = ['Man', 'Woman', 'Non-binary', 'Prefer not to say'];
