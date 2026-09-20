@@ -14,6 +14,15 @@
 // page's checkPendingAutoBidAutofill() restores both from
 // GET_AND_CLEAR_PENDING_AUTOFILL's response before running autofillForm().
 //
+// Follow-up fix (same restore, one more gap): restoring currentAnalysis
+// brought the DATA back, but nobody told the shadow-DOM panel to actually
+// show it — the fresh page's panel still sat in its default
+// "nothing analyzed yet" state, so Mark as Applied/Cover Letter/etc. stayed
+// hidden even though the job had genuinely already been analyzed one page
+// earlier. checkPendingAutoBidAutofill() now also re-runs the same
+// showJobMeta()/renderAnalysis() reveal sequence Analyze Job uses on a
+// cache hit (see renderCachedAnalysis).
+//
 // content.js is a large content script that isn't practical to load
 // wholesale under happy-dom (see contentRadioGroupLabel.test.js), so this
 // extracts just checkPendingAutoBidAutofill() by source range and evals it
@@ -59,6 +68,11 @@ function buildCheckPendingAutoBidAutofill({ pendingResponse, calls }) {
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     async function autofillForm() { calls.push({ type: 'autofillForm' }); }
+    function showJobMeta(title, company, location, salary, jobId, language) { calls.push({ type: 'showJobMeta', title, company, location, salary, jobId, language }); }
+    function renderAnalysis(data) { calls.push({ type: 'renderAnalysis', data }); }
+    function updateMarkAppliedGating(score) { calls.push({ type: 'updateMarkAppliedGating', score }); }
+    const _fakeEl = { style: {} };
+    const shadowRoot = { getElementById: () => _fakeEl };
     ${FN_SRC}
     return {
       checkPendingAutoBidAutofill,
@@ -76,7 +90,7 @@ describe('checkPendingAutoBidAutofill — restores analysis/resume across the Ap
     calls = [];
   });
 
-  it('restores currentAnalysis and _activeResumeId from the pending payload before autofilling', async () => {
+  it('restores currentAnalysis and _activeResumeId from the pending payload before autofilling, and re-renders the panel so Mark as Applied reappears', async () => {
     const analysis = { matchScore: 88, matchingSkills: ['Python', 'TypeScript'], company: 'Donato Technologies Inc', title: 'Senior SWE' };
     const { checkPendingAutoBidAutofill, getState } = buildCheckPendingAutoBidAutofill({
       pendingResponse: { pending: true, analysis, activeResumeId: 'resume-42' },
@@ -87,9 +101,22 @@ describe('checkPendingAutoBidAutofill — restores analysis/resume across the Ap
 
     const state = getState();
     expect(state.currentAnalysis).toEqual(analysis);
+    // The reveal calls actually ran against the restored analysis, not some
+    // stale/empty object — this is what was missing before: currentAnalysis
+    // came back correctly, but nothing told the panel to show it, so Mark as
+    // Applied stayed hidden on the new page even though the job was already
+    // analyzed one page earlier.
+    const renderCall = calls.find(c => c.type === 'renderAnalysis');
+    expect(renderCall.data).toEqual(analysis);
+    const gatingCall = calls.find(c => c.type === 'updateMarkAppliedGating');
+    expect(gatingCall.score).toBe(88);
     expect(state._activeResumeId).toBe('resume-42');
     expect(state.panelOpen).toBe(true);
-    expect(calls.map(c => c.type)).toEqual(['sendMessage', 'togglePanel', 'waitForDomSettled', 'waitForFormFieldsReady', 'autofillForm']);
+    expect(calls.map(c => c.type)).toEqual([
+      'sendMessage', 'togglePanel',
+      'showJobMeta', 'renderAnalysis', 'updateMarkAppliedGating',
+      'waitForDomSettled', 'waitForFormFieldsReady', 'autofillForm',
+    ]);
   });
 
   it('is a no-op when nothing is pending (the overwhelming majority of page loads)', async () => {

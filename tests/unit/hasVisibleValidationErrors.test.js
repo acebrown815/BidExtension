@@ -67,4 +67,31 @@ describe('hasVisibleValidationErrors', () => {
     document.body.innerHTML = '<input aria-invalid="false">';
     expect(hasVisibleValidationErrors()).toBe(false);
   });
+
+  // happy-dom doesn't implement real layout, so offsetParent is always
+  // `undefined` (never a real `null`/element) regardless of `display` —
+  // these two mock it directly via Object.defineProperty to model the
+  // hidden-vs-visible transition a browser would compute for real. See
+  // jobviteResumeAttachTrigger.test.js for the same pattern.
+  it('ignores an always-in-DOM but currently-hidden alert banner (the real Jobvite bug: ng-show/ng-hide only toggles a CSS class, never removes the element)', () => {
+    document.body.innerHTML = `
+      <div class="jv-apply-error ng-hide">
+        <p role="alert"><strong>The above information is required.</strong></p>
+      </div>
+    `;
+    const alertEl = document.querySelector('[role="alert"]');
+    Object.defineProperty(alertEl, 'offsetParent', { configurable: true, get: () => null });
+    expect(hasVisibleValidationErrors()).toBe(false);
+  });
+
+  it('detects that same banner once it genuinely becomes visible', () => {
+    document.body.innerHTML = `
+      <div class="jv-apply-error">
+        <p role="alert"><strong>The above information is required.</strong></p>
+      </div>
+    `;
+    const alertEl = document.querySelector('[role="alert"]');
+    Object.defineProperty(alertEl, 'offsetParent', { configurable: true, get: () => document.body });
+    expect(hasVisibleValidationErrors()).toBe(true);
+  });
 });

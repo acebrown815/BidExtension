@@ -86,6 +86,7 @@ function buildAutofillForm({
     function detectFormFields() { return topFrameQuestions; }
     async function attachResumeFile() { return { attached: 0, fileName: null }; }
     async function attachCoverLetterFile() { return { attached: 0, fileName: null }; }
+    function findCoverLetterAttachTrigger() { return null; }
     async function fillFormFromAnswers(answers) { return { filled: aiFilled, skipped: [] }; }
     function setStatus(msg) { statusMessages.push(msg); }
     function clearStatus() {}

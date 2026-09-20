@@ -59,6 +59,22 @@ describe('findNextStepButton — finds the real "advance to next step" control',
     document.body.innerHTML = '<button type="submit" disabled>Next</button>';
     expect(findNextStepButton()).toBeNull();
   });
+
+  it('finds Jobvite\'s actual "Next →" button, verbatim from the live apply page (the real bug: a trailing arrow glyph broke the strict ^...$ match)', () => {
+    document.body.innerHTML = `
+      <button class="jv-button jv-button-primary jv-button-large" type="button" ng-click="nextStep()" aria-label="Next">
+        Next →
+      </button>
+    `;
+    const el = findNextStepButton();
+    expect(el).not.toBeNull();
+    expect(el.tagName).toBe('BUTTON');
+  });
+
+  it('still rejects a final-action button decorated the same way (arrow alone is not what disqualifies/qualifies it)', () => {
+    document.body.innerHTML = '<button type="submit">Send Application →</button>';
+    expect(findNextStepButton()).toBeNull();
+  });
 });
 
 describe('findNextStepButton — never matches a final submit action (the safety boundary)', () => {

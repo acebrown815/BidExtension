@@ -4095,11 +4095,20 @@
   function findNextStepButton() {
     const finalActionRe = /\b(submit|apply|finish|complete|review|send|done)\b/i;
     const nextRe = /^\s*(next(\s+step)?|continue|proceed|save\s*(?:and|&)\s*(?:continue|next))\s*$/i;
+    // Strips decorative arrow/chevron glyphs a real "Next" button commonly
+    // wraps itself in — confirmed on Jobvite, whose Next button's actual
+    // text is "Next →" (a trailing U+2192). nextRe's strict ^...$ anchoring
+    // means that trailing arrow alone made an otherwise-exact "Next" match
+    // fail outright, so AutoFill's multi-step loop (see autofillForm())
+    // never found a next-step control to click and silently stopped after
+    // filling the first step, as if the form had no more steps at all.
+    const decorationRe = /[←-⇿➔➠➡▶▸»›]+/g;
     for (const el of document.querySelectorAll('button, a, input[type="submit"], input[type="button"]')) {
       if (el.disabled) continue;
-      const text = (el.value || el.innerText || el.textContent || '').trim();
-      if (!text || text.length > 40) continue;
-      if (finalActionRe.test(text)) continue;
+      const rawText = (el.value || el.innerText || el.textContent || '').trim();
+      if (!rawText || rawText.length > 40) continue;
+      if (finalActionRe.test(rawText)) continue;
+      const text = rawText.replace(decorationRe, '').trim();
       if (nextRe.test(text)) return el;
     }
     return null;
@@ -4128,10 +4137,24 @@
    * both `aria-invalid="true"` on the input and a `role="alert"` banner
    * reading "Please correct the following errors: Location is required" —
    * clicking Next again just repeats the same failure indefinitely).
+   *
+   * Checks actual rendered visibility (offsetParent), not mere DOM
+   * presence — confirmed necessary on Jobvite, whose error banner is
+   * `<div ng-show="showRequiredError()"><p role="alert">...</p></div>`:
+   * Angular's `ng-show`/`ng-hide` only toggle a CSS class
+   * (`.ng-hide { display: none !important; }`), they never remove the
+   * element from the DOM, so a bare querySelector() match was true on
+   * EVERY Jobvite page from the very first check — real error or not —
+   * making AutoFill's multi-step loop believe step 1 had already failed
+   * and stop right after the very first "Next" click, before step 2 was
+   * ever even filled in.
    * @returns {boolean}
    */
   function hasVisibleValidationErrors() {
-    return !!document.querySelector('[aria-invalid="true"], [role="alert"]');
+    for (const el of document.querySelectorAll('[aria-invalid="true"], [role="alert"]')) {
+      if (el.offsetParent !== null) return true;
+    }
+    return false;
   }
 
   /**
@@ -4170,6 +4193,21 @@
         const nextBtn = findNextStepButton();
         if (!nextBtn) break;
         btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
+        // Most wizard steps route via pushState (handleSpaUrlChanged's
+        // _autoBidAutofillRun guard covers that case), but nothing here
+        // guarantees a given ATS won't do a genuine full-page navigation
+        // for some step instead — that would destroy this content-script
+        // instance and every module-level variable in it, same as the
+        // initial "Apply Now" click (see autoClickApplyThenAutofillIfNeeded).
+        // Stashing this before every click, not just that first one, means
+        // a fresh instance loading on a reloaded step still finds its way
+        // back via checkPendingAutoBidAutofill instead of coming up as a
+        // blank, unanalyzed page.
+        try {
+          await sendMessage({ type: 'SET_PENDING_AUTOFILL', analysis: currentAnalysis, activeResumeId: _activeResumeId });
+        } catch (e) {
+          console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL (pre-Next) failed:', e && e.message);
+        }
         nextBtn.click();
         await waitForDomSettled();
         await waitForFormFieldsReady();
@@ -4224,7 +4262,17 @@
       resumeResult = await attachResumeFile();
     } catch (e) { console.warn('[JobMatch AI][Auto-Bid] attachResumeFile threw:', e && e.message); }
     let coverLetterResult = { attached: 0, fileName: null };
-    if (_coverLetterFileFields.length > 0) {
+    // Also checks findCoverLetterAttachTrigger() directly, not just the
+    // already-detected _coverLetterFileFields — confirmed needed on
+    // Jobvite, whose cover-letter file input is unreachable (and so never
+    // populates _coverLetterFileFields via the initial scan) until a
+    // "Select"-style button is clicked. attachCoverLetterFile() itself
+    // does the actual reveal-and-retry (see revealAndCollectHiddenCoverLetterInput);
+    // this is only an upfront check to avoid the "Generating cover
+    // letter..." status flashing on pages with no cover-letter section at
+    // all, and to skip attachCoverLetterFile()'s own AI call entirely when
+    // there's nothing to attach it to.
+    if (_coverLetterFileFields.length > 0 || findCoverLetterAttachTrigger()) {
       setStatus('Generating cover letter...', 'info');
       try {
         coverLetterResult = await attachCoverLetterFile();
@@ -4831,6 +4879,93 @@
   }
 
   /**
+   * Finds a button/link that looks like it opens a resume-attach menu —
+   * short "action" wording (Select/Add/Attach/Upload/Choose/Browse) whose
+   * surrounding context (its own label, or the nearest labeled/text
+   * container) mentions "resume" or "CV". Confirmed needed on Jobvite,
+   * whose resume section is `<button aria-labelledby="jv-resume-header">
+   * Select</button>` — getFieldLabel(btn) resolves "Add Resume*" via that
+   * aria-labelledby, same as it would for a real form field.
+   * @returns {HTMLElement|null}
+   */
+  function findResumeAttachTrigger() {
+    const actionRe = /^(select|add|attach|upload|choose|browse)\b/i;
+    for (const btn of document.querySelectorAll('button, a[role="button"], [role="button"]')) {
+      if (btn.offsetParent === null || btn.disabled) continue;
+      const text = (btn.innerText || btn.textContent || '').trim();
+      if (!text || text.length > 30 || !actionRe.test(text)) continue;
+      const context = getFieldLabel(btn) || (btn.closest('section, div[id], form') || {}).textContent || '';
+      if (/resum[eé]|\bcv\b|curriculum vitae/i.test(context.slice(0, 300))) return btn;
+    }
+    return null;
+  }
+
+  /**
+   * Best-effort recovery for ATS "Apply With" widgets whose real resume
+   * file input is reachable only after a "Select"-style button is clicked.
+   * Confirmed on Jobvite, whose actual markup is:
+   *   <div ng-show="visible.fileUpload">
+   *     <label for="file-input-0"><span role="button">File</span></label>
+   *     <input id="file-input-0" type="file" style="position:absolute;
+   *            width:1px;height:1px;...clip:rect(0,0,0,0);...">
+   *   </div>
+   * The input isn't created by JS on click — it's IN THE DOM the whole
+   * time, already 1px/clipped (never a plain offsetParent-null hide); it's
+   * the wrapping <div>'s `ng-show` that toggles it from unreachable to
+   * reachable once "Select" is clicked. attachResumeFile() falls back to
+   * this exactly once, only when its normal scan (populated by
+   * detectFormFields() before AutoFill started) found nothing, so this
+   * never runs on a page that already has a plain resume upload field.
+   *
+   * Deliberately never clicks the file input itself, or the <label
+   * for="..."> Jobvite wraps it in — for a REAL file input, that opens the
+   * browser's native OS file-picker dialog, which no script can drive or
+   * dismiss; the tab would be left stuck on it. The DataTransfer
+   * attachment attachResumeFile() performs below sets .files directly and
+   * never needs that dialog to open at all.
+   * @async
+   * @returns {Promise<boolean>} true if a resume-shaped file input is now
+   *   reachable and was added to _resumeFileFields.
+   */
+  async function revealAndCollectHiddenResumeInput() {
+    const trigger = findResumeAttachTrigger();
+    if (!trigger) return false;
+    // Snapshot which currently-connected file inputs are ALREADY hidden
+    // before clicking — not just which ones exist — since Jobvite's input
+    // exists in the DOM the whole time and only its ancestor's visibility
+    // changes. A naive "didn't exist before" diff would wrongly treat this
+    // already-in-DOM, already-hidden input as pre-existing and skip it
+    // even after the click makes it genuinely reachable.
+    const wasHidden = new Map();
+    document.querySelectorAll('input[type="file"]').forEach(el => {
+      wasHidden.set(el, el.offsetParent === null);
+    });
+
+    trigger.click();
+    await waitForDomSettled();
+
+    let found = false;
+    document.querySelectorAll('input[type="file"]').forEach(fileEl => {
+      if (_resumeFileFields.some(f => f.el === fileEl)) return;
+      if (fileEl.offsetParent === null) return; // still unreachable — this click didn't reveal it
+      if (wasHidden.get(fileEl) === false) return; // already reachable before — not what this click revealed
+      const label = getFieldLabel(fileEl);
+      // Still worth excluding an unambiguous cover-letter match — cheap
+      // insurance against a combined widget revealing more than one field
+      // from a single click — but NOT requiring a resume-shaped label: a
+      // field newly revealed by a confirmed resume-context trigger click
+      // (findResumeAttachTrigger already checked that) doesn't need its
+      // own label to independently re-confirm the same thing, and its DOM
+      // neighbors are just whatever the widget last rendered (its own
+      // menu/attach-item chrome), not necessarily a "Resume" heading.
+      if (looksLikeCoverLetterUpload(fileEl, label)) return;
+      _resumeFileFields.push({ el: fileEl, label });
+      found = true;
+    });
+    return found;
+  }
+
+  /**
    * Attaches the active resume's raw file to every detected resume-upload
    * field (see _resumeFileFields), so AutoFill can complete a file-upload
    * widget the same way it fills text fields — no AI call, no network
@@ -4853,6 +4988,21 @@
    * @returns {Promise<{attached: number, fileName: string|null, reason?: string}>}
    */
   async function attachResumeFile() {
+    if (!_resumeFileFields.length) {
+      // Some ATS "Apply With" widgets (confirmed on Jobvite —
+      // apply-with-jobvite.js) keep the real <input type="file"> in the DOM
+      // the whole time, but unreachable — a wrapping element's `ng-show`
+      // (or equivalent) hides it until a "Select"-style button is clicked
+      // open. detectFormFields()'s file-input scan runs once, before any
+      // clicking happens, so it finds nothing and _resumeFileFields stays
+      // empty — with no error, since "0 fields found" isn't treated as a
+      // failure, just silently no attachment. See
+      // revealAndCollectHiddenResumeInput's doc comment for the exact
+      // Jobvite markup this recovers from.
+      try { await revealAndCollectHiddenResumeInput(); } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] revealAndCollectHiddenResumeInput threw:', e && e.message);
+      }
+    }
     if (!_resumeFileFields.length) return { attached: 0, fileName: null };
 
     const built = await buildActiveResumeFile();
@@ -5280,8 +5430,20 @@
       // Citizen") never got a chance to be applied, no matter how
       // correctly the matcher itself was already working.
       const isCustomDropdownField = !!(ref && ref.type === 'custom_dropdown');
+      // Native <select> dropdowns ALSO independently re-derive their own
+      // answer in Phase 2 below (their own MATCH_DROPDOWN call, same
+      // deterministic-matcher-first logic) exactly like custom_dropdown
+      // fields do — so gating them on the bulk answer being non-empty is
+      // the same wrong premise already fixed for custom_dropdown above,
+      // just never extended to this type. Confirmed live: Jobvite's
+      // "Veteran Status" — a protected/EEO question a general bulk AI pass
+      // reasonably declines to guess at (NEEDS_USER_INPUT) — never even
+      // reached its own MATCH_DROPDOWN call as a result, so the correct
+      // saved answer ("Not a Veteran") never got a chance to be applied no
+      // matter how correctly the matcher itself worked.
+      const isNativeDropdownField = !!(ref && ref.type === 'dropdown');
 
-      if ((!val || val === 'NEEDS_USER_INPUT') && !isCustomDropdownField) {
+      if ((!val || val === 'NEEDS_USER_INPUT') && !isCustomDropdownField && !isNativeDropdownField) {
         skipped.push(qid);
         continue;
       }
@@ -5318,6 +5480,30 @@
       }
     }
 
+    // Reconciliation: a dropdown/custom_dropdown field can be detected and
+    // sent to the AI as a question (see detectFormFields()) yet still have
+    // NO corresponding entry in `answers` at all — not "answered with
+    // NEEDS_USER_INPUT" (handled above), genuinely ABSENT from the array,
+    // e.g. the AI's bulk response silently drops a question it's uncertain
+    // about rather than including an explicit placeholder for it. The loop
+    // above can only bucket qids it actually iterates over via `answers`,
+    // so a missing entry means isNativeDropdownField/isCustomDropdownField
+    // above never even ran for it — confirmed live on Jobvite's "Veteran
+    // Status" dropdown, detected correctly (11 real options) but with no
+    // MATCH_DROPDOWN call ever attempted. Both dropdown types still
+    // deserve their own independent matcher-first attempt regardless, same
+    // rationale as the bulk-answer-gate fix above — this just also covers
+    // the field being missing outright rather than merely empty.
+    const answeredQids = new Set(answers.map(a => a.question_id));
+    for (const [qid, ref] of Object.entries(_fieldMap)) {
+      if (answeredQids.has(qid)) continue;
+      if (ref.type === 'dropdown') {
+        nativeDropdowns.push({ qid, ref, val: '', questionText: ref.questionText || '' });
+      } else if (ref.type === 'custom_dropdown') {
+        customDropdowns.push({ qid, ref, val: '' });
+      }
+    }
+
     // Phase 2: native <select> dropdowns, all matched concurrently.
     await Promise.all(nativeDropdowns.map(async ({ qid, ref, val, questionText }) => {
       try {
@@ -5337,13 +5523,33 @@
               return;
             }
           } catch (e) {
-            // fall through to the bulk-answer fallback below
+            // Falls through to the bulk-answer fallback below — but that
+            // fallback uses the FIRST-PASS bulk AI's own guess, made
+            // without any of deterministicFieldMatcher's Q&A-priority
+            // logic, so a MATCH_DROPDOWN failure here silently downgrades
+            // to a materially less accurate answer. Logging it (previously
+            // a bare comment, no console output at all) so a failure like
+            // this is actually diagnosable instead of looking identical to
+            // "the deterministic matcher itself chose wrong."
+            console.warn('[JobMatch AI][Auto-Bid] MATCH_DROPDOWN failed, falling back to bulk answer:', { qid, questionText, bulkVal: val, error: e && e.message });
           }
         }
-        // Fallback: use the bulk AI answer directly
-        fillSelectByText(ref.el, val, ref.optionMap, ref.optionTexts);
-        showAutofillBadge(ref.el);
-        filled++;
+        // Fallback: use the bulk AI answer directly — only when there
+        // genuinely IS one. Native dropdowns can now reach this point with
+        // an empty `val` (NEEDS_USER_INPUT from the bulk pass, or no
+        // answer at all — see isNativeDropdownField above), and
+        // fillSelectByText()'s partial/contains-match strategy treats an
+        // empty string as a substring of every option's text, which would
+        // otherwise silently select whatever happens to be the FIRST real
+        // option in the list — a wrong answer indistinguishable from a
+        // correct one.
+        if (val) {
+          fillSelectByText(ref.el, val, ref.optionMap, ref.optionTexts);
+          showAutofillBadge(ref.el);
+          filled++;
+        } else {
+          skipped.push(qid);
+        }
       } catch (e) {
         skipped.push(qid);
       }
@@ -5692,6 +5898,10 @@
    */
   function fillSelectByText(select, aiText, optionMap, optionTexts) {
     const text = String(aiText).trim();
+    if (!text) return; // an empty answer must never reach Strategy 4 below —
+    // `''.includes()`/`optText.includes('')` is trivially true for every
+    // option, which would otherwise silently select whichever option
+    // happens to be first in the list and look exactly like a real match.
     const textLower = text.toLowerCase();
 
     // 1. Exact text match → get the real value from our map
@@ -6066,9 +6276,16 @@
 
     // Keep the panel's Cover Letter section in sync, so opening it after
     // AutoFill shows the exact letter that was attached rather than
-    // appearing empty or prompting the user to generate one again.
+    // appearing empty or prompting the user to generate one again. Setting
+    // textContent alone was the actual bug here: the section's CSS starts
+    // as display:none, and nothing else in this automated flow (unlike the
+    // "✎ Cover Letter" button's own generateCoverLetter(), which does both)
+    // ever revealed it — the letter was genuinely generated and attached,
+    // but sat in a hidden DOM node the whole time, invisible to the user.
     const textEl = shadowRoot.getElementById('jmCoverLetterText');
     if (textEl) textEl.textContent = text;
+    const clSection = shadowRoot.getElementById('jmCoverLetterSection');
+    if (clSection) clSection.style.display = 'block';
 
     try {
       const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
@@ -6107,16 +6324,84 @@
   }
 
   /**
+   * Cover-letter twin of findResumeAttachTrigger() — identical "Select"
+   * -style attach-menu detection, matched against cover-letter context
+   * instead of resume/CV context. Confirmed needed on the same Jobvite
+   * "Apply With" widget, which repeats the exact same structure for its
+   * Cover Letter section as it does for Resume (a second `jv-add-attachment`
+   * button revealing its own hidden `<input id="file-input-1" type="file">`).
+   * @returns {HTMLElement|null}
+   */
+  function findCoverLetterAttachTrigger() {
+    const actionRe = /^(select|add|attach|upload|choose|browse)\b/i;
+    for (const btn of document.querySelectorAll('button, a[role="button"], [role="button"]')) {
+      if (btn.offsetParent === null || btn.disabled) continue;
+      const text = (btn.innerText || btn.textContent || '').trim();
+      if (!text || text.length > 30 || !actionRe.test(text)) continue;
+      const context = getFieldLabel(btn) || (btn.closest('section, div[id], form') || {}).textContent || '';
+      if (/cover[\s_-]?letter|coverletter/i.test(context.slice(0, 300))) return btn;
+    }
+    return null;
+  }
+
+  /**
+   * Cover-letter twin of revealAndCollectHiddenResumeInput() — see its doc
+   * comment for the full Jobvite-confirmed rationale: the real file input
+   * is in the DOM the whole time but unreachable until a "Select"-style
+   * button is clicked, and that button (never the file input or a <label
+   * for="..."> wrapping it) is the only thing this ever clicks, since
+   * clicking a real file input opens the browser's native OS file-picker
+   * dialog, which no script can drive or dismiss.
+   * @async
+   * @returns {Promise<boolean>} true if a cover-letter-shaped file input is
+   *   now reachable and was added to _coverLetterFileFields.
+   */
+  async function revealAndCollectHiddenCoverLetterInput() {
+    const trigger = findCoverLetterAttachTrigger();
+    if (!trigger) return false;
+    const wasHidden = new Map();
+    document.querySelectorAll('input[type="file"]').forEach(el => {
+      wasHidden.set(el, el.offsetParent === null);
+    });
+
+    trigger.click();
+    await waitForDomSettled();
+
+    let found = false;
+    document.querySelectorAll('input[type="file"]').forEach(fileEl => {
+      if (_coverLetterFileFields.some(f => f.el === fileEl)) return;
+      if (fileEl.offsetParent === null) return; // still unreachable — this click didn't reveal it
+      if (wasHidden.get(fileEl) === false) return; // already reachable before — not what this click revealed
+      const label = getFieldLabel(fileEl);
+      // Mirrors revealAndCollectHiddenResumeInput's cheap-insurance-only
+      // exclusion, in the other direction: a field just revealed by a
+      // confirmed cover-letter-context trigger click doesn't need its own
+      // label to re-confirm that, but an unambiguous RESUME match is still
+      // worth excluding in case one click reveals more than one field.
+      if (looksLikeResumeUpload(fileEl, label)) return;
+      _coverLetterFileFields.push({ el: fileEl, label });
+      found = true;
+    });
+    return found;
+  }
+
+  /**
    * Attaches a freshly AI-generated cover letter to every detected
    * cover-letter-upload field (see _coverLetterFileFields) — the
    * cover-letter equivalent of attachResumeFile(). Only ever does work when
-   * the page actually has a cover-letter upload field; on every other page
-   * this is a no-op (empty _coverLetterFileFields, generateCoverLetterText
-   * never called).
+   * the page actually has (or, via revealAndCollectHiddenCoverLetterInput,
+   * reveals) a cover-letter upload field; on every other page this is a
+   * no-op (empty _coverLetterFileFields, generateCoverLetterText never
+   * called).
    * @async
    * @returns {Promise<{attached: number, fileName: string|null}>}
    */
   async function attachCoverLetterFile() {
+    if (!_coverLetterFileFields.length) {
+      try { await revealAndCollectHiddenCoverLetterInput(); } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] revealAndCollectHiddenCoverLetterInput threw:', e && e.message);
+      }
+    }
     if (!_coverLetterFileFields.length) return { attached: 0, fileName: null };
 
     const built = await buildCoverLetterFile();
@@ -6830,6 +7115,28 @@
     _autoBidContinuationActive = true;
     try {
       if (!panelOpen) togglePanel();
+      // Restoring currentAnalysis above only brings the DATA back — it says
+      // nothing to the shadow-DOM panel itself, which (fresh instance after
+      // a real navigation, or wiped by handleSpaUrlChanged before this ran)
+      // is still sitting in its default "nothing analyzed yet" state: score/
+      // insights sections hidden, Mark as Applied/Cover Letter/etc. buttons
+      // hidden. Without re-running the same reveal sequence Analyze Job uses
+      // on a cache hit (see renderCachedAnalysis, which this mirrors), the
+      // page would show a real analysis internally yet display no way to
+      // act on it — exactly the "Mark as Applied disappeared" symptom this
+      // whole restore mechanism exists to prevent. currentAnalysis already
+      // has every renderAnalysis()/showJobMeta() field flattened onto it
+      // (see the `{ ...response, title, company, ... }` shape analyzeJob()
+      // builds it with), so it doubles as the render input directly.
+      if (analysis) {
+        showJobMeta(analysis.title, analysis.company, analysis.location, analysis.salary, analysis.jobId, analysis.language);
+        renderAnalysis(analysis);
+        shadowRoot.getElementById('jmMarkApplied').style.display = 'flex';
+        updateMarkAppliedGating(analysis.matchScore);
+        shadowRoot.getElementById('jmCoverLetterBtn').style.display = 'flex';
+        shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
+        shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
+      }
       // Wait for the route swap to actually finish rendering before trusting
       // waitForFormFieldsReady()'s generic "is there ANY input on the page"
       // check — on a client-side (SPA) route change, that check can already
