@@ -107,6 +107,94 @@ describe('getFieldLabel — sibling "label card" fallback (Dice wizard)', () => 
   });
 });
 
+describe('getFieldLabel — walks up ancestors for the "label card" fallback (Gem-hosted forms)', () => {
+  // Trimmed but structurally faithful reproduction of jobs.gem.com's real
+  // form fields: NONE of firstname/lastname/email/resume have an id,
+  // name, aria-label, or aria-labelledby, and there's no <label> element
+  // anywhere at all — the field's actual name ("First name", "Resume")
+  // sits as a sibling of a GRANDPARENT wrapper, 3 layout-only <div> levels
+  // above the input itself, not as the input's own direct previous
+  // sibling (which is what the original Dice-motivated fallback only
+  // checked). Before walking up, getFieldLabel() returned '' for every
+  // field on this entire form.
+  it('resolves "First name" from 3 levels up for a bare, unlabeled text input', () => {
+    document.body.innerHTML = `
+      <div class="flex-30">
+        <span class="bodyImportant-47">First name<span class="requiredAsterisk-76"> *</span></span>
+        <div class="textField-77">
+          <div class="inputWrapper-80">
+            <div class="inputElementAndIconWrapper-81">
+              <input class="input-84" type="text" value="">
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    const label = getFieldLabel(document.querySelector('input'));
+    expect(label).toContain('First name');
+  });
+
+  it('resolves "Resume" from 3 levels up for a permanently-hidden drop-zone file input', () => {
+    document.body.innerHTML = `
+      <span class="bodyImportant-47">Resume<span class="requiredAsterisk-76"> *</span></span>
+      <div>
+        <div>
+          <div class="container-105" role="presentation" tabindex="0">
+            <input type="file" style="display: none;">
+            <div class="promptContainer-107"><span>Click to upload or drag and drop here</span></div>
+          </div>
+        </div>
+      </div>
+    `;
+    const fileInput = document.querySelector('input[type="file"]');
+    const label = getFieldLabel(fileInput);
+    expect(label).toContain('Resume');
+    expect(looksLikeResumeUpload(fileInput, label)).toBe(true);
+  });
+
+  it('does not wander further than the capped depth into unrelated content', () => {
+    document.body.innerHTML = `
+      <div>Unrelated heading far above</div>
+      <div><div><div><div><div><div>
+        <input id="too-deep" type="text">
+      </div></div></div></div></div></div>
+    `;
+    // 6 layout levels deep, all with no siblings until the very top — past
+    // the 5-level cap, so this must NOT resolve to "Unrelated heading...".
+    expect(getFieldLabel(document.getElementById('too-deep'))).toBe('');
+  });
+
+  it('does not misattribute a heading to a sibling field in a shared two-column row (confirmed by code review)', () => {
+    // fieldB has no id/label/aria-* of its own, so only Strategy 7's
+    // ancestor walk could resolve it at all. The walk reaches a "row"
+    // container shared with fieldA (a DIFFERENT field) before it would
+    // reach the "Resume" heading above the whole row — that shared
+    // container's own preceding-sibling text must not be handed to
+    // fieldB (or fieldA) individually, since it describes the row as a
+    // whole, not specifically either field.
+    document.body.innerHTML = `
+      <span>Resume</span>
+      <div class="row">
+        <div class="field"><input id="fieldA" type="file"></div>
+        <div class="field"><input id="fieldB" type="text"></div>
+      </div>
+    `;
+    expect(getFieldLabel(document.getElementById('fieldB'))).toBe('');
+    expect(getFieldLabel(document.getElementById('fieldA'))).toBe('');
+  });
+
+  it('still resolves correctly when each field in a multi-field row has its own real label (no regression)', () => {
+    document.body.innerHTML = `
+      <div class="row">
+        <div class="field"><label for="a">City</label><input id="a" type="text"></div>
+        <div class="field"><label for="b">State</label><input id="b" type="text"></div>
+      </div>
+    `;
+    expect(getFieldLabel(document.getElementById('a'))).toBe('City');
+    expect(getFieldLabel(document.getElementById('b'))).toBe('State');
+  });
+});
+
 describe('getFieldLabel — strips a wrapping label\'s listbox content (Workable intl-tel-input)', () => {
   // Trimmed but structurally faithful reproduction of Workable's phone
   // field (confirmed on https://apply.workable.com/.../apply/): the

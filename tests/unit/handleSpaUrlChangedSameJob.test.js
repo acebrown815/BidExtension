@@ -116,8 +116,31 @@ describe('extractJobIdFromUrl', () => {
 
   it('is case-insensitive', () => {
     const { extractJobIdFromUrl } = buildHarness({ lastUrl: '' });
-    expect(extractJobIdFromUrl('https://x.com/a/EF34F6E2-38D0-4ECB-AAC9-838FED17B01F/b'))
+    expect(extractJobIdFromUrl('https://x.com/JOB/EF34F6E2-38D0-4ECB-AAC9-838FED17B01F/b'))
       .toBe('ef34f6e2-38d0-4ecb-aac9-838fed17b01f');
+  });
+
+  it('does NOT match a UUID-shaped segment with no job-related context nearby (avoids an unrelated persistent token)', () => {
+    // Confirmed by code review: a site that embeds some OTHER persistent
+    // long hex/UUID token in every page's path — a session id, a
+    // candidate id, a tracking id — must not make two genuinely different
+    // job postings look like "the same job" just because they share it.
+    const { extractJobIdFromUrl } = buildHarness({ lastUrl: '' });
+    expect(extractJobIdFromUrl('https://x.com/a/ef34f6e2-38d0-4ecb-aac9-838fed17b01f/b')).toBeNull();
+  });
+
+  it('does not treat two different jobs sharing an unrelated session id as the same job', () => {
+    window.happyDOM.setURL('https://portal.example.com/candidate/11111111-1111-1111-1111-111111111111/job/22222222-2222-2222-2222-222222222222');
+    const { handleSpaUrlChanged, getState } = buildHarness({
+      lastUrl: 'https://portal.example.com/candidate/11111111-1111-1111-1111-111111111111/job/99999999-9999-9999-9999-999999999999',
+      currentAnalysis: { title: 'Senior Engineer', matchScore: 88 },
+    });
+
+    handleSpaUrlChanged();
+
+    // Different job ids (adjacent to "job") on either side — must still
+    // reset, even though both URLs also share the SAME candidate/session id.
+    expect(getState().currentAnalysis).toBeNull();
   });
 });
 

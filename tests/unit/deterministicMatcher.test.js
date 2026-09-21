@@ -142,6 +142,35 @@ describe('deterministicFieldMatcher — Jobvite veteran status (the real bug)', 
   });
 });
 
+describe('deterministicFieldMatcher — disability status affirmative answer (regression from the veteran fix)', () => {
+  // Confirmed by code review: broadening the Yes/No heuristic to catch
+  // leading phrases like "I do ..." made the pre-existing, UNANCHORED
+  // option-side check `optLower.includes('i do')` newly reachable for
+  // realistic full-sentence answers — and a negated option like "I do NOT
+  // have a disability..." trivially contains that same substring "i do".
+  // An affirmative saved answer was silently matched to the negative
+  // option, the exact opposite of what the user said, on a protected-class
+  // EEO question. Fixed by classifying an option as negative FIRST and
+  // excluding it from ever being read as affirmative too.
+  const disabilityOptions = [
+    'I do not have a disability and have not had one in the past',
+    'I have a disability, or have had one in the past',
+    'I do not want to answer',
+  ];
+
+  it('matches "I do have a disability" to the affirmative option, not the negated one that also contains "i do"', () => {
+    const qaList = [{ question: 'disability status', answer: 'I do have a disability' }];
+    const result = deterministicFieldMatcher('Do you have a disability?', disabilityOptions, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'I have a disability, or have had one in the past', topic: 'disability' });
+  });
+
+  it('still matches the negated answer to the negative option (no regression)', () => {
+    const qaList = [{ question: 'disability status', answer: 'I do not have a disability' }];
+    const result = deterministicFieldMatcher('Do you have a disability?', disabilityOptions, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'I do not have a disability and have not had one in the past', topic: 'disability' });
+  });
+});
+
 describe('deterministicFieldMatcher — demographic decline-to-answer fallback', () => {
   it('selects the decline option when no saved answer exists for a demographic topic', () => {
     const options = ['Man', 'Woman', 'Non-binary', 'Prefer not to say'];

@@ -428,25 +428,35 @@ function matchAnswerToOption(savedAnswer, options, topic) {
       for (const opt of options) {
         const optLower = opt.toLowerCase();
 
+        // Negative option patterns: starts with "No" (also catches "Not a
+        // Veteran", since "not" itself starts with "no"), or uses
+        // first-person negative phrasing. Computed FIRST and used to gate
+        // the affirmative check below — confirmed live: an option like "I
+        // do not have a disability..." trivially contains the substring
+        // "i do" (from "I do NOT..."), which the old, unguarded
+        // `optLower.includes('i do')` affirmative check would match
+        // against a genuinely affirmative saved answer ("I do have a
+        // disability"), silently selecting the exact opposite of what the
+        // user said. An option can never be both, so classifying negation
+        // first and requiring the affirmative check to NOT also be
+        // negative-shaped closes that off without narrowing either
+        // pattern list.
+        const optIsNegative = optLower.startsWith('no')
+          || optLower.includes('i am not')
+          || optLower.includes('not a ')
+          || optLower.includes('i do not')
+          || optLower.includes("i don't");
+
         // Affirmative option patterns: starts with "Yes", or uses first-person
         // positive phrasing commonly seen on OFCCP-compliant forms.
-        if (isYes && (
+        if (isYes && !optIsNegative && (
           optLower.startsWith('yes') ||
           optLower.includes('i am a ') ||
           optLower.includes('i have a ') ||
           optLower.includes('i do')
         )) return opt;
 
-        // Negative option patterns: starts with "No" (also catches "Not a
-        // Veteran", since "not" itself starts with "no"), or uses
-        // first-person negative phrasing.
-        if (isNo && (
-          optLower.startsWith('no') ||
-          optLower.includes('i am not') ||
-          optLower.includes('not a ') ||
-          optLower.includes('i do not') ||
-          optLower.includes("i don't")
-        )) return opt;
+        if (isNo && optIsNegative) return opt;
       }
     }
   }

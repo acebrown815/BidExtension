@@ -2474,6 +2474,17 @@
    * @async
    */
   async function scanResumeMatch(jd) {
+    // Same staleness token analyzeJob() already uses (see its own myGen
+    // capture) — reused here rather than a separate counter, since a
+    // genuine navigation (handleSpaUrlChanged) or a fresh analyzeJob() run
+    // both already bump it. Waiting on waitForDomSettled() below widens
+    // how long this function stays in flight (up to several seconds), so
+    // two calls for two different postings (e.g. the SPA firing a second
+    // navigation while the first scan is still waiting) can now genuinely
+    // overlap — without this, whichever one happened to finish LAST would
+    // win the race and silently auto-switch the resume for the WRONG job,
+    // even if it was the one that started first.
+    const myGen = _analyzeGen;
     _resumeScores = {};
 
     if (jd === undefined) {
@@ -2493,16 +2504,19 @@
       // waitForJobDescriptionReady()'s own fix, since this function reads
       // the JD independently for resume ranking, not through that path.
       await waitForDomSettled();
+      if (_analyzeGen !== myGen) return; // superseded by a newer navigation while we waited
       // Confident/cached JD only — never the raw last-resort scrape. This
       // function drives a SILENT auto-switch (below) and the Local
       // Match/★ badges, so it must never rank resumes against noise like a
       // scraped application form (see getConfidentJobDescriptionForRanking).
       try { jd = (await getConfidentJobDescriptionForRanking()) || ''; } catch (_) { /* extraction can throw on weird pages */ }
+      if (_analyzeGen !== myGen) return;
     }
     if (!jd) { renderSlotSwitcher(); return; }
 
     try {
       const result = await chrome.storage.local.get('resumes');
+      if (_analyzeGen !== myGen) return;
       const resumes = result.resumes || [];
       if (!resumes.length) { renderSlotSwitcher(); return; }
 
@@ -4813,8 +4827,19 @@
     // (see attachCoverLetterFile()) — never sent to the AI as a question,
     // so these are collected into _resumeFileFields/_coverLetterFileFields
     // rather than pushed onto `questions`.
+    //
+    // Deliberately does NOT require offsetParent visibility here (unlike
+    // most other field types in this function) — confirmed across four
+    // different ATS platforms now (Dice: clip-hidden; Jobvite: ancestor
+    // ng-show; Workable: the `hidden` attribute; Gem: inline
+    // `style="display:none"`) that the REAL file input is routinely kept
+    // permanently or conditionally invisible by design, with a styled
+    // <label>/button/drop-zone as the only visible affordance — visibility
+    // was never a meaningful signal for "is this the right field" here.
+    // looksLikeResumeUpload()/looksLikeCoverLetterUpload()'s label-based
+    // classification below is what actually guards against a false
+    // positive, same as it already did for the reveal-on-click cases.
     document.querySelectorAll('input[type="file"]').forEach(fileEl => {
-      if (fileEl.offsetParent === null) return;
       if (!isFieldEligible(fileEl)) return;
       if (fileEl.files && fileEl.files.length > 0) return; // already has a file — don't clobber it
       const label = getFieldLabel(fileEl);
@@ -5350,19 +5375,38 @@
     // 6. name attribute (humanized)
     if (input.name) return input.name.replace(/[_-]/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
 
-    // 7. Nearest preceding sibling's short text (last resort) — covers
+    // 7. Nearest preceding sibling's short text (last resort), walking up
+    // through ancestors if the input's own level has no siblings — covers
     // "label card" layouts where the field's name lives in a sibling
     // container placed BEFORE the input entirely, rather than wrapping it
     // or being referenced by any ARIA attribute. Seen on Dice's application
-    // wizard: its Resume/Cover-letter upload cards put the field name in a
-    // small header div, then an upload button, then a description div, all
-    // as siblings preceding a bare <input type="file"> with no id/name/
-    // aria-label/aria-labelledby of its own (aria-describedby points only
-    // at the generic "File types supported..." description, not the name).
-    const prevSibling = input.previousElementSibling;
-    if (prevSibling) {
-      const text = prevSibling.textContent.trim();
-      if (text && text.length < 200) return text;
+    // wizard (label is the input's OWN direct previous sibling: a header
+    // div, an upload button, a description div, then a bare <input
+    // type="file">) and on Gem-hosted forms (jobs.gem.com), whose text AND
+    // file inputs alike sit 3 layout-only <div> levels below where the
+    // field's actual name ("First name", "Resume", ...) lives — a sibling
+    // of a GRANDPARENT wrapper, not of the input directly. Capped at a
+    // handful of levels so this can't wander up into wildly unrelated page
+    // content (a section heading, the whole form) on a false miss.
+    let node = input;
+    for (let depth = 0; depth < 5 && node; depth++) {
+      const prevSibling = node.previousElementSibling;
+      if (prevSibling) {
+        const text = prevSibling.textContent.trim();
+        if (text && text.length < 200) return text;
+      }
+      const parent = node.parentElement;
+      if (!parent) break;
+      // Stop walking up past a container that holds MORE than one form
+      // control — confirmed by code review as a real misattribution risk:
+      // a two-column row whose first field has a heading and second
+      // doesn't would otherwise let the second field inherit the first
+      // field's own unrelated label once the walk reaches their shared
+      // parent. A container this input shares with some OTHER field can't
+      // have its own preceding sibling text safely attributed to just
+      // this one.
+      if (parent.querySelectorAll('input, select, textarea').length > 1) break;
+      node = parent;
     }
 
     return '';
@@ -7102,6 +7146,48 @@
   }
 
   /**
+   * Finds the real "Apply Now" action inside a dropdown menu that a
+   * dropdown-TOGGLE "Apply" button (as opposed to a direct apply link)
+   * just revealed. Confirmed needed on Leonardo DRS's career site: its
+   * "Apply now" control is a Bootstrap dropdown-toggle
+   * (`data-toggle="dropdown"`, `aria-haspopup="true"`) that opens a menu
+   * of apply METHODS — a plain "Apply Now" link, "Start applying with
+   * LinkedIn", etc. — rather than navigating anywhere itself, so
+   * findApplyButton()'s "click it and expect navigation" assumption
+   * silently did nothing beyond opening that menu.
+   *
+   * Reuses the SAME apply-shaped text regex findApplyButton() uses,
+   * scoped to just this menu's own items, so it only ever picks the
+   * plain, direct "Apply Now" option — never "...with LinkedIn" or
+   * another social/SSO-specific option, consistent with
+   * findApplyButton()'s existing conservatism about which CTA is safe to
+   * click automatically.
+   * @param {HTMLElement} toggleBtn - The dropdown-toggle button just clicked.
+   * @returns {HTMLElement|null}
+   */
+  function findDropdownApplyMenuItem(toggleBtn) {
+    const applyRe = /^\s*(?:(?:easy|quick|1-click|one[-\s]click)\s+)?apply(\s+now|\s+for\s+this\s+(job|position|role))?\s*$/i;
+    // The revealed menu is usually the toggle's own next sibling inside a
+    // shared wrapper (Bootstrap's `.btn-group` here), but search the
+    // wrapper broadly rather than assuming one exact sibling relationship,
+    // to stay robust to markup variations across ATS platforms. Starts
+    // from the PARENT, not the toggle button itself — a Bootstrap toggle's
+    // own class list is typically "...dropdown-toggle", which would
+    // otherwise match `[class*="dropdown"]` on the button itself and never
+    // reach the actual wrapper that holds the sibling menu.
+    const searchRoot = toggleBtn.parentElement || document;
+    const container = searchRoot.closest('.btn-group, [class*="dropdown"]') || searchRoot;
+    const menu = container.querySelector('[role="menu"], .dropdown-menu, ul');
+    if (!menu) return null;
+    for (const el of menu.querySelectorAll('a, button, [role="menuitem"]')) {
+      if (el.offsetParent === null) continue;
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text && text.length <= 40 && applyRe.test(text)) return el;
+    }
+    return null;
+  }
+
+  /**
    * If the current page has a strong match but no application form yet —
    * e.g. CATS (catsone.com) job postings, whose real form lives on a
    * SEPARATE page reached only by clicking "Apply Now" — clicks that link
@@ -7165,22 +7251,56 @@
       if ((applyBtn.getAttribute('target') || '').toLowerCase() === '_blank') {
         return;
       }
+      // Some ATS "Apply" controls are a dropdown-TOGGLE, not a direct
+      // navigating link/button — confirmed on Leonardo DRS's career site
+      // (`<button data-toggle="dropdown" aria-haspopup="true">Apply
+      // now</button>`), which only reveals a menu of apply methods when
+      // clicked. Detect that up front via the same standard ARIA/Bootstrap
+      // attributes isCustomDropdown() elsewhere in this file already keys
+      // off, open it, then click through to the plain "Apply Now" item it
+      // reveals — see findDropdownApplyMenuItem's doc comment for why that
+      // item (never "...with LinkedIn" or another social option) is the
+      // only safe target.
+      const isDropdownToggle = applyBtn.getAttribute('aria-haspopup') === 'true'
+        || applyBtn.getAttribute('data-toggle') === 'dropdown';
+      let finalApplyEl = applyBtn;
+      if (isDropdownToggle) {
+        // A toggle TOGGLES — if the menu is already expanded (confirmed
+        // possible on Leonardo DRS: aria-expanded can already be "true" at
+        // the moment this runs), clicking it again would CLOSE the menu
+        // instead of opening it, and findDropdownApplyMenuItem() would
+        // then correctly find nothing visible to click through to. Only
+        // click it when it isn't already expanded.
+        if (applyBtn.getAttribute('aria-expanded') !== 'true') {
+          applyBtn.click();
+          await waitForDomSettled();
+        }
+        const menuItem = findDropdownApplyMenuItem(applyBtn);
+        if (!menuItem) {
+          // Opened a menu this couldn't make sense of — leave it open
+          // rather than guessing further; there's no navigation about to
+          // happen, so nothing to stash a pending-autofill flag for.
+          return;
+        }
+        if ((menuItem.getAttribute('target') || '').toLowerCase() === '_blank') return;
+        finalApplyEl = menuItem;
+      }
       try {
         // Carry the analysis result (matchScore, matchingSkills, company,
         // title, ...) and the active resume id across this navigation —
-        // clicking applyBtn destroys this content-script instance and every
-        // module-level variable in it, so the FRESH instance that loads on
-        // the new page (see checkPendingAutoBidAutofill) has no way to know
-        // which job/resume it's even looking at otherwise. That new page
-        // often has no visible job description of its own at all (e.g.
-        // Dice's application wizard just shows a title/company summary), so
-        // without this, a cover-letter-upload field there could never
-        // generate a real cover letter.
+        // clicking finalApplyEl destroys this content-script instance and
+        // every module-level variable in it, so the FRESH instance that
+        // loads on the new page (see checkPendingAutoBidAutofill) has no
+        // way to know which job/resume it's even looking at otherwise.
+        // That new page often has no visible job description of its own
+        // at all (e.g. Dice's application wizard just shows a
+        // title/company summary), so without this, a cover-letter-upload
+        // field there could never generate a real cover letter.
         await sendMessage({ type: 'SET_PENDING_AUTOFILL', analysis: currentAnalysis, activeResumeId: _activeResumeId });
       } catch (e) {
         console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL failed:', e && e.message);
       }
-      applyBtn.click();
+      finalApplyEl.click();
     } finally {
       _autoBidAutofillRun = false;
     }
@@ -7527,14 +7647,35 @@
    * this — as opposed to Auto-Bid's own automated clicks, which are
    * already covered by _autoBidContinuationActive/_autoBidAutofillRun
    * below.
+   *
+   * Only accepts a UUID/hex-shaped path SEGMENT (not any such run
+   * anywhere in the path) whose immediately PRECEDING segment looks
+   * job-related (the real, common convention: /job/<id>,
+   * /job-detail/<id>, /job-applications/<id>/...). Confirmed by code
+   * review: without that context check, a site that embeds some OTHER
+   * persistent long hex/UUID token in every page's path — a session id, a
+   * candidate id, a tracking id — would make two genuinely DIFFERENT job
+   * postings look like "the same job" purely because they share that
+   * unrelated token, silently keeping the previous posting's
+   * analysis/Mark-as-Applied state shown against a new one. Deliberately
+   * checks only the PRECEDING segment, not the following one too — a
+   * first attempt that checked both produced its own false match on
+   * `/candidate/<sessionId>/job/<jobId>`: the session id's own NEXT
+   * segment ("job") isn't actually labeling it, it's labeling the id
+   * AFTER it.
    * @param {string} url
    * @returns {string|null} The lowercased id, or null if none is found.
    */
   function extractJobIdFromUrl(url) {
     try {
-      const path = new URL(url).pathname;
-      const match = path.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{20,}/i);
-      return match ? match[0].toLowerCase() : null;
+      const segments = new URL(url).pathname.split('/').filter(Boolean);
+      const idRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{20,}$/i;
+      const jobWordRe = /job|posting|position|req|application|vacan/i;
+      for (let i = 0; i < segments.length; i++) {
+        if (!idRe.test(segments[i])) continue;
+        if (i > 0 && jobWordRe.test(segments[i - 1])) return segments[i].toLowerCase();
+      }
+      return null;
     } catch (_) {
       return null;
     }
