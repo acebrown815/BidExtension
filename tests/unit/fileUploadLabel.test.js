@@ -107,6 +107,54 @@ describe('getFieldLabel — sibling "label card" fallback (Dice wizard)', () => 
   });
 });
 
+describe('getFieldLabel — strips a wrapping label\'s listbox content (Workable intl-tel-input)', () => {
+  // Trimmed but structurally faithful reproduction of Workable's phone
+  // field (confirmed on https://apply.workable.com/.../apply/): the
+  // <input> itself has no id and no aria-labelledby, so only the
+  // "wrapping <label>" strategy can resolve it at all — but that label
+  // wraps the ENTIRE intl-tel-input widget, including its country-code
+  // dropdown (role="listbox" with one role="option" per country). Before
+  // the fix, none of that survived the input/textarea/select-only removal,
+  // so the resolved "label" was "Phone" followed by every country name
+  // concatenated together — long enough to swamp the AI's actual question
+  // for this field, so it silently never got a phone value while every
+  // other field on the same form filled normally.
+  function makeWorkablePhoneField() {
+    document.body.innerHTML = `
+      <label class="styles--3aPac">
+        <span><span id="phone_label"><strong>Phone</strong></span></span>
+        <div data-ui="phone">
+          <div class="iti iti--allow-dropdown">
+            <div class="iti__flag-container">
+              <div class="iti__selected-flag" title="United States">
+                <div class="iti__selected-dial-code">+1</div>
+              </div>
+              <div class="iti__dropdown-content iti__hide">
+                <ul class="iti__country-list" role="listbox" aria-label="List of countries">
+                  <li role="option" data-country-code="us"><span class="iti__country-name">United States</span><span class="iti__dial-code">+1</span></li>
+                  <li role="option" data-country-code="gb"><span class="iti__country-name">United Kingdom</span><span class="iti__dial-code">+44</span></li>
+                  <li role="option" data-country-code="ca"><span class="iti__country-name">Canada</span><span class="iti__dial-code">+1</span></li>
+                </ul>
+              </div>
+            </div>
+            <input name="phone" type="tel" class="iti__tel-input">
+          </div>
+        </div>
+      </label>
+    `;
+    return document.querySelector('input[name="phone"]');
+  }
+
+  it('resolves to just "Phone" (plus the visible dial code), not the full country list', () => {
+    const phoneInput = makeWorkablePhoneField();
+    const label = getFieldLabel(phoneInput);
+    const collapsed = label.replace(/\s+/g, ' ').trim();
+    expect(collapsed).toBe('Phone +1');
+    expect(label).not.toContain('United Kingdom');
+    expect(label).not.toContain('Canada');
+  });
+});
+
 describe('looksLikeResumeUpload / looksLikeCoverLetterUpload — Dice wizard classification', () => {
   it('classifies the resume field as a resume upload, not a cover-letter upload', () => {
     const { resumeInput } = makeDiceResumeCoverLetterStep();

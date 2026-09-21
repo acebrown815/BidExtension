@@ -2478,6 +2478,21 @@
 
     if (jd === undefined) {
       jd = '';
+      // Wait for the page's own DOM to settle first — same rationale as
+      // waitForJobDescriptionReady() (see its doc comment): a page whose JD
+      // is also mirrored in JSON-LD (present from the very first byte, for
+      // SEO) can look "ready" to extract from instantly, well before the
+      // real, DOM-rendered content has actually finished rendering. This
+      // function is always called fire-and-forget (togglePanel(),
+      // handleSpaUrlChanged() — neither awaits it), so waiting here never
+      // blocks the panel from opening; it only delays when the ★ badges /
+      // silent auto-switch below actually happen, which is exactly the
+      // point. Confirmed live: without this, the panel visually
+      // auto-selected a resume using a premature JD, before the
+      // underlying page had rendered at all — a DIFFERENT gap from
+      // waitForJobDescriptionReady()'s own fix, since this function reads
+      // the JD independently for resume ranking, not through that path.
+      await waitForDomSettled();
       // Confident/cached JD only — never the raw last-resort scrape. This
       // function drives a SILENT auto-switch (below) and the Local
       // Match/★ badges, so it must never rank resumes against noise like a
@@ -2575,21 +2590,47 @@
    *   no JobPosting JSON-LD with a usable description is found.
    */
   function extractJobDescriptionFromLdJson() {
+    for (const posting of findJobPostingLdJson()) {
+      if (posting.description) {
+        const text = jobPostingHtmlToText(posting.description);
+        if (text.length > 100) return text;
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Finds every schema.org JobPosting object embedded in this page's
+   * `<script type="application/ld+json">` blocks (there's normally at most
+   * one, but a page can legally embed several structured-data graphs).
+   * Server-rendered for SEO/Google-for-Jobs, so — unlike every DOM-selector
+   * -based extractor in this file — it's present from the very first byte
+   * of HTML, before a client-rendered SPA's own JS has painted anything at
+   * all. Confirmed needed on Workday: its visible title/location elements
+   * don't exist until its JS framework finishes hydrating (which can take
+   * noticeably longer than the JD itself, since the JD is already fully
+   * available here) — waitForJobDescriptionReady() only waits for JD
+   * readiness, so it can return while title/location are still genuinely
+   * blank everywhere else on the page.
+   * @returns {Array<Object>} Every parsed JobPosting object found, or [].
+   */
+  function findJobPostingLdJson() {
+    const postings = [];
     try {
       const scripts = document.querySelectorAll('script[type="application/ld+json"]');
       for (const script of scripts) {
         let data;
         try { data = JSON.parse(script.textContent); } catch (_) { continue; }
-        const posting = data && data['@type'] === 'JobPosting'
-          ? data
-          : (Array.isArray(data) ? data.find(d => d && d['@type'] === 'JobPosting') : null);
-        if (posting && posting.description) {
-          const text = jobPostingHtmlToText(posting.description);
-          if (text.length > 100) return text;
+        if (data && data['@type'] === 'JobPosting') {
+          postings.push(data);
+        } else if (Array.isArray(data)) {
+          for (const d of data) {
+            if (d && d['@type'] === 'JobPosting') postings.push(d);
+          }
         }
       }
     } catch (_) {}
-    return '';
+    return postings;
   }
 
   /**
@@ -2862,6 +2903,13 @@
    * the JD text itself has streamed in from a follow-up API call — a fixed
    * timeout guesses at that gap, this actually checks for it.
    *
+   * First waits for the DOM itself to stop actively mutating (see
+   * waitForDomSettled) before checking for JD text at all — otherwise a
+   * page whose JD is also mirrored in JSON-LD (present from the very
+   * first byte, for Google-for-Jobs SEO) can look "ready" instantly, even
+   * though the real, DOM-rendered description a moment later would have
+   * been the more complete/authoritative signal.
+   *
    * Requires two consecutive polls to see the SAME non-empty confident JD
    * text before resolving, not just one non-empty read — some SPAs paint
    * the JD in progressively, so a single snapshot mid-render could look
@@ -2877,6 +2925,24 @@
    * @returns {Promise<void>}
    */
   async function waitForJobDescriptionReady(maxWaitMs = 10000, intervalMs = 400) {
+    // Give the page's own DOM a chance to settle before ever checking for
+    // JD text at all — confirmed necessary on Workday: its real JD lives
+    // behind [data-automation-id="jobPostingDescription"] (checked FIRST
+    // in extractJobDescriptionConfident(), before the JSON-LD fallback),
+    // but that element doesn't exist until Workday's JS framework finishes
+    // hydrating. Without this, the very first poll below could already
+    // find a "confident" match via the JSON-LD fallback — present from
+    // the first byte of HTML, so it never needs to wait for anything —
+    // and immediately consider the page ready, even though the REAL,
+    // DOM-rendered description (the higher-priority strategy in the
+    // selector list, and generally the more complete/authoritative one)
+    // was about to appear moments later. Confirmed live: this let a
+    // materially different JD feed the initial automated analysis than
+    // what a later manual Re-Analyze (run once the page had fully
+    // settled) saw — different enough to change which resumes ranked in
+    // the local top-3 ATS-keyword match between the two runs.
+    await waitForDomSettled();
+
     const deadline = Date.now() + maxWaitMs;
     let lastLen = -1;
     while (Date.now() < deadline) {
@@ -2977,6 +3043,25 @@
         return el.innerText.trim();
       }
     }
+
+    // og:title / JSON-LD — confirmed needed on Workday: no selector above
+    // ever matches (its visible <h1> doesn't exist until its JS framework
+    // finishes hydrating, well after the JD itself is already available —
+    // see findJobPostingLdJson's doc comment), and even <title> itself is
+    // empty at that point, so the document.title fallback below returns ''
+    // too. og:title is server-rendered for social-share previews, so it's
+    // present from the very first byte regardless of client JS state.
+    try {
+      const ogTitle = document.querySelector('meta[property="og:title"]')?.content;
+      if (ogTitle && ogTitle.trim().length > 2 && ogTitle.trim().length < 200) return ogTitle.trim();
+    } catch (_) {}
+    for (const posting of findJobPostingLdJson()) {
+      const title = posting.title;
+      if (title && typeof title === 'string' && title.trim().length > 2 && title.trim().length < 200) {
+        return title.trim();
+      }
+    }
+
     return document.title.split('|')[0].split('-')[0].trim();
   }
 
@@ -3139,6 +3224,26 @@
         if (m) return m[0].trim();
       }
     } catch (_) { /* unsupported regex flags on very old engines */ }
+
+    // JSON-LD (schema.org JobPosting.jobLocation) — same rationale as
+    // extractJobTitle()'s fallback: Workday's visible location element is
+    // 100% client-rendered and won't exist yet at the point
+    // waitForJobDescriptionReady() already found the JD via this same
+    // page's structured data. jobLocation can legally be a single Place or
+    // an array of them; only the first is used here, same granularity the
+    // DOM selectors above already settle for.
+    for (const posting of findJobPostingLdJson()) {
+      try {
+        const raw = posting.jobLocation;
+        const place = Array.isArray(raw) ? raw[0] : raw;
+        const address = place && place.address;
+        if (address) {
+          const text = [address.addressLocality, address.addressRegion, address.addressCountry]
+            .filter(Boolean).join(', ');
+          if (text && text.length < 150) return text;
+        }
+      } catch (_) {}
+    }
 
     return '';
   }
@@ -4885,11 +4990,13 @@
    * container) mentions "resume" or "CV". Confirmed needed on Jobvite,
    * whose resume section is `<button aria-labelledby="jv-resume-header">
    * Select</button>` — getFieldLabel(btn) resolves "Add Resume*" via that
-   * aria-labelledby, same as it would for a real form field.
+   * aria-labelledby, same as it would for a real form field. Also
+   * confirmed needed on Workable, whose button reads "Import resume
+   * from" — "import" wasn't in the original action-word list.
    * @returns {HTMLElement|null}
    */
   function findResumeAttachTrigger() {
-    const actionRe = /^(select|add|attach|upload|choose|browse)\b/i;
+    const actionRe = /^(select|add|attach|upload|choose|browse|import)\b/i;
     for (const btn of document.querySelectorAll('button, a[role="button"], [role="button"]')) {
       if (btn.offsetParent === null || btn.disabled) continue;
       const text = (btn.innerText || btn.textContent || '').trim();
@@ -4917,25 +5024,37 @@
    * detectFormFields() before AutoFill started) found nothing, so this
    * never runs on a page that already has a plain resume upload field.
    *
+   * A SECOND, different pattern confirmed on Workable: clicking "Import
+   * resume from" mounts a portal-based dropdown/dialog that didn't exist
+   * in the DOM at all beforehand, containing
+   * `<label for="file-upload">My computer</label><input id="file-upload"
+   * type="file" hidden ...>` — here the input is permanently hidden by
+   * the HTML `hidden` attribute (never becomes offsetParent-reachable, by
+   * design; the <label> is the only visible affordance), so it has to be
+   * recognized by NOT having existed in the DOM before this click at all,
+   * the opposite signal from Jobvite's case. Both are handled below: an
+   * input tracked before the click only counts if it became reachable
+   * (Jobvite); an input NOT tracked at all — brand new — always counts,
+   * regardless of its own hidden/offsetParent state (Workable).
+   *
    * Deliberately never clicks the file input itself, or the <label
-   * for="..."> Jobvite wraps it in — for a REAL file input, that opens the
-   * browser's native OS file-picker dialog, which no script can drive or
-   * dismiss; the tab would be left stuck on it. The DataTransfer
-   * attachment attachResumeFile() performs below sets .files directly and
-   * never needs that dialog to open at all.
+   * for="..."> both Jobvite and Workable wrap it in — for a REAL file
+   * input, that opens the browser's native OS file-picker dialog, which
+   * no script can drive or dismiss; the tab would be left stuck on it.
+   * The DataTransfer attachment attachResumeFile() performs below sets
+   * .files directly and never needs that dialog to open at all.
    * @async
    * @returns {Promise<boolean>} true if a resume-shaped file input is now
-   *   reachable and was added to _resumeFileFields.
+   *   available (reachable, or freshly mounted) and was added to
+   *   _resumeFileFields.
    */
   async function revealAndCollectHiddenResumeInput() {
     const trigger = findResumeAttachTrigger();
     if (!trigger) return false;
-    // Snapshot which currently-connected file inputs are ALREADY hidden
-    // before clicking — not just which ones exist — since Jobvite's input
-    // exists in the DOM the whole time and only its ancestor's visibility
-    // changes. A naive "didn't exist before" diff would wrongly treat this
-    // already-in-DOM, already-hidden input as pre-existing and skip it
-    // even after the click makes it genuinely reachable.
+    // Snapshot which currently-connected file inputs exist, and which of
+    // those are ALREADY hidden, before clicking — see the two-pattern doc
+    // comment above for why both "did it exist at all" and "was it
+    // reachable" matter here.
     const wasHidden = new Map();
     document.querySelectorAll('input[type="file"]').forEach(el => {
       wasHidden.set(el, el.offsetParent === null);
@@ -4947,8 +5066,15 @@
     let found = false;
     document.querySelectorAll('input[type="file"]').forEach(fileEl => {
       if (_resumeFileFields.some(f => f.el === fileEl)) return;
-      if (fileEl.offsetParent === null) return; // still unreachable — this click didn't reveal it
-      if (wasHidden.get(fileEl) === false) return; // already reachable before — not what this click revealed
+      if (wasHidden.has(fileEl)) {
+        // Pre-existing element (Jobvite-style): only counts if this click
+        // made it reachable — untouched-and-still-hidden, or
+        // already-reachable-before-this-click, are both unrelated to it.
+        if (fileEl.offsetParent === null) return;
+        if (wasHidden.get(fileEl) === false) return;
+      }
+      // else: brand new node this click mounted (Workable-style) — always
+      // counts, even if it's permanently hidden by design.
       const label = getFieldLabel(fileEl);
       // Still worth excluding an unambiguous cover-letter match — cheap
       // insurance against a combined widget revealing more than one field
@@ -5193,7 +5319,17 @@
     const parentLabel = input.closest('label');
     if (parentLabel) {
       const clone = parentLabel.cloneNode(true);
-      clone.querySelectorAll('input, textarea, select').forEach(el => el.remove());
+      // Also strip listbox/menu/dialog/tooltip content — confirmed needed
+      // on Workable's phone field, whose <label> wraps the ENTIRE
+      // intl-tel-input widget, country-code dropdown included: a
+      // role="listbox" with 200+ role="option" country names, none of it
+      // <input>/<textarea>/<select> so it survived the removal above and
+      // dominated the label text ("PhoneUnited Kingdom+44Canada+1Germany
+      // +49...", 200 countries long) — swamping the AI's actual question
+      // for this field into an unrecognizable wall of country names, so it
+      // silently never produced a phone value while every OTHER field on
+      // the same form (with a clean label) filled normally.
+      clone.querySelectorAll('input, textarea, select, [role="listbox"], [role="menu"], [role="dialog"], [role="tooltip"]').forEach(el => el.remove());
       const text = clone.textContent.trim();
       if (text) return text;
     }
@@ -6330,10 +6466,12 @@
    * "Apply With" widget, which repeats the exact same structure for its
    * Cover Letter section as it does for Resume (a second `jv-add-attachment`
    * button revealing its own hidden `<input id="file-input-1" type="file">`).
+   * Also confirmed needed on Workable ("Import cover letter from" — see
+   * findResumeAttachTrigger's matching fix for "import").
    * @returns {HTMLElement|null}
    */
   function findCoverLetterAttachTrigger() {
-    const actionRe = /^(select|add|attach|upload|choose|browse)\b/i;
+    const actionRe = /^(select|add|attach|upload|choose|browse|import)\b/i;
     for (const btn of document.querySelectorAll('button, a[role="button"], [role="button"]')) {
       if (btn.offsetParent === null || btn.disabled) continue;
       const text = (btn.innerText || btn.textContent || '').trim();
@@ -6346,15 +6484,20 @@
 
   /**
    * Cover-letter twin of revealAndCollectHiddenResumeInput() — see its doc
-   * comment for the full Jobvite-confirmed rationale: the real file input
-   * is in the DOM the whole time but unreachable until a "Select"-style
-   * button is clicked, and that button (never the file input or a <label
-   * for="..."> wrapping it) is the only thing this ever clicks, since
-   * clicking a real file input opens the browser's native OS file-picker
-   * dialog, which no script can drive or dismiss.
+   * comment for the full rationale, including the two different real
+   * patterns this must handle: a pre-existing-but-unreachable input
+   * (Jobvite, becomes offsetParent-reachable once clicked) and a brand
+   * new, permanently-hidden input mounted by a portal-based dropdown
+   * (Workable, `<input type="file" hidden>` behind a `<label>`, never
+   * becomes reachable at all — recognized instead by not having existed
+   * in the DOM before this click). Never clicks the file input or a
+   * <label for="..."> wrapping it either way, since clicking a real file
+   * input opens the browser's native OS file-picker dialog, which no
+   * script can drive or dismiss.
    * @async
    * @returns {Promise<boolean>} true if a cover-letter-shaped file input is
-   *   now reachable and was added to _coverLetterFileFields.
+   *   now available (reachable, or freshly mounted) and was added to
+   *   _coverLetterFileFields.
    */
   async function revealAndCollectHiddenCoverLetterInput() {
     const trigger = findCoverLetterAttachTrigger();
@@ -6370,8 +6513,10 @@
     let found = false;
     document.querySelectorAll('input[type="file"]').forEach(fileEl => {
       if (_coverLetterFileFields.some(f => f.el === fileEl)) return;
-      if (fileEl.offsetParent === null) return; // still unreachable — this click didn't reveal it
-      if (wasHidden.get(fileEl) === false) return; // already reachable before — not what this click revealed
+      if (wasHidden.has(fileEl)) {
+        if (fileEl.offsetParent === null) return;
+        if (wasHidden.get(fileEl) === false) return;
+      }
       const label = getFieldLabel(fileEl);
       // Mirrors revealAndCollectHiddenResumeInput's cheap-insurance-only
       // exclusion, in the other direction: a field just revealed by a
@@ -7369,14 +7514,53 @@
 
   let _lastUrl = normalizeUrl(window.location.href);
 
+  /**
+   * Extracts a long, near-unique job/application id (a UUID, or a
+   * comparably long hex run) from a URL's path, if one exists. Confirmed
+   * needed on Dice: the original posting page (/job-detail/<uuid>) and
+   * the post-submit success page reached after a REAL, manual Submit
+   * click (/job-applications/<uuid>/wizard/success) share the exact same
+   * uuid despite otherwise-unrelated path structure. That's the one
+   * stable signal available to tell "still the same application, now on
+   * a later page in its own flow" apart from "the user genuinely
+   * navigated to a different job posting" for a manual navigation like
+   * this — as opposed to Auto-Bid's own automated clicks, which are
+   * already covered by _autoBidContinuationActive/_autoBidAutofillRun
+   * below.
+   * @param {string} url
+   * @returns {string|null} The lowercased id, or null if none is found.
+   */
+  function extractJobIdFromUrl(url) {
+    try {
+      const path = new URL(url).pathname;
+      const match = path.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{20,}/i);
+      return match ? match[0].toLowerCase() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function handleSpaUrlChanged() {
     const currentUrl = normalizeUrl(window.location.href);
-    const isDifferentJob = currentUrl !== _lastUrl;
-    if (isDifferentJob) {
+    const urlChanged = currentUrl !== _lastUrl;
+    // A URL change alone doesn't necessarily mean a different JOB — see
+    // extractJobIdFromUrl's doc comment. Only treat it as a genuinely new
+    // posting when either side has no extractable id at all (most ATS
+    // career sites — this check simply doesn't apply there, same as
+    // before) or the two ids actually differ.
+    const sameUnderlyingJob = urlChanged && (() => {
+      const currentId = extractJobIdFromUrl(currentUrl);
+      const lastId = extractJobIdFromUrl(_lastUrl);
+      return !!currentId && currentId === lastId;
+    })();
+    const isDifferentJob = urlChanged && !sameUnderlyingJob;
+    if (urlChanged) {
       _lastUrl = currentUrl;
       // Bump the analyze generation so any in-flight analyzeJob() against
       // the previous URL becomes stale and bails before touching the UI (I3).
       _analyzeGen++;
+    }
+    if (isDifferentJob) {
       // Skip the state wipe/UI reset below while an Auto-Bid Apply-click
       // continuation is actively running (see _autoBidContinuationActive's
       // doc comment) — some ATS routers (confirmed on Dice) fire more than
