@@ -5388,8 +5388,23 @@
     // of a GRANDPARENT wrapper, not of the input directly. Capped at a
     // handful of levels so this can't wander up into wildly unrelated page
     // content (a section heading, the whole form) on a false miss.
+    //
+    // The walk-up (depth > 0) is restricted to text/file inputs — NOT
+    // checkboxes/radios, which already have their own dedicated labeling
+    // path (getRadioLabel) and are far more likely to be an arbitrary UI
+    // toggle unrelated to any application form. Confirmed live on Dice's
+    // job-detail page: a "Profile Visibility" switch
+    // (`<input type="checkbox" role="switch">`, no id/name/testid) sits 3
+    // div levels below an unrelated "Profile Visibility: Off" heading —
+    // the walk-up resolved that heading as its "label", making it pass
+    // detectFormFields()'s checkbox detection, which made the page look
+    // like it already had a form field and skipped the "Easy Apply" click
+    // entirely. The original depth-0-only check (an input's own direct
+    // sibling) predates this fix and stays safe for every type, since it
+    // never reaches unrelated content like this.
+    const maxDepth = (input.type === 'checkbox' || input.type === 'radio') ? 1 : 5;
     let node = input;
-    for (let depth = 0; depth < 5 && node; depth++) {
+    for (let depth = 0; depth < maxDepth && node; depth++) {
       const prevSibling = node.previousElementSibling;
       if (prevSibling) {
         const text = prevSibling.textContent.trim();

@@ -193,6 +193,34 @@ describe('getFieldLabel — walks up ancestors for the "label card" fallback (Ge
     expect(getFieldLabel(document.getElementById('a'))).toBe('City');
     expect(getFieldLabel(document.getElementById('b'))).toBe('State');
   });
+
+  it('does not walk up past depth 0 for a checkbox (the real Dice regression: an unrelated "Profile Visibility" toggle)', () => {
+    // Verbatim (trimmed) structure from Dice's actual job-detail page: a
+    // "Profile Visibility" switch with no id/name/aria-label of its own,
+    // sitting 3 div levels below an unrelated "Profile Visibility: Off"
+    // heading. The generalized ancestor walk (added for Gem's text/file
+    // fields) would otherwise resolve that heading as this checkbox's
+    // "label", making detectFormFields() treat the job-DETAIL page as
+    // already having a form field and skip clicking "Easy Apply"
+    // entirely — checkboxes/radios must stay depth-0-only.
+    document.body.innerHTML = `
+      <div class="flex flex-wrap items-start justify-start gap-2.5 self-stretch">
+        <div class="inline-flex shrink grow basis-0 flex-col items-center justify-start">
+          <div class="self-stretch"><h2>Profile Visibility: Off</h2></div>
+        </div>
+        <div class="ml-auto self-stretch">
+          <label class="group flex cursor-pointer items-baseline gap-2">
+            <span style="border:0;clip:rect(0 0 0 0);position:absolute;">
+              <input type="checkbox" role="switch">
+            </span>
+            <div class="switch-visual"></div>
+          </label>
+        </div>
+      </div>
+    `;
+    const toggle = document.querySelector('input[type="checkbox"]');
+    expect(getFieldLabel(toggle)).toBe('');
+  });
 });
 
 describe('getFieldLabel — strips a wrapping label\'s listbox content (Workable intl-tel-input)', () => {
