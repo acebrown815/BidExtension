@@ -56,12 +56,13 @@ const FN_SRC = SRC.slice(START, END);
  *   flag flipping DURING switchSlot's own internal await, after its entry
  *   check already passed.
  */
-function buildSwitchSlot({ continuationActive, activeResumeId, currentAnalysis, onStorageGet }) {
+function buildSwitchSlot({ continuationActive, activeResumeId, currentAnalysis, onStorageGet, tailoredSlotActive = false }) {
   const factory = new Function( // eslint-disable-line no-new-func
-    'startingAnalysis', 'continuationActive', 'activeResumeId', 'onStorageGet',
+    'startingAnalysis', 'continuationActive', 'activeResumeId', 'onStorageGet', 'tailoredSlotActive',
     `
     let _autoBidContinuationActive = continuationActive;
     let _activeResumeId = activeResumeId;
+    let _tailoredSlotActive = tailoredSlotActive;
     let _resumes = [];
     let currentAnalysis = startingAnalysis;
     const shadowRoot = { getElementById: () => null };
@@ -86,11 +87,11 @@ function buildSwitchSlot({ continuationActive, activeResumeId, currentAnalysis, 
     ${FN_SRC}
     return {
       switchSlot,
-      getState: () => ({ currentAnalysis, _activeResumeId }),
+      getState: () => ({ currentAnalysis, _activeResumeId, _tailoredSlotActive }),
     };
     `,
   );
-  return factory(currentAnalysis, continuationActive, activeResumeId, onStorageGet);
+  return factory(currentAnalysis, continuationActive, activeResumeId, onStorageGet, tailoredSlotActive);
 }
 
 describe('switchSlot — Auto-Bid continuation guard (the actual fix)', () => {
@@ -146,5 +147,58 @@ describe('switchSlot — Auto-Bid continuation guard (the actual fix)', () => {
     const state = getState();
     expect(state.currentAnalysis).toBeNull();
     expect(state._activeResumeId).toBe('r2');
+  });
+
+  // The ephemeral tailored-resume pill (showTailoredResumeSlot) never
+  // changes _activeResumeId, so clicking back on the pill for the resume
+  // that's ALREADY _activeResumeId — the normal way to leave the tailored
+  // view — would otherwise hit the "id === _activeResumeId" early return
+  // and never actually restore the real resume's own analysis.
+  it('proceeds (rather than no-op) when id matches _activeResumeId but the tailored slot was the one being shown', async () => {
+    const { switchSlot, getState } = buildSwitchSlot({
+      continuationActive: false,
+      activeResumeId: 'r1',
+      currentAnalysis: { matchScore: 78 }, // whatever was showing for the tailored slot
+      tailoredSlotActive: true,
+    });
+
+    await switchSlot('r1', { silent: true });
+
+    const state = getState();
+    // No cached analysis was stubbed for this resume+URL, so switchSlot's
+    // normal "nothing cached" path resets to a clean state — the important
+    // assertion is that it actually RAN (proving no early return) and
+    // cleared the tailored flag, not the specific reset shape.
+    expect(state.currentAnalysis).toBeNull();
+    expect(state._tailoredSlotActive).toBe(false);
+  });
+
+  it('still no-ops for the same id when the tailored slot was NOT active (no regression)', async () => {
+    const restoredAnalysis = { matchScore: 78 };
+    const { switchSlot, getState } = buildSwitchSlot({
+      continuationActive: false,
+      activeResumeId: 'r1',
+      currentAnalysis: restoredAnalysis,
+      tailoredSlotActive: false,
+    });
+
+    await switchSlot('r1', { silent: true });
+
+    const state = getState();
+    expect(state.currentAnalysis).toBe(restoredAnalysis); // untouched
+    expect(state._activeResumeId).toBe('r1');
+  });
+
+  it('clears _tailoredSlotActive when switching to a different real resume too', async () => {
+    const { switchSlot, getState } = buildSwitchSlot({
+      continuationActive: false,
+      activeResumeId: 'r1',
+      currentAnalysis: { matchScore: 78 },
+      tailoredSlotActive: true,
+    });
+
+    await switchSlot('r2', { silent: true });
+
+    expect(getState()._tailoredSlotActive).toBe(false);
   });
 });

@@ -78,9 +78,15 @@ import { normalizeUrlForCache } from './lib/urlKey.mjs';
 // The duplicate-bullet bug (I7) is fixed inside replaceBulletsInDocXml.
 import {
   extractParagraphText,
+  replaceParagraphText,
   normalizeForMatch,
   replaceBulletsInDocXml,
+  replaceSummaryInDocXml,
+  replaceLanguagesInDocXml,
+  looksLikeProseSummary,
+  LANGUAGES_HEADER_RE,
 } from './lib/docxBullets.mjs';
+import { buildTailoredProfileForRescoring } from './lib/tailoredRescore.mjs';
 
 // Cover-letter file generation — pure builders + filename sanitizer.
 import { buildCoverLetterFilename } from './lib/coverLetterFilename.mjs';
@@ -964,7 +970,8 @@ async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta, resu
 }
 
 /**
- * Rewrites the user's resume experience bullets to better target a specific job.
+ * Rewrites the user's resume experience bullets, professional summary, and
+ * programming-languages line to better target a specific job.
  *
  * Before calling the AI, this function validates that the profile contains at
  * least one experience entry with a non-trivial description.  Without existing
@@ -981,8 +988,7 @@ async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta, resu
  *   used to guide which bullets to emphasise or rewrite.
  * @throws {Error} If no API key is configured, no profile exists, or the profile
  *   has no experience descriptions to rewrite.
- * @returns {Promise<Object>} Structured object containing rewritten bullet arrays
- *   keyed by experience entry.
+ * @returns {Promise<{summary: string, languages: string[], bullets: Array<{job, original, improved}>}>}
  */
 async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
   const settings = await getSettings();
@@ -1023,15 +1029,26 @@ async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
 /**
  * Generates a tailored DOCX resume by editing the original uploaded DOCX.
  * Replaces experience bullets with rewritten versions and appends missing
- * skills. Returns the modified DOCX as base64.
+ * skills. Also re-scores the tailored content (summary + languages +
+ * bullets) against the job description, so the caller can show a real
+ * "Match Score" for the ephemeral tailored resume the same way any saved
+ * resume's is shown — without ever persisting this as a saved resume.
+ * Returns the modified DOCX as base64.
  *
  * @async
  * @param {Array}    rewrittenBullets - Array of {original, improved} objects.
  * @param {string[]} missingSkills    - Skills identified as gaps.
  * @param {Array}    [customBullets]  - Array of {text, targetSection, targetIdx} for new bullets.
- * @returns {Promise<{base64: string, replacedCount: number, totalBullets: number, insertedCount: number}>}
+ * @param {string}   [resumeId]
+ * @param {string}   [newSummary]     - AI-rewritten summary from REWRITE_BULLETS, if the user kept it.
+ * @param {string[]} [languages]      - AI-revised programming-languages list from REWRITE_BULLETS.
+ * @param {string}   [jobDescription] - Raw JD text, used only for re-scoring (not for DOCX edits).
+ * @param {string}   [jobTitle]       - Job title, used only for re-scoring.
+ * @param {string}   [company]        - Company name, used only for re-scoring.
+ * @returns {Promise<{base64: string, replacedCount: number, totalBullets: number, insertedCount: number,
+ *   summaryUpdated: boolean, languagesUpdated: boolean, newScore: number|null, newAnalysis: Object|null}>}
  */
-async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets, resumeId) {
+async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets, resumeId, newSummary, languages, jobDescription, jobTitle, company) {
   const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
@@ -1060,14 +1077,34 @@ async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, cus
   docXml = bulletResult.docXml;
   let replacedCount = bulletResult.replacedCount;
 
-  // Add missing skills to the skills paragraph by appending to the last text run
-  // (to preserve formatting — the first run is often bold like "Skills:")
+  // Replace the summary — reject anything that looks like a keyword dump
+  // rather than prose (see looksLikeProseSummary's doc comment) rather than
+  // writing a duplicate skills list into the resume's Summary section.
+  const trimmedSummary = typeof newSummary === 'string' ? newSummary.trim() : '';
+  const summaryResult = looksLikeProseSummary(trimmedSummary)
+    ? replaceSummaryInDocXml(docXml, profile.summary, trimmedSummary)
+    : { docXml, summaryUpdated: false };
+  docXml = summaryResult.docXml;
+  const summaryUpdated = summaryResult.summaryUpdated;
+
+  // Replace the "Languages:" line outright with the per-job revised list —
+  // a full replace, not an append, since the point is to drop languages
+  // this job has no use for as well as add the one(s) it requires.
+  const languagesResult = replaceLanguagesInDocXml(docXml, languages);
+  docXml = languagesResult.docXml;
+  const languagesUpdated = languagesResult.languagesUpdated;
+
+  // Add missing skills to the (non-languages) skills paragraph by appending
+  // to the last text run (to preserve formatting — the first run is often
+  // bold like "Skills:"). Skips a paragraph already handled above by
+  // replaceLanguagesInDocXml so the languages line isn't touched twice.
   if (missingSkills && missingSkills.length > 0 && profile.skills) {
     const paragraphRegex = /<w:p[ >][\s\S]*?<\/w:p>/g;
     let match;
     while ((match = paragraphRegex.exec(docXml)) !== null) {
       const paraXml = match[0];
       const paraText = extractParagraphText(paraXml);
+      if (languagesUpdated && LANGUAGES_HEADER_RE.test(paraText.trim())) continue;
       const skillsFound = profile.skills.filter(s =>
         paraText.toLowerCase().includes(s.toLowerCase())
       );
@@ -1218,11 +1255,39 @@ async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, cus
   zip.file('word/document.xml', docXml);
   const modifiedDocx = await zip.generateAsync({ type: 'base64' });
 
+  // Re-score the tailored content against the job description — a bonus on
+  // top of the download, so a failure here (missing JD, no API key, AI
+  // error) shouldn't block returning the already-generated resume.
+  let newScore = null;
+  let newAnalysis = null;
+  if (jobDescription) {
+    try {
+      const settings = await getSettings();
+      if (settings.apiKey) {
+        const tailoredProfile = buildTailoredProfileForRescoring(profile, trimmedSummary, languages, rewrittenBullets);
+        const analysisMessages = buildJobAnalysisPrompt(tailoredProfile, jobDescription, jobTitle, company);
+        const analysisResult = await callAI(settings.provider, settings.apiKey, analysisMessages, {
+          model: settings.model,
+          temperature: 0
+        });
+        newAnalysis = parseJSONResponse(analysisResult);
+        newScore = typeof newAnalysis.matchScore === 'number' ? newAnalysis.matchScore : null;
+      }
+    } catch (_) {
+      newScore = null;
+      newAnalysis = null;
+    }
+  }
+
   return {
     base64: modifiedDocx,
     replacedCount,
     totalBullets: rewrittenBullets.length,
     insertedCount,
+    summaryUpdated,
+    languagesUpdated,
+    newScore,
+    newAnalysis,
     originalFileName: profile.resumeFileName || 'resume'
   };
 }
@@ -1494,7 +1559,7 @@ const handlers = {
     return result.trim();
   },
 
-  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets, msg.resumeId),
+  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets, msg.resumeId, msg.newSummary, msg.languages, msg.jobDescription, msg.jobTitle, msg.company),
 
   'GENERATE_CUSTOM_BULLET': async (msg) => {
     const settings = await getSettings();

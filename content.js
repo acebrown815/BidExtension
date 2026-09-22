@@ -136,6 +136,23 @@
   // saved resume in one pass — switchSlot() then just looks up the
   // newly-active id instead of re-ranking.
   let _resumeScores = {};
+  // The most recent "Generate Tailored Resume" result for the CURRENT job,
+  // held in memory only — never written to chrome.storage.local, so it
+  // never persists across a reload and never shows up on another tab.
+  // Rendered as one extra pill at the end of the switcher (renderSlotSwitcher).
+  // Clicking it shows its analysis (Match Score, matching/missing skills,
+  // recommendations, insights) the same way any other resume's does — it
+  // does NOT change _activeResumeId, since this resume was never saved and
+  // background.js has no id to look it up by for AutoFill/downloads.
+  // Cleared whenever the job changes (handleSpaUrlChanged) since a
+  // tailored resume for a different posting has nothing to do with the
+  // one now on screen.
+  let _tailoredResumeSlot = null; // { name, base64, downloadName, newScore, newAnalysis, jobMeta } | null
+  // Whether the panel's main analysis view is currently showing
+  // _tailoredResumeSlot's results rather than the real active resume's —
+  // toggled by showTailoredResumeSlot() / switchSlot() so exactly one pill
+  // (a real resume or the tailored one) ever looks "active" at a time.
+  let _tailoredSlotActive = false;
 
   // ─── Persistent analysis cache (chrome.storage.local) ──────────
   // Caching analysis results prevents redundant API calls when the user
@@ -1144,6 +1161,23 @@
         text-decoration: line-through;
         opacity: 0.45;
       }
+      /* The JD's single primary/mandatory language's own chip — visually
+         distinct from the other, secondary missing-skill chips. */
+      .jm-skill-chip.jm-skill-chip-primary {
+        border-color: #f0b429;
+        background: rgba(240,180,41,0.12);
+        color: #b9840a;
+        font-weight: 700;
+      }
+      /* Highlights the JD's primary language wherever it appears in a
+         bullet's before/after text — see highlightPrimaryLanguage(). */
+      mark.jm-primary-lang {
+        background: rgba(240,180,41,0.28);
+        color: inherit;
+        padding: 0 2px;
+        border-radius: 3px;
+        font-weight: 700;
+      }
       /* Add bullet area */
       .jm-add-bullet-area {
         margin-top: 14px;
@@ -1378,6 +1412,14 @@
         border-color: #f0b429;
         color: #b9840a;
       }
+      /* The in-memory "Generate Tailored Resume" result — a dashed border
+         signals it's ephemeral (this tab/job only, never saved or synced
+         like the other pills) — clicking it shows its Match Score. */
+      .jm-switch-pill.jm-tailored-pill {
+        border-style: dashed;
+        border-color: var(--jm-primary);
+        color: var(--jm-primary);
+      }
       /* Local (no-AI) keyword-match score badge for the active resume.
          Deliberately a small pill (not the big AI score circle) so it
          never reads as the AI-generated match score. */
@@ -1598,6 +1640,14 @@
         <!-- Bullet rewriter output -->
         <div class="jm-section" id="jmBulletSection" style="display:none">
           <h3>Improved Resume Bullets</h3>
+          <div id="jmSummaryPreviewWrap" style="display:none;margin-bottom:14px;">
+            <div style="font-size:11px;font-weight:600;color:var(--jm-text-secondary);margin-bottom:4px;">Improved Summary</div>
+            <div id="jmSummaryPreview" class="jm-bullet-after" contenteditable="true" spellcheck="false" title="Click to edit — used when generating tailored resume"></div>
+          </div>
+          <div id="jmLanguagesPreviewWrap" style="display:none;margin-bottom:14px;">
+            <div style="font-size:11px;font-weight:600;color:var(--jm-text-secondary);margin-bottom:4px;">Languages for this job</div>
+            <div id="jmLanguagesPreview" class="jm-bullet-after" contenteditable="true" spellcheck="false" title="Comma-separated — click to edit, used when generating tailored resume"></div>
+          </div>
           <div id="jmBulletList"></div>
           <div class="jm-add-bullet-area" id="jmAddBulletArea" style="display:none;">
             <button class="jm-add-bullet-trigger" id="jmAddBulletTrigger">+ Add Custom Bullet</button>
@@ -2144,7 +2194,9 @@
     const topMatchIds = getTopMatchIds();
 
     _resumes.forEach(r => {
-      const isActive = r.id === _activeResumeId;
+      // While the tailored slot's results are being shown, no REAL resume
+      // pill is "active" — only the tailored one is (see _tailoredSlotActive).
+      const isActive = r.id === _activeResumeId && !_tailoredSlotActive;
       // Skip the top-match treatment for the active pill — its own
       // .active fill already marks it as selected, and layering the gold
       // top-match border on top of that combination looked bad.
@@ -2161,6 +2213,22 @@
       });
       container.appendChild(btn);
     });
+
+    // The ephemeral "Generate Tailored Resume" result, if any, always goes
+    // last. Clicking it shows its analysis in the main panel, the same way
+    // any other resume's does — see showTailoredResumeSlot(). It never
+    // becomes _activeResumeId (it was never saved, so background.js has no
+    // id to look it up by for AutoFill/downloads).
+    if (_tailoredResumeSlot) {
+      const scoreSuffix = typeof _tailoredResumeSlot.newScore === 'number'
+        ? ` — ${_tailoredResumeSlot.newScore}% match` : '';
+      const btn = document.createElement('button');
+      btn.className = 'jm-switch-pill jm-tailored-pill' + (_tailoredSlotActive ? ' active' : '');
+      btn.textContent = '✨ ' + _tailoredResumeSlot.name;
+      btn.title = `View results${scoreSuffix} — tailored for this job, only in this tab, not saved`;
+      btn.addEventListener('click', () => showTailoredResumeSlot());
+      container.appendChild(btn);
+    }
     updateLocalScoreChip();
   }
 
@@ -2225,6 +2293,40 @@
   }
 
   /**
+   * Shows the ephemeral tailored resume's results in the main panel — Match
+   * Score, matching/missing skills, recommendations, insights, ATS
+   * keywords — the same way any saved resume's analysis is shown (mirrors
+   * renderCachedAnalysis). Does NOT change _activeResumeId: this resume was
+   * never saved, so AutoFill/downloads for "the active resume" continue to
+   * mean the real one underneath. currentAnalysis is temporarily pointed at
+   * the tailored result so Cover Letter / Mark as Applied act on it while
+   * it's the one on screen; switching back to any real resume pill
+   * (switchSlot) restores currentAnalysis to that resume's own state.
+   */
+  function showTailoredResumeSlot() {
+    const slot = _tailoredResumeSlot;
+    if (!slot || !slot.newAnalysis) {
+      setStatus('No results to show for this tailored resume yet.', 'error');
+      setTimeout(clearStatus, 2500);
+      return;
+    }
+    const { title, company, location, salary, jobId, language, url } = slot.jobMeta || {};
+    currentAnalysis = { ...slot.newAnalysis, title, company, location, salary, jobId, language, url, resumeName: slot.name };
+    showJobMeta(title, company, location, salary, jobId, language);
+    renderAnalysis(slot.newAnalysis);
+    shadowRoot.getElementById('jmMarkApplied').style.display = 'flex';
+    updateMarkAppliedGating(currentAnalysis.matchScore);
+    shadowRoot.getElementById('jmCoverLetterBtn').style.display = 'flex';
+    shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
+    shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
+
+    _tailoredSlotActive = true;
+    renderSlotSwitcher();
+    setStatus(`Showing "${slot.name}" — already downloaded as ${slot.downloadName}. Regenerate to download it again.`, 'info');
+    setTimeout(clearStatus, 4000);
+  }
+
+  /**
    * Switches the active resume, updates chrome.storage.local, and either
    * shows that resume's own cached analysis for the job currently on
    * screen (if one exists) or resets to a clean "Analyze Job" state.
@@ -2248,6 +2350,12 @@
    */
   async function switchSlot(id, opts) {
     const silent = !!(opts && opts.silent);
+    // If the tailored slot's results are currently being shown, clicking
+    // ANY resume pill — including the one _activeResumeId already points
+    // at, which would otherwise short-circuit below — must restore that
+    // resume's own real analysis instead of leaving the tailored view up.
+    const wasShowingTailored = _tailoredSlotActive;
+    _tailoredSlotActive = false;
     // Never switch resumes (or wipe currentAnalysis, below) while an
     // Auto-Bid Apply-click continuation is active — see
     // _autoBidContinuationActive's doc comment. Guarding ensureBestResumeSelected()
@@ -2264,7 +2372,7 @@
     // even after ensureBestResumeSelected's own guard was correctly
     // bailing out.
     if (_autoBidContinuationActive) return;
-    if (id === _activeResumeId) return;
+    if (id === _activeResumeId && !wasShowingTailored) return;
     try {
       const result = await chrome.storage.local.get('resumes');
       // Re-check after the await above: this function can be CALLED before
@@ -4959,8 +5067,18 @@
    * downloadActiveResumeFile() (the manual "⬇ Resume file" button), so
    * both always produce the exact same bytes and the exact same name.
    *
-   * Filename is always the generated "Resume_<CandidateName>.<ext>" form
-   * (e.g. "Resume_Jane-Doe.pdf") rather than the originally-uploaded
+   * While the ephemeral tailored resume's results are the ones on screen
+   * (_tailoredSlotActive — via the switcher pill, or Auto-Bid's own
+   * auto-tailor path in autoAnalyzeAndMaybeAutofill), it is treated as
+   * "the resume in use" here too: both AutoFill's real attachment and the
+   * download button hand back the tailored bytes instead of the real
+   * active resume's untailored original. It deliberately never becomes
+   * _activeResumeId (there's no id to give it — it was never saved), so
+   * without this check both paths would silently fall back to the
+   * original.
+   *
+   * Otherwise, filename is the generated "Resume_<CandidateName>.<ext>"
+   * form (e.g. "Resume_Jane-Doe.pdf") rather than the originally-uploaded
    * filename — falls back to a bare "Resume.<ext>" when no candidate name
    * is available yet. Format always matches whatever the resume was
    * actually uploaded as (PDF stays PDF, DOCX stays DOCX) — this never
@@ -4976,6 +5094,18 @@
    *   null when there's no resume file saved yet, or it couldn't be decoded.
    */
   async function buildActiveResumeFile() {
+    if (_tailoredSlotActive && _tailoredResumeSlot) {
+      try {
+        const mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        const blob = base64ToBlob(_tailoredResumeSlot.base64, mime);
+        const file = new File([blob], _tailoredResumeSlot.downloadName, { type: mime });
+        return { file, fileName: _tailoredResumeSlot.downloadName, mime, ext: 'docx' };
+      } catch (err) {
+        console.warn('[JobMatch AI] Could not build tailored resume File object, falling back to the original:', err.message);
+        // fall through to the real active resume below
+      }
+    }
+
     let raw;
     try {
       raw = await sendMessage({ type: 'GET_RAW_RESUME', resumeId: _activeResumeId });
@@ -5210,6 +5340,9 @@
    */
   async function downloadActiveResumeFile() {
     try {
+      // buildActiveResumeFile() itself checks _tailoredSlotActive and
+      // hands back the tailored resume's bytes when that's the one on
+      // screen — see its doc comment.
       const built = await buildActiveResumeFile();
       if (!built) {
         setStatus('No resume file saved for the active resume.', 'error');
@@ -6659,12 +6792,42 @@
     try {
       if (!currentAnalysis) throw new Error('Analyze the job first.');
       const jd = await getJobDescriptionForAnalysis();
-      const bullets = await sendMessage({
+      const response = await sendMessage({
         type: 'REWRITE_BULLETS',
         jobDescription: jd,
         missingSkills: currentAnalysis.missingSkills || [],
         resumeId: _activeResumeId
       });
+      const bullets = Array.isArray(response) ? response : (response && response.bullets) || [];
+
+      // Summary preview — reviewable/editable like a bullet, applied when
+      // Generate Tailored Resume runs.
+      const summaryWrap = shadowRoot.getElementById('jmSummaryPreviewWrap');
+      const summaryPreview = shadowRoot.getElementById('jmSummaryPreview');
+      if (response && typeof response.summary === 'string' && response.summary.trim()) {
+        summaryPreview.textContent = response.summary.trim();
+        summaryWrap.style.display = 'block';
+      } else {
+        summaryPreview.textContent = '';
+        summaryWrap.style.display = 'none';
+      }
+
+      // Languages preview — the AI's per-job revised programming-languages
+      // list (added JD-required languages, dropped irrelevant ones).
+      const languagesWrap = shadowRoot.getElementById('jmLanguagesPreviewWrap');
+      const languagesPreview = shadowRoot.getElementById('jmLanguagesPreview');
+      if (response && Array.isArray(response.languages) && response.languages.length > 0) {
+        languagesPreview.textContent = response.languages.join(', ');
+        languagesWrap.style.display = 'block';
+      } else {
+        languagesPreview.textContent = '';
+        languagesWrap.style.display = 'none';
+      }
+
+      // The JD's single primary/mandatory language (see buildBulletRewritePrompt's
+      // Step 1) — highlighted in the bullet text below so it visually stands
+      // out over every other language/skill mentioned.
+      const primaryLanguage = (response && typeof response.primaryLanguage === 'string') ? response.primaryLanguage.trim() : '';
 
       if (!Array.isArray(bullets) || bullets.length === 0) {
         list.innerHTML = '<p style="font-size:12px;color:var(--jm-text-secondary);">No bullet improvements generated. Your resume experience section may be empty or the AI could not suggest improvements.</p>';
@@ -6672,11 +6835,13 @@
         bullets.forEach(b => {
           const item = document.createElement('div');
           item.className = 'jm-bullet-item';
-          // Build skill chips HTML from missing skills
+          // Build skill chips HTML from missing skills — the primary
+          // language's own chip (if it's among them) gets a distinct style.
           const missingSkills = currentAnalysis.missingSkills || [];
-          const skillChipsHtml = missingSkills.map(s =>
-            `<span class="jm-skill-chip" data-skill="${escapeHTML(s)}">${escapeHTML(s)}</span>`
-          ).join('');
+          const skillChipsHtml = missingSkills.map(s => {
+            const isPrimary = primaryLanguage && s.toLowerCase() === primaryLanguage.toLowerCase();
+            return `<span class="jm-skill-chip${isPrimary ? ' jm-skill-chip-primary' : ''}" data-skill="${escapeHTML(s)}"${isPrimary ? ' title="Primary language for this job"' : ''}>${escapeHTML(s)}</span>`;
+          }).join('');
 
           item.innerHTML = `
             <div class="jm-bullet-header">
@@ -6688,8 +6853,8 @@
               <div class="jm-bullet-skills-label">Missing skills to include (click to exclude)</div>
               <div class="jm-bullet-skills-list">${skillChipsHtml}</div>
             </div>
-            <div class="jm-bullet-before">${escapeHTML(b.original || '')}</div>
-            <div class="jm-bullet-after" contenteditable="true" spellcheck="false" title="Click to edit — changes are used when regenerating or generating tailored resume">${escapeHTML(b.improved || '')}</div>
+            <div class="jm-bullet-before">${highlightPrimaryLanguage(escapeHTML(b.original || ''), primaryLanguage)}</div>
+            <div class="jm-bullet-after" contenteditable="true" spellcheck="false" title="Click to edit — changes are used when regenerating or generating tailored resume">${highlightPrimaryLanguage(escapeHTML(b.improved || ''), primaryLanguage)}</div>
             <div class="jm-bullet-actions">
               <button class="jm-btn jm-btn-secondary jm-bullet-copy">Copy</button>
               <button class="jm-bullet-refresh" title="Regenerate this bullet">&#8635;</button>
@@ -6753,7 +6918,7 @@
                 missingSkills: bulletSkills,
                 excludedSkills
               });
-              item.querySelector('.jm-bullet-after').textContent = newBullet;
+              item.querySelector('.jm-bullet-after').innerHTML = highlightPrimaryLanguage(escapeHTML(newBullet), primaryLanguage);
             } catch (err) {
               item.querySelector('.jm-bullet-after').textContent = 'Error: ' + err.message;
             } finally {
@@ -6825,20 +6990,35 @@
         }
       });
 
-      if (rewrittenBullets.length === 0 && customBullets.length === 0) {
+      // Summary/languages previews — reviewable/editable text set by
+      // rewriteBullets(), read live here so any manual edits are captured.
+      const newSummary = (shadowRoot.getElementById('jmSummaryPreview')?.textContent || '').trim();
+      const languagesText = (shadowRoot.getElementById('jmLanguagesPreview')?.textContent || '').trim();
+      const languages = languagesText ? languagesText.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+      if (rewrittenBullets.length === 0 && customBullets.length === 0 && !newSummary && languages.length === 0) {
         throw new Error('No bullets selected. Click "Improve Resume Bullets" first and check the ones you want to include.');
       }
 
       status.className = 'jm-resume-status-card';
       status.innerHTML = '<span style="color:var(--jm-text-secondary);font-size:12px;">Editing your resume...</span>';
 
-      // Send to background for DOCX editing
+      const jd = await getJobDescriptionForAnalysis();
+
+      // Send to background for DOCX editing. jobDescription/jobTitle/company
+      // are used only for re-scoring the tailored content (see
+      // handleGenerateTailoredResume) — not for the DOCX edits themselves.
       const result = await sendMessage({
         type: 'GENERATE_TAILORED_RESUME',
         rewrittenBullets,
         customBullets,
         missingSkills: currentAnalysis.missingSkills || [],
-        resumeId: _activeResumeId
+        resumeId: _activeResumeId,
+        newSummary,
+        languages,
+        jobDescription: jd,
+        jobTitle: currentAnalysis.title || '',
+        company: currentAnalysis.company || ''
       });
 
       // Build filename: {originalName}_{company or autoId}.docx
@@ -6870,6 +7050,22 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
+      // Keep it available as an extra pill at the end of the resume
+      // switcher so the user can view its Match Score without regenerating
+      // — in-memory only, never persisted (see _tailoredResumeSlot).
+      const sourceName = (_resumes.find(r => r.id === _activeResumeId) || {}).name || 'Resume';
+      const { title, company: jobCompany, location, salary, jobId, language, url: jobUrl } = currentAnalysis;
+      _tailoredResumeSlot = {
+        name: `${sourceName} — Tailored`,
+        base64: result.base64,
+        downloadName,
+        newScore: typeof result.newScore === 'number' ? result.newScore : null,
+        newAnalysis: result.newAnalysis || null,
+        jobMeta: { title, company: jobCompany, location, salary, jobId, language, url: jobUrl },
+      };
+      _tailoredSlotActive = false;
+      renderSlotSwitcher();
+
       const totalSelected = rewrittenBullets.length + customBullets.length;
       const totalAll = shadowRoot.querySelectorAll('.jm-bullet-item').length;
       const skipped = totalAll > totalSelected ? totalAll - totalSelected : 0;
@@ -6877,15 +7073,29 @@
       status.className = 'jm-resume-status-card success';
       status.style.color = '';
 
+      const oldScore = typeof currentAnalysis.matchScore === 'number' ? currentAnalysis.matchScore : null;
+      const newScore = _tailoredResumeSlot.newScore;
+      let scoreHtml = '';
+      if (newScore !== null) {
+        const improved = oldScore !== null && newScore > oldScore;
+        const scoreLine = oldScore !== null
+          ? `<strong>${oldScore}%</strong> &rarr; <strong${improved ? ' style="color:#16a34a;"' : ''}>${newScore}%</strong>`
+          : `<strong>${newScore}%</strong>`;
+        scoreHtml = `<div class="jm-resume-stat-row"><span>Estimated match with this tailored resume: ${scoreLine} &mdash; see it in the resume switcher above</span></div>`;
+      }
+
       let html = `
         <div class="jm-resume-stat-row">
           <span style="font-size:16px;">&#10003;</span>
           <span><strong>Resume downloaded</strong> as <strong>${escapeHTML(downloadName)}</strong></span>
         </div>
+        ${scoreHtml}
         <div class="jm-resume-stat-row" style="color:var(--jm-text-secondary);font-size:12px;">
           <span>Replaced <strong>${result.replacedCount}</strong> of <strong>${result.totalBullets}</strong> bullets</span>
           ${result.insertedCount > 0 ? `<span>&middot; Inserted <strong>${result.insertedCount}</strong> new</span>` : ''}
           ${skipped > 0 ? `<span>&middot; <strong>${skipped}</strong> excluded</span>` : ''}
+          ${result.summaryUpdated ? `<span>&middot; Updated summary</span>` : ''}
+          ${result.languagesUpdated ? `<span>&middot; Updated languages</span>` : ''}
         </div>`;
 
       if (result.replacedCount < result.totalBullets) {
@@ -7323,11 +7533,39 @@
 
   /**
    * Auto-Bid's fully-automated analyze step: waits for the JD to render,
-   * runs the normal Analyze Job flow, and — only if that produced a strong
-   * match — also runs AutoFill automatically (clicking through an "Apply
-   * Now" link first if needed — see autoClickApplyThenAutofillIfNeeded).
-   * Unlike a manual AutoFill click, this also clicks through a multi-step
-   * wizard's "Next"-style controls between steps — see
+   * runs the normal Analyze Job flow (which already compares up to 3
+   * locally-top-scoring resumes and picks whichever actually analyzes
+   * best — see analyzeJob's own doc comment), and then either:
+   *   - if the best resume produced a strong match, runs AutoFill
+   *     automatically (clicking through an "Apply Now" link first if
+   *     needed — see autoClickApplyThenAutofillIfNeeded); or
+   *   - if even the best of those resumes is still below the bar,
+   *     automatically runs the same "Improve Resume Bullets" then
+   *     "Generate Tailored Resume" flow a user would trigger manually
+   *     (skipping the manual review step, since Auto-Bid runs
+   *     unattended), then re-checks the TAILORED resume's own re-scored
+   *     match against the same bar. If tailoring pushed it over, this
+   *     marks the tailored resume as the one in view (_tailoredSlotActive)
+   *     and continues using it for the rest of this application —
+   *     buildActiveResumeFile() (AutoFill's actual resume attachment)
+   *     checks that flag and hands back the tailored bytes instead of the
+   *     real active resume's untailored original. If tailoring still
+   *     doesn't clear the bar, this stops there (same as the plain
+   *     "score too low, do nothing" behavior) rather than auto-applying
+   *     with a resume that still doesn't genuinely match.
+   *
+   * rewriteBullets() and generateTailoredResume() both catch their own
+   * errors internally and render them into the panel instead of throwing
+   * (the right behavior for a manual click, where the user sees the
+   * message right there) — so success after each one is verified by
+   * checking what it actually produced (bullet count; whether
+   * _tailoredResumeSlot actually changed) rather than by wrapping them in
+   * a try/catch, which would never fire. A failure at either step is
+   * logged with the panel's own error text so it's diagnosable instead of
+   * silently doing nothing.
+   *
+   * Unlike a manual AutoFill click, the autofill path also clicks through a
+   * multi-step wizard's "Next"-style controls between steps — see
    * _autoBidAutofillRun's doc comment for why that's Auto-Bid-only. This
    * never submits anything either way; AutoFill only fills each step's
    * fields (and advances to the next one, under Auto-Bid), leaving the
@@ -7352,7 +7590,37 @@
     const score = currentAnalysis && typeof currentAnalysis.matchScore === 'number' ? currentAnalysis.matchScore : null;
     if (score !== null && score > MIN_SCORE_TO_APPLY) {
       try { await autoClickApplyThenAutofillIfNeeded(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded threw:', e && e.message); }
+      return;
     }
+    if (score === null) return;
+
+    // rewriteBullets() and generateTailoredResume() both catch their own
+    // errors internally and display them in the panel instead of
+    // throwing (that's correct for a manual click — the user sees the
+    // message right there) — which means a try/catch around them here
+    // would never actually fire. Success has to be verified by checking
+    // what each one actually produced.
+    await rewriteBullets();
+    const bulletCount = shadowRoot.querySelectorAll('.jm-bullet-item').length;
+    if (bulletCount === 0) {
+      const reason = (shadowRoot.getElementById('jmBulletList')?.textContent || '').trim() || 'no bullets generated';
+      console.warn('[JobMatch AI][Auto-Bid] auto-tailor: Improve Resume Bullets produced nothing —', reason);
+      return;
+    }
+
+    const slotBeforeGenerate = _tailoredResumeSlot;
+    await generateTailoredResume();
+    if (_tailoredResumeSlot === slotBeforeGenerate) {
+      const reason = (shadowRoot.getElementById('jmTailoredResumeStatus')?.textContent || '').trim() || 'unknown error';
+      console.warn('[JobMatch AI][Auto-Bid] auto-tailor: Generate Tailored Resume failed —', reason);
+      return;
+    }
+
+    const tailoredScore = typeof _tailoredResumeSlot.newScore === 'number' ? _tailoredResumeSlot.newScore : null;
+    if (tailoredScore === null || tailoredScore <= MIN_SCORE_TO_APPLY) return;
+    _tailoredSlotActive = true;
+    renderSlotSwitcher();
+    try { await autoClickApplyThenAutofillIfNeeded(); } catch (e) { console.warn('[JobMatch AI][Auto-Bid] autoClickApplyThenAutofillIfNeeded threw:', e && e.message); }
   }
 
   /**
@@ -7478,6 +7746,29 @@
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  /**
+   * Wraps whole-word, case-insensitive occurrences of `term` in `escapedHtml`
+   * with a highlight <mark> so the JD's primary language visually stands out
+   * in the Improved Resume Bullets list. `escapedHtml` must already be
+   * HTML-escaped (e.g. via escapeHTML) — this only adds <mark> tags around
+   * matches, it doesn't escape anything itself.
+   * @param {string} escapedHtml
+   * @param {string} term - The primary language to highlight, or falsy to skip.
+   * @returns {string}
+   */
+  function highlightPrimaryLanguage(escapedHtml, term) {
+    const trimmed = String(term || '').trim();
+    if (!trimmed) return escapedHtml;
+    const escapedTerm = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Plain \b doesn't work for a term ending in a non-word character (e.g.
+    // "C++", "C#", "F#") — \b requires a word/non-word transition, and
+    // "+ " is a non-word-to-non-word pair, so it never matches there.
+    // Lookaround on "not alphanumeric" instead correctly allows those while
+    // still rejecting "Go" matching inside "Gopher".
+    const re = new RegExp(`(?<![A-Za-z0-9])(${escapedTerm})(?![A-Za-z0-9])`, 'gi');
+    return escapedHtml.replace(re, '<mark class="jm-primary-lang">$1</mark>');
   }
 
   // ─── Initialize ───────────────────────────────────────────────
@@ -7749,6 +8040,10 @@
       // page's own window.location.href rather than keep stamping the old
       // job's link onto a different one.
       _autoBidOriginalLink = null;
+      // A tailored resume generated for the PREVIOUS job has nothing to do
+      // with this one — drop it rather than leave a stale pill around.
+      _tailoredResumeSlot = null;
+      _tailoredSlotActive = false;
       if (shadowRoot && panelOpen) {
         const analyzeBtn = shadowRoot.getElementById('jmAnalyze');
         if (analyzeBtn && analyzeBtn.textContent === 'Re-Analyze') analyzeBtn.textContent = 'Analyze Job';
