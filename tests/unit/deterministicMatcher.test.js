@@ -38,6 +38,19 @@ describe('detectTopic', () => {
     expect(detectTopic('What is your gender?')).toBe('gender');
   });
 
+  // Regression, confirmed live on a Zip-recruiter-style ATS: a single
+  // COMBINED question asks about sponsorship AND work authorization
+  // together. work_auth's own broad patterns (/\bauthori[zs]/i via "work
+  // authorization", /\blegal.*work\b/i via "legally work") used to be
+  // checked before sponsorship's, so this got misclassified as work_auth
+  // — which then pulled in the answer from a separate, unrelated "Are you
+  // authorized to work?" Q&A entry instead of the user's actual saved
+  // sponsorship answer.
+  it('classifies a combined sponsorship + work-authorization question as sponsorship, not work_auth', () => {
+    const label = 'Do you now or will you in the future require any form of immigration sponsorship or work authorization support from Zip to legally work in the United States (e.g. new visa, transfer, renewal, extension, green card, etc.)?';
+    expect(detectTopic(label)).toBe('sponsorship');
+  });
+
   it('prefers the more specific gender_identity over the broader gender topic', () => {
     expect(detectTopic('What is your gender identity?')).toBe('gender_identity');
   });
@@ -189,5 +202,34 @@ describe('deterministicFieldMatcher — demographic decline-to-answer fallback',
     const options = ['Yes', 'No']; // no decline option even offered
     const result = deterministicFieldMatcher('Are you authorized to work in the US?', options, [], null);
     expect(result).toEqual({ matched: false, option: null, topic: 'work_auth' });
+  });
+});
+
+describe('deterministicFieldMatcher — combined sponsorship/work-authorization question (the real bug)', () => {
+  // Confirmed live on a Zip-recruiter-style ATS: the field asked one
+  // COMBINED question covering both sponsorship and work authorization.
+  // Misclassifying it as work_auth pulled in the saved answer from a
+  // SEPARATE, unrelated "Are you authorized to work?" Q&A entry ("Yes")
+  // instead of the user's actual saved sponsorship answer ("No") — auto-
+  // filling the opposite of what the user said on an immigration question.
+  const combinedLabel = 'Do you now or will you in the future require any form of immigration sponsorship or work authorization support from Zip to legally work in the United States (e.g. new visa, transfer, renewal, extension, green card, etc.)?';
+  const options = ['Yes', 'No'];
+
+  it('uses the saved SPONSORSHIP answer ("No"), not an unrelated saved work-authorization answer ("Yes")', () => {
+    const qaList = [
+      { question: 'Are you authorized to work in the United States?', answer: 'Yes' },
+      { question: 'Will you now or in the future require sponsorship for employment visa status (e.g., H-1B)?', answer: 'No' },
+    ];
+    const result = deterministicFieldMatcher(combinedLabel, options, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'No', topic: 'sponsorship' });
+  });
+
+  it('still matches an affirmative saved sponsorship answer correctly (no regression)', () => {
+    const qaList = [
+      { question: 'Are you authorized to work in the United States?', answer: 'No' },
+      { question: 'Will you now or in the future require sponsorship for employment visa status (e.g., H-1B)?', answer: 'Yes' },
+    ];
+    const result = deterministicFieldMatcher(combinedLabel, options, qaList, null);
+    expect(result).toEqual({ matched: true, option: 'Yes', topic: 'sponsorship' });
   });
 });

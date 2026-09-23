@@ -75,6 +75,11 @@ function buildFillFormFromAnswers({ fieldMap, fillCustomDropdownImpl, calls = []
       return ${fillCustomDropdownImpl ? 'fillCustomDropdownImpl(el, questionText)' : 'true'};
     }
     async function fillFormLegacy() { return { filled: 0, skipped: [] }; }
+    async function waitForDomSettled() {} // Phase 4 sweep dependency — resolves immediately, nothing to settle in these tests
+    function isFieldEligible() { return true; }
+    function isCustomDropdown() { return false; } // no elements are attached to document.body here, so Phase 4 never finds candidates anyway
+    function getFieldLabel() { return ''; }
+    function readCustomOptions() { return []; }
     ${FN_SRC}
     return fillFormFromAnswers;
     `,
