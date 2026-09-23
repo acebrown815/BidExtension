@@ -7734,6 +7734,13 @@
     }
     if (score === null) return;
 
+    // User-configurable — see the Auto-Bid tab's "Automatically generate a
+    // tailored resume" checkbox (profile.html/profile.js). Defaults to
+    // enabled (matches this pipeline's original, non-configurable
+    // behavior); only an explicit false should skip tailoring.
+    const autoBidSettings = await sendMessage({ type: 'GET_AUTOBID_SETTINGS' }) || {};
+    if (autoBidSettings.tailorResumeEnabled === false) return;
+
     // rewriteBullets() and generateTailoredResume() both catch their own
     // errors internally and display them in the panel instead of
     // throwing (that's correct for a manual click — the user sees the

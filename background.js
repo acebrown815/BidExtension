@@ -759,6 +759,18 @@ async function handleTestSheetsSync() {
 // Applied) rather than any of this writing to the sheet directly.
 
 /**
+ * Retrieves the user's Auto-Bid feature settings from local storage.
+ * Defaults to tailoring enabled, matching the pipeline's original behavior
+ * before this became configurable.
+ * @async
+ * @returns {Promise<{tailorResumeEnabled: boolean}>}
+ */
+async function getAutoBidSettings() {
+  const result = await chrome.storage.local.get('autoBidSettings');
+  return result.autoBidSettings || { tailorResumeEnabled: true };
+}
+
+/**
  * Fetches the queue of not-yet-analyzed job rows from the configured Apps
  * Script web app.
  * @async
@@ -1511,6 +1523,13 @@ const handlers = {
 
   'SAVE_SHEETS_SYNC_SETTINGS': async (msg) => {
     await chrome.storage.local.set({ sheetsSync: msg.settings });
+    return { success: true };
+  },
+
+  'GET_AUTOBID_SETTINGS': (msg) => getAutoBidSettings(),
+
+  'SAVE_AUTOBID_SETTINGS': async (msg) => {
+    await chrome.storage.local.set({ autoBidSettings: msg.settings });
     return { success: true };
   },
 
