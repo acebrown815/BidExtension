@@ -73,15 +73,28 @@ const TOPIC_PATTERNS = {
     /\bpronoun/i
   ],
 
+  // Visa sponsorship — "Will you now or in the future require sponsorship?"
+  // Must come BEFORE work_auth below: many ATS platforms ask a single
+  // COMBINED question ("...require any form of immigration sponsorship or
+  // work authorization support... to legally work in the United States")
+  // that also matches work_auth's own broad patterns (/\bauthori[zs]/i via
+  // "work authorization", /\blegal.*work\b/i via "legally work"). Checking
+  // work_auth first misclassified that combined question as work_auth,
+  // which then pulled in the answer from a SEPARATE saved "Are you
+  // authorized to work?" Q&A entry instead of the actual saved sponsorship
+  // answer — confirmed live: a saved sponsorship answer of "No" was
+  // ignored in favor of an unrelated work-authorization "Yes", auto-filling
+  // the opposite of what the user actually said. The word "sponsor" is
+  // distinctive enough that a label containing it should always be treated
+  // as a sponsorship question, whatever else it also happens to mention.
+  sponsorship: [
+    /\bsponsor/i, /\bvisa\b/i, /\bh[-\s]?1b\b/i
+  ],
+
   // Work authorization — "Are you legally authorized to work in the US?"
   work_auth: [
     /\bauthori[zs]/i, /\bwork.*(?:us|united states|u\.s)/i,
     /\blegal.*work\b/i, /\beligib.*work\b/i, /\bemploy.*eligib/i
-  ],
-
-  // Visa sponsorship — "Will you now or in the future require sponsorship?"
-  sponsorship: [
-    /\bsponsor/i, /\bvisa\b/i, /\bh[-\s]?1b\b/i
   ]
 };
 

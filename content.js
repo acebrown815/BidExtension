@@ -4636,6 +4636,62 @@
   // Supported field types: text/email/tel/number inputs, textareas, native <select>,
   // custom dropdown triggers (aria-combobox, aria-haspopup), radio groups, checkboxes.
 
+  // ── Helper: detect if an input is a custom dropdown trigger ──
+  // Hoisted to module scope (out of detectFormFields() below) so the
+  // post-fill sweep for dynamically-revealed dropdowns (see
+  // fillFormFromAnswers()'s Phase 4) can reuse the exact same
+  // classification logic — it only ever touches its own `el` argument.
+  function isCustomDropdown(el) {
+    if (el.getAttribute('role') === 'combobox') return true;
+    if (el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'true') return true;
+    if (el.getAttribute('aria-autocomplete')) return true;
+    if (el.getAttribute('data-testid')?.includes('select')) return true;
+
+    // The generic "nearby listbox" fallback below is too loose for widgets
+    // that legitimately contain a listbox somewhere nearby for an unrelated
+    // purpose. Confirmed live: intl-tel-input's phone widget (wrapper class
+    // "iti", with BEM modifier classes like "iti--allow-dropdown" /
+    // "iti--inline-dropdown" that just happen to contain the substring
+    // "dropdown") wraps a plain phone-NUMBER <input> alongside a completely
+    // separate country-code-picker button+listbox used only for phone
+    // format validation. The number input itself is never a dropdown
+    // trigger, so it must never fall into the "open + wait for options"
+    // flow — bail out before the loose fallback for this known case.
+    if (el.tagName === 'INPUT' && (el.type === 'tel' || el.closest('.iti'))) return false;
+
+    // Check if parent/grandparent looks like a select wrapper
+    const wrapper = el.closest('[class*="select"], [class*="dropdown"], [class*="combobox"], [class*="listbox"]');
+    if (wrapper && wrapper.querySelector('[role="listbox"], [role="option"], [class*="option"]')) return true;
+    return false;
+  }
+
+  // ── Helper: read options from custom dropdown's associated listbox ──
+  // Also hoisted to module scope for the same reason as isCustomDropdown above.
+  function readCustomOptions(el) {
+    const optTexts = [];
+    // 1. Check aria-controls / aria-owns
+    const listboxId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+    if (listboxId) {
+      const lb = document.getElementById(listboxId);
+      if (lb) {
+        lb.querySelectorAll('[role="option"]').forEach(o => {
+          const t = o.textContent.trim();
+          if (t) optTexts.push(t);
+        });
+        if (optTexts.length > 0) return optTexts;
+      }
+    }
+    // 2. Search nearby in DOM
+    const container = el.closest('[class*="select"], [class*="dropdown"], [class*="field"], [data-testid]') || el.parentElement;
+    if (container) {
+      container.querySelectorAll('[role="option"], [class*="option"]:not([class*="options"])').forEach(o => {
+        const t = o.textContent.trim();
+        if (t && !optTexts.includes(t)) optTexts.push(t);
+      });
+    }
+    return optTexts;
+  }
+
   /**
    * Detects all fillable form fields on the current page.
    * Populates the module-level _fieldMap and returns a serialisable questions array.
@@ -4661,44 +4717,6 @@
         optMap[t.toLowerCase()] = o.value;
       });
       return { optMap, optTexts };
-    }
-
-    // ── Helper: detect if an input is a custom dropdown trigger ──
-    function isCustomDropdown(el) {
-      if (el.getAttribute('role') === 'combobox') return true;
-      if (el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'true') return true;
-      if (el.getAttribute('aria-autocomplete')) return true;
-      if (el.getAttribute('data-testid')?.includes('select')) return true;
-      // Check if parent/grandparent looks like a select wrapper
-      const wrapper = el.closest('[class*="select"], [class*="dropdown"], [class*="combobox"], [class*="listbox"]');
-      if (wrapper && wrapper.querySelector('[role="listbox"], [role="option"], [class*="option"]')) return true;
-      return false;
-    }
-
-    // ── Helper: read options from custom dropdown's associated listbox ──
-    function readCustomOptions(el) {
-      const optTexts = [];
-      // 1. Check aria-controls / aria-owns
-      const listboxId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
-      if (listboxId) {
-        const lb = document.getElementById(listboxId);
-        if (lb) {
-          lb.querySelectorAll('[role="option"]').forEach(o => {
-            const t = o.textContent.trim();
-            if (t) optTexts.push(t);
-          });
-          if (optTexts.length > 0) return optTexts;
-        }
-      }
-      // 2. Search nearby in DOM
-      const container = el.closest('[class*="select"], [class*="dropdown"], [class*="field"], [data-testid]') || el.parentElement;
-      if (container) {
-        container.querySelectorAll('[role="option"], [class*="option"]:not([class*="options"])').forEach(o => {
-          const t = o.textContent.trim();
-          if (t && !optTexts.includes(t)) optTexts.push(t);
-        });
-      }
-      return optTexts;
     }
 
     // ── Helper: detects the standard "visually hidden but present for
@@ -4809,14 +4827,15 @@
       if (tag !== 'textarea' && isCustomDropdown(input)) {
         const optTexts = readCustomOptions(input);
         seen.add(qid);
+        const qText = label || input.placeholder || input.name || '';
         questions.push({
           question_id: qid,
-          question_text: label || input.placeholder || input.name || '',
+          question_text: qText,
           field_type: 'dropdown',
           required: input.required,
           available_options: optTexts // may be empty — will be read during fill
         });
-        _fieldMap[qid] = { el: input, type: 'custom_dropdown', optionTexts: optTexts, questionText: label || input.placeholder || input.name || '' };
+        _fieldMap[qid] = { el: input, type: 'custom_dropdown', optionTexts: optTexts, questionText: qText };
         qIndex++;
         return;
       }
@@ -5891,10 +5910,60 @@
           showAutofillBadge(ref.el);
           filled++;
         } else {
+          // fillCustomDropdown() already warns internally for the specific
+          // failure modes it recognizes (detached trigger, no option
+          // matched); this covers every other "just returned false" case
+          // so a silent skip is never completely untraceable.
+          console.warn('[JobMatch AI][Auto-Bid] custom dropdown not filled for qid="%s" (%s)', qid, ref.questionText || val || '(no question text)');
           skipped.push(qid);
         }
       } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] custom dropdown threw for qid="%s" (%s):', qid, ref.questionText || val || '(no question text)', e && e.message);
         skipped.push(qid);
+      }
+    }
+
+    // Phase 4: sweep for custom ARIA dropdowns that didn't exist at all
+    // when detectFormFields() ran, but appeared afterwards as a direct
+    // RESULT of answering an earlier one. Confirmed live on Greenhouse:
+    // "Please identify your race" only renders into the DOM once "Are you
+    // Hispanic/Latino?" has actually been answered — the initial scan
+    // (necessarily taken before any field is filled) can never see it, and
+    // nothing previously re-checked the page afterwards, so it silently
+    // stayed empty even though every other field on the same form filled
+    // correctly. Sweep a few times, not just once, since a revealed field
+    // can itself reveal another — and wait for the DOM to settle between
+    // passes so a field mid-render isn't missed or double-counted.
+    const handledQids = new Set(customDropdowns.map(c => c.qid));
+    for (let sweep = 0; sweep < 3; sweep++) {
+      await waitForDomSettled();
+      const revealed = Array.from(document.querySelectorAll(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"])'
+      )).filter(el => {
+        const qid = el.id || el.name;
+        if (!qid || handledQids.has(qid)) return false;
+        if (el.offsetParent === null) return false;
+        if (!isFieldEligible(el)) return false;
+        return isCustomDropdown(el);
+      });
+      if (revealed.length === 0) break;
+      for (const el of revealed) {
+        const qid = el.id || el.name;
+        handledQids.add(qid);
+        const label = getFieldLabel(el) || el.placeholder || el.name || '';
+        _fieldMap[qid] = { el, type: 'custom_dropdown', optionTexts: readCustomOptions(el), questionText: label };
+        try {
+          if (await fillCustomDropdown(el, label)) {
+            showAutofillBadge(el);
+            filled++;
+          } else {
+            console.warn('[JobMatch AI][Auto-Bid] Phase 4: newly-revealed custom dropdown not filled for qid="%s" (%s)', qid, label);
+            skipped.push(qid);
+          }
+        } catch (e) {
+          console.warn('[JobMatch AI][Auto-Bid] Phase 4: newly-revealed custom dropdown threw for qid="%s" (%s):', qid, label, e && e.message);
+          skipped.push(qid);
+        }
       }
     }
 
@@ -5964,6 +6033,29 @@
    * @returns {Promise<boolean>} true if successfully filled, false otherwise.
    */
   async function fillCustomDropdown(input, questionText) {
+    // Phase 3 processes custom ARIA dropdowns sequentially specifically
+    // because opening one on a real page can affect another still mid-fill
+    // (see this function's call site) — but a sibling field's own fill can
+    // ALSO trigger the page's own React tree to re-render the whole form
+    // section, silently detaching and replacing THIS field's originally-
+    // captured trigger element with a brand-new DOM node. Confirmed live:
+    // selecting one EEOC dropdown (e.g. "Hispanic/Latino") left the very
+    // next sibling dropdown ("Please identify your race") completely
+    // unfilled with no visible error — every subsequent focus()/click() on
+    // the stale, detached node did nothing, so waitForVisibleOptions()
+    // below just timed out with zero options. The element's id is stable
+    // across a React re-render even though the node itself isn't, so
+    // re-querying by it recovers the live element before doing anything else.
+    if (!input.isConnected && input.id) {
+      const fresh = document.getElementById(input.id);
+      if (fresh) {
+        input = fresh;
+      } else {
+        console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: trigger element detached and could not be re-found by id="%s"', input.id);
+        return false;
+      }
+    }
+
     // Some location-autocomplete fields (Google-Places-backed, common on
     // ATS wizards — confirmed on Dice) explicitly accept a raw ZIP/postal
     // code as an alternative to a city name: Dice's own placeholder spells
@@ -5996,6 +6088,33 @@
       } catch (_) { /* fall through to the normal dropdown flow below */ }
     }
 
+    // Same story as the zip/postal case above, for a plain city/location
+    // field (e.g. Greenhouse's own "Location (City)" — confirmed live,
+    // failing with "no options ever rendered"): it's Google-Places-backed
+    // and only renders suggestions once something is actually typed.
+    // Opening it with a click alone, then waiting for options that were
+    // never going to appear, is exactly why this used to silently fail.
+    if (/\b(?:city|location)\b/i.test(questionText) && !/\bzip|postal\b/i.test(questionText)) {
+      try {
+        const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
+        const city = (profile.location || '').split(',')[0].trim();
+        if (city) {
+          fillInput(input, city);
+          const suggestions = await waitForVisibleOptions(input);
+          if (suggestions.length > 0) {
+            // The first suggestion is Google Places' own best match for
+            // what was just typed — exactly what a human would click first.
+            clickElement(suggestions[0].el);
+            return true;
+          }
+          // No suggestion ever rendered — the typed city is still in the
+          // field, which is better than leaving it empty even if this
+          // particular widget's validation doesn't accept it.
+          return true;
+        }
+      } catch (_) { /* fall through to the normal dropdown flow below */ }
+    }
+
     // Step 1: Click to open the dropdown. Click the nearest react-select-style
     // "control" wrapper when there is one, not just the trigger input —
     // libraries built this way (Greenhouse's job-boards.greenhouse.io
@@ -6006,7 +6125,7 @@
     // full pointer+mouse sequence, which covers pointer-event-only toggles
     // that a plain MouseEvent/`.click()` never reaches.
     input.focus();
-    const openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
+    let openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
     clickElement(openTarget);
 
     // Step 2: Wait for the dropdown's options to actually render. Some
@@ -6018,8 +6137,28 @@
     // Polling instead means a fast dropdown still resolves quickly (most
     // checks succeed well under the cap) while a slow one gets real time
     // to finish rather than a coin-flip based on a fixed delay.
-    const optionEls = await waitForVisibleOptions(input);
+    let optionEls = await waitForVisibleOptions(input);
     if (optionEls.length === 0) {
+      // The isConnected check at the top of this function only catches a
+      // detachment that already happened BEFORE this call started. A
+      // sibling field's fill (Phase 3 runs these sequentially) can also
+      // trigger a re-render WHILE this field's own open-and-wait is in
+      // flight, detaching this element mid-way through — retry once,
+      // re-opening with a freshly re-queried element, before giving up.
+      if (!input.isConnected && input.id) {
+        const fresh = document.getElementById(input.id);
+        if (fresh) {
+          console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: trigger for id="%s" was detached mid-fill — retrying with a fresh element', input.id);
+          input = fresh;
+          input.focus();
+          openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
+          clickElement(openTarget);
+          optionEls = await waitForVisibleOptions(input);
+        }
+      }
+    }
+    if (optionEls.length === 0) {
+      console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: no options ever rendered for "%s" (connected=%s)', questionText, input.isConnected);
       // Close the dropdown
       document.body.click();
       return false;
@@ -6043,6 +6182,7 @@
     }
 
     if (!aiChoice || aiChoice === 'SKIP' || aiChoice === 'NEEDS_USER_INPUT') {
+      console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: "%s" got no usable choice (%o) — leaving unfilled', questionText, aiChoice);
       document.body.click();
       return false;
     }
