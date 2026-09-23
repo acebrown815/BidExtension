@@ -1825,6 +1825,15 @@ document.getElementById('testSheetsSyncBtn').addEventListener('click', async () 
 });
 
 /**
+ * Persists the Auto-Bid tab's "tailor resume" toggle as soon as it's
+ * changed — a single checkbox doesn't need its own save button, unlike
+ * the multi-field Sheets Sync form above.
+ */
+document.getElementById('autoBidTailorResumeEnabled').addEventListener('change', async (e) => {
+  await sendMessage({ type: 'SAVE_AUTOBID_SETTINGS', settings: { tailorResumeEnabled: e.target.checked } });
+});
+
+/**
  * "Analyze Pending Jobs" button handler — auto-bid pipeline step 1.
  * Saves the current Sheets Sync settings first (same reasoning as Test
  * Sync: use whatever's in the form, not just whatever was last saved), then
@@ -1930,12 +1939,13 @@ function migrateQAList(stored) {
  * Bootstraps the profile page by fetching all persisted data in parallel, then
  * populating every section of the UI.
  *
- * Load order (all five fetches run concurrently via Promise.all):
+ * Load order (all six fetches run concurrently via Promise.all):
  *   1. GET_PROFILE             → profileData + form population
  *   2. GET_QA_LIST             → qaList (migrated) + Q&A render
  *   3. GET_SETTINGS            → provider/model/key/temperature form
  *   4. GET_PROVIDERS           → provider dropdown (must come before settings apply)
  *   5. GET_SHEETS_SYNC_SETTINGS → Google Sheets Sync form
+ *   6. GET_AUTOBID_SETTINGS    → Auto-Bid tab's own settings
  *
  * After the parallel fetches, also fires loadSavedJobs() and loadResumes()
  * sequentially (they can start immediately but do not block the UI).
@@ -1943,12 +1953,13 @@ function migrateQAList(stored) {
 async function init() {
   try {
     // Fan out all background requests simultaneously for fastest page load
-    const [profile, qa, settings, providers, sheetsSync] = await Promise.all([
+    const [profile, qa, settings, providers, sheetsSync, autoBidSettings] = await Promise.all([
       sendMessage({ type: 'GET_PROFILE'   }),
       sendMessage({ type: 'GET_QA_LIST'   }),
       sendMessage({ type: 'GET_SETTINGS'  }),
       sendMessage({ type: 'GET_PROVIDERS' }),
-      sendMessage({ type: 'GET_SHEETS_SYNC_SETTINGS' })
+      sendMessage({ type: 'GET_SHEETS_SYNC_SETTINGS' }),
+      sendMessage({ type: 'GET_AUTOBID_SETTINGS' })
     ]);
 
     // Populate provider dropdown from the registry (single source of truth for providers)
@@ -1992,6 +2003,10 @@ async function init() {
       document.getElementById('sheetsTabName').value   = sheetsSync.sheetName || '';
       document.getElementById('sheetsSecret').value    = sheetsSync.secret || '';
     }
+
+    // Defaults to enabled (matches the auto-bid pipeline's original,
+    // non-configurable behavior) — only an explicit false unchecks it.
+    document.getElementById('autoBidTailorResumeEnabled').checked = !autoBidSettings || autoBidSettings.tailorResumeEnabled !== false;
 
     // Update visibility of the "Clear saved keys" link
     await updateClearKeysVisibility();

@@ -52,13 +52,15 @@ const FN_SRC = SRC.slice(START, END);
  * @param {boolean} [opts.generateSucceeds=true] - whether generateTailoredResume() actually sets _tailoredResumeSlot.
  * @param {number|null} [opts.tailoredScore] - _tailoredResumeSlot.newScore when generation succeeds.
  * @param {string} [opts.tailoredStatusText] - jmTailoredResumeStatus's text if generation failed.
+ * @param {boolean} [opts.tailorResumeEnabled=true] - the Auto-Bid tab's "tailor resume" setting.
  */
 function buildHarness({
   matchScore, bulletCount = 1, bulletListText = '', generateSucceeds = true, tailoredScore = null, tailoredStatusText = '',
+  tailorResumeEnabled = true,
 }) {
   const calls = [];
   const factory = new Function( // eslint-disable-line no-new-func
-    'calls', 'matchScore', 'bulletCount', 'bulletListText', 'generateSucceeds', 'tailoredScore', 'tailoredStatusText',
+    'calls', 'matchScore', 'bulletCount', 'bulletListText', 'generateSucceeds', 'tailoredScore', 'tailoredStatusText', 'tailorResumeEnabled',
     `
     const MIN_SCORE_TO_APPLY = 75;
     let currentAnalysis = null;
@@ -78,6 +80,13 @@ function buildHarness({
       calls.push('analyzeJob');
       currentAnalysis = matchScore === null ? null : { matchScore };
     }
+    // Not logged to \`calls\` — every existing test below asserts an exact
+    // call sequence that predates this setting, and this read is an
+    // implementation detail of the gate itself, not a user-visible step.
+    async function sendMessage(msg) {
+      if (msg.type === 'GET_AUTOBID_SETTINGS') return { tailorResumeEnabled };
+      return {};
+    }
     async function autoClickApplyThenAutofillIfNeeded() { calls.push('autoClickApplyThenAutofillIfNeeded'); }
     async function rewriteBullets() { calls.push('rewriteBullets'); }
     async function generateTailoredResume() {
@@ -89,7 +98,7 @@ function buildHarness({
     return { autoAnalyzeAndMaybeAutofill, getState: () => ({ _tailoredSlotActive }) };
     `,
   );
-  return { ...factory(calls, matchScore, bulletCount, bulletListText, generateSucceeds, tailoredScore, tailoredStatusText), calls };
+  return { ...factory(calls, matchScore, bulletCount, bulletListText, generateSucceeds, tailoredScore, tailoredStatusText, tailorResumeEnabled), calls };
 }
 
 describe('autoAnalyzeAndMaybeAutofill', () => {
@@ -162,6 +171,27 @@ describe('autoAnalyzeAndMaybeAutofill', () => {
 
   it('treats a score exactly at the threshold as not-strong-enough (tailors, does not autofill directly)', async () => {
     const { calls: log, autoAnalyzeAndMaybeAutofill } = buildHarness({ matchScore: 75, bulletCount: 5, tailoredScore: 90 });
+    await autoAnalyzeAndMaybeAutofill();
+    expect(log).toContain('rewriteBullets');
+  });
+
+  // The Auto-Bid tab's "Automatically generate a tailored resume" checkbox
+  // (profile.html/profile.js, GET_AUTOBID_SETTINGS/SAVE_AUTOBID_SETTINGS in
+  // background.js) — an explicit false must skip tailoring entirely.
+  it('skips tailoring entirely when the user has disabled it in Auto-Bid settings', async () => {
+    const { autoAnalyzeAndMaybeAutofill, calls: log } = buildHarness({
+      matchScore: 62, bulletCount: 5, tailoredScore: 90, tailorResumeEnabled: false,
+    });
+    await autoAnalyzeAndMaybeAutofill();
+    expect(log).toEqual(['waitForJobDescriptionReady', 'analyzeJob']);
+    expect(log).not.toContain('rewriteBullets');
+    expect(log).not.toContain('generateTailoredResume');
+  });
+
+  it('still tailors when the setting is left at its default (enabled) — no regression', async () => {
+    const { autoAnalyzeAndMaybeAutofill, calls: log } = buildHarness({
+      matchScore: 62, bulletCount: 5, tailoredScore: 90,
+    });
     await autoAnalyzeAndMaybeAutofill();
     expect(log).toContain('rewriteBullets');
   });
