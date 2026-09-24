@@ -57,7 +57,7 @@ import {
   buildAutofillPrompt,      // Builds the prompt that maps form fields to profile data
   buildDropdownMatchPrompt, // Builds the prompt that selects the best option from a dropdown list
   buildCoverLetterPrompt,   // Builds the prompt that writes a tailored cover letter
-  buildBulletRewritePrompt, // Builds the prompt that rewrites resume bullets to target a specific JD
+  buildBulletRewritePrompt, // Builds the ONE consolidated prompt that rewrites resume bullets, summary, languages, and skill categories together to target a specific JD
   buildSingleBulletRewritePrompt, // Builds the prompt to regenerate a single bullet
   buildCustomBulletPrompt, // Builds the prompt to create a new bullet from a description
   buildTestPrompt,          // Builds a minimal "ping" prompt used to validate AI connectivity
@@ -84,7 +84,10 @@ import {
   replaceSummaryInDocXml,
   replaceLanguagesInDocXml,
   looksLikeProseSummary,
-  LANGUAGES_HEADER_RE,
+  filterPlausibleSkillTerms,
+  appendMissingSkillsInDocXml,
+  extractSkillCategoriesFromDocXml,
+  applySkillCategoryRevisions,
 } from './lib/docxBullets.mjs';
 import { buildTailoredProfileForRescoring } from './lib/tailoredRescore.mjs';
 
@@ -982,8 +985,43 @@ async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta, resu
 }
 
 /**
- * Rewrites the user's resume experience bullets, professional summary, and
- * programming-languages line to better target a specific job.
+ * Unzips the given resume's raw DOCX and extracts its skills-section
+ * categories (see extractSkillCategoriesFromDocXml), for feeding into the
+ * consolidated buildBulletRewritePrompt call below. Fails soft — returns
+ * an empty array rather than throwing — for any resume that isn't a
+ * stored .docx or can't be unzipped, since the bullets/summary/languages
+ * rewrite this feeds into has always worked regardless of the resume's
+ * original file type; only the FINAL docx-write step (handleGenerateTailoredResume)
+ * has ever required .docx specifically, and this must not regress that.
+ * @async
+ * @param {string} resumeId
+ * @returns {Promise<Array<{label: string, items: string[]}>>}
+ */
+async function extractSkillCategoriesForResume(resumeId) {
+  try {
+    const { rawResumeBase64, resumeFileType } = await getRawResumeForResume(resumeId);
+    if (!rawResumeBase64 || resumeFileType !== 'docx') return [];
+    const binaryString = atob(rawResumeBase64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    const zip = await JSZip.loadAsync(bytes.buffer);
+    const docXmlFile = zip.file('word/document.xml');
+    if (!docXmlFile) return [];
+    const docXml = await docXmlFile.async('string');
+    return extractSkillCategoriesFromDocXml(docXml);
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Rewrites the user's ENTIRE resume — bullets, professional summary,
+ * programming-languages line, and every other skill category — in one
+ * consolidated AI call targeting a specific job (see
+ * buildBulletRewritePrompt's own doc comment for why this is one call
+ * with minimal restrictions rather than several narrowly-ruled ones).
  *
  * Before calling the AI, this function validates that the profile contains at
  * least one experience entry with a non-trivial description.  Without existing
@@ -1000,7 +1038,7 @@ async function handleGenerateCoverLetter(jobDescription, analysis, jobMeta, resu
  *   used to guide which bullets to emphasise or rewrite.
  * @throws {Error} If no API key is configured, no profile exists, or the profile
  *   has no experience descriptions to rewrite.
- * @returns {Promise<{summary: string, languages: string[], bullets: Array<{job, original, improved}>}>}
+ * @returns {Promise<{summary: string, languages: string[], skillCategories: Array<{label, items}>, bullets: Array<{job, original, improved}>}>}
  */
 async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
   const settings = await getSettings();
@@ -1017,11 +1055,12 @@ async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
     throw new Error('No experience bullets found in your resume profile. Make sure your resume was parsed correctly with job descriptions.');
   }
 
-  const messages = buildBulletRewritePrompt(profile, jobDescription, missingSkills);
+  const skillCategories = await extractSkillCategoriesForResume(resumeId);
+  const messages = buildBulletRewritePrompt(profile, skillCategories, jobDescription, missingSkills);
   const result = await callAI(settings.provider, settings.apiKey, messages, {
     model: settings.model,
     temperature: 0.2, // Slight creativity to improve phrasing, but stay factually grounded
-    maxTokens: 4096   // Rewrites can be lengthy for candidates with many roles
+    maxTokens: 6000   // Now also covers skillCategories and a full (untruncated) JD in the response — needs more headroom than the old bullets-only call
   });
 
   // Wrap parseJSONResponse in a try/catch to convert cryptic parse failures into
@@ -1054,13 +1093,14 @@ async function handleRewriteBullets(jobDescription, missingSkills, resumeId) {
  * @param {string}   [resumeId]
  * @param {string}   [newSummary]     - AI-rewritten summary from REWRITE_BULLETS, if the user kept it.
  * @param {string[]} [languages]      - AI-revised programming-languages list from REWRITE_BULLETS.
+ * @param {Array<{label: string, items: string[]}>} [skillCategories] - AI-revised non-Languages skill categories from REWRITE_BULLETS's SAME consolidated call.
  * @param {string}   [jobDescription] - Raw JD text, used only for re-scoring (not for DOCX edits).
  * @param {string}   [jobTitle]       - Job title, used only for re-scoring.
  * @param {string}   [company]        - Company name, used only for re-scoring.
  * @returns {Promise<{base64: string, replacedCount: number, totalBullets: number, insertedCount: number,
  *   summaryUpdated: boolean, languagesUpdated: boolean, newScore: number|null, newAnalysis: Object|null}>}
  */
-async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets, resumeId, newSummary, languages, jobDescription, jobTitle, company) {
+async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, customBullets, resumeId, newSummary, languages, skillCategories, jobDescription, jobTitle, company) {
   const profile = await getProfileForResume(resumeId);
   if (!profile) throw new Error('No resume profile found. Upload your resume first.');
 
@@ -1102,41 +1142,44 @@ async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, cus
   // Replace the "Languages:" line outright with the per-job revised list —
   // a full replace, not an append, since the point is to drop languages
   // this job has no use for as well as add the one(s) it requires.
-  const languagesResult = replaceLanguagesInDocXml(docXml, languages);
+  // filterPlausibleSkillTerms guards against the AI conflating "important
+  // skills for this JD" with "programming languages" for a tools/
+  // methodology-heavy posting (confirmed live: a Performance Engineer JD
+  // produced a languages list padded with "Load Testing", "JVM Tuning",
+  // "Splunk", etc.) — those aren't languages and don't belong on this line
+  // regardless of how the prompt is worded.
+  const languagesResult = replaceLanguagesInDocXml(docXml, filterPlausibleSkillTerms(languages));
   docXml = languagesResult.docXml;
   const languagesUpdated = languagesResult.languagesUpdated;
 
-  // Add missing skills to the (non-languages) skills paragraph by appending
-  // to the last text run (to preserve formatting — the first run is often
-  // bold like "Skills:"). Skips a paragraph already handled above by
-  // replaceLanguagesInDocXml so the languages line isn't touched twice.
-  if (missingSkills && missingSkills.length > 0 && profile.skills) {
-    const paragraphRegex = /<w:p[ >][\s\S]*?<\/w:p>/g;
-    let match;
-    while ((match = paragraphRegex.exec(docXml)) !== null) {
-      const paraXml = match[0];
-      const paraText = extractParagraphText(paraXml);
-      if (languagesUpdated && LANGUAGES_HEADER_RE.test(paraText.trim())) continue;
-      const skillsFound = profile.skills.filter(s =>
-        paraText.toLowerCase().includes(s.toLowerCase())
-      );
-      if (skillsFound.length >= 3) {
-        const newSkills = missingSkills.filter(s =>
-          !paraText.toLowerCase().includes(s.toLowerCase())
-        );
-        if (newSkills.length > 0) {
-          const appendText = ', ' + newSkills.join(', ');
-          const escaped = appendText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-          // Find the last <w:t>...</w:t> and append to it
-          const lastTIndex = paraXml.lastIndexOf('</w:t>');
-          if (lastTIndex !== -1) {
-            const newParaXml = paraXml.substring(0, lastTIndex) + escaped + paraXml.substring(lastTIndex);
-            docXml = docXml.replace(paraXml, newParaXml);
-          }
-        }
-        break;
-      }
-    }
+  // Apply the AI-revised skill categories — already generated by
+  // handleRewriteBullets as part of its SAME consolidated call (see
+  // buildBulletRewritePrompt), not a separate AI round trip here. Matched
+  // positionally against the categories as they currently exist in THIS
+  // docXml (extracted fresh, since nothing before this point touches the
+  // skills section, the order is guaranteed to line up with what
+  // handleRewriteBullets saw). Confirmed live: for a Java-focused "Senior
+  // Performance Engineer" JD, a Python-specific "Python & Backend"
+  // category used to keep FastAPI/Django/Flask untouched and just have JD
+  // keywords tacked onto the end — a whole-category rewrite is what
+  // actually fixes that, not appending more keywords to the wrong content.
+  const originalSkillCategories = extractSkillCategoriesFromDocXml(docXml)
+    .filter(c => !/^(programming\s+languages|languages)$/i.test(c.label.trim()));
+  let skillCategoriesTailored = false;
+  if (Array.isArray(skillCategories) && skillCategories.length > 0 && originalSkillCategories.length > 0) {
+    const revisionResult = applySkillCategoryRevisions(docXml, originalSkillCategories, skillCategories);
+    docXml = revisionResult.docXml;
+    skillCategoriesTailored = revisionResult.updatedLabels.length > 0;
+  }
+
+  // Fallback: the older, narrower behavior — append missing skills to the
+  // first general skills paragraph — only when the fuller rewrite above
+  // didn't run or didn't change anything (e.g. handleRewriteBullets wasn't
+  // able to extract a skills section at all, or the AI didn't return one).
+  // Never runs alongside the fuller rewrite, which would just re-introduce
+  // the run-on-line problem it fixed.
+  if (!skillCategoriesTailored) {
+    docXml = appendMissingSkillsInDocXml(docXml, filterPlausibleSkillTerms(missingSkills), profile.skills, languagesUpdated).docXml;
   }
 
   // Insert custom bullets after the last bullet of their target job/project
@@ -1276,7 +1319,7 @@ async function handleGenerateTailoredResume(rewrittenBullets, missingSkills, cus
     try {
       const settings = await getSettings();
       if (settings.apiKey) {
-        const tailoredProfile = buildTailoredProfileForRescoring(profile, trimmedSummary, languages, rewrittenBullets);
+        const tailoredProfile = buildTailoredProfileForRescoring(profile, trimmedSummary, languages, rewrittenBullets, skillCategories);
         const analysisMessages = buildJobAnalysisPrompt(tailoredProfile, jobDescription, jobTitle, company);
         const analysisResult = await callAI(settings.provider, settings.apiKey, analysisMessages, {
           model: settings.model,
@@ -1578,7 +1621,7 @@ const handlers = {
     return result.trim();
   },
 
-  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets, msg.resumeId, msg.newSummary, msg.languages, msg.jobDescription, msg.jobTitle, msg.company),
+  'GENERATE_TAILORED_RESUME': (msg) => handleGenerateTailoredResume(msg.rewrittenBullets, msg.missingSkills, msg.customBullets, msg.resumeId, msg.newSummary, msg.languages, msg.skillCategories, msg.jobDescription, msg.jobTitle, msg.company),
 
   'GENERATE_CUSTOM_BULLET': async (msg) => {
     const settings = await getSettings();
