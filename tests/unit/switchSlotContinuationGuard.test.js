@@ -113,6 +113,30 @@ describe('switchSlot — Auto-Bid continuation guard (the actual fix)', () => {
     expect(state._activeResumeId).toBe('r1'); // untouched
   });
 
+  // Regression for the real, follow-up bug: the entry guard above
+  // (checked FIRST) already prevents the SWITCH itself while a
+  // continuation is active — but _tailoredSlotActive used to get reset to
+  // false unconditionally, on the line right before that guard was even
+  // checked. So a bail-out here still silently cleared the flag on its
+  // way out: the tailored resume was left "not active" even though
+  // nothing about which resume is in use was actually supposed to change.
+  it('leaves _tailoredSlotActive TRUE when bailing out because a continuation is active (the actual bug)', async () => {
+    const { switchSlot, getState } = buildSwitchSlot({
+      continuationActive: true,
+      activeResumeId: 'r1',
+      currentAnalysis: { matchScore: 78 },
+      tailoredSlotActive: true,
+    });
+
+    // Simulates ensureBestResumeSelected() (or scanResumeMatch()) trying to
+    // switch away from the tailored resume mid-continuation.
+    await switchSlot('r2', { silent: true });
+
+    const state = getState();
+    expect(state._tailoredSlotActive).toBe(true); // must survive the bail-out
+    expect(state._activeResumeId).toBe('r1'); // untouched
+  });
+
   it('bails before mutating anything if the continuation flag flips TRUE during its own internal await (the actual live bug)', async () => {
     // This is what really happened: scanResumeMatch() called switchSlot()
     // while _autoBidContinuationActive was still false (entry check

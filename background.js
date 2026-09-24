@@ -1774,6 +1774,10 @@ const handlers = {
       [`pendingAutofill_${tabId}`]: {
         analysis: msg.analysis || null,
         activeResumeId: msg.activeResumeId || null,
+        // The active tailored resume (base64 + score/metadata), when one
+        // exists — see content.js's SET_PENDING_AUTOFILL call site for why
+        // this needs to survive the navigation too, not just the analysis.
+        tailoredResumeSlot: msg.tailoredResumeSlot || null,
       }
     });
     return { set: true };
@@ -1781,15 +1785,20 @@ const handlers = {
 
   'GET_AND_CLEAR_PENDING_AUTOFILL': async (msg, sender) => {
     const tabId = sender && sender.tab && sender.tab.id;
-    if (!tabId) return { pending: false, analysis: null, activeResumeId: null };
+    if (!tabId) return { pending: false, analysis: null, activeResumeId: null, tailoredResumeSlot: null };
     const key = `pendingAutofill_${tabId}`;
     const result = await chrome.storage.session.get(key);
     const stored = result[key];
     if (stored) {
       await chrome.storage.session.remove(key);
-      return { pending: true, analysis: stored.analysis || null, activeResumeId: stored.activeResumeId || null };
+      return {
+        pending: true,
+        analysis: stored.analysis || null,
+        activeResumeId: stored.activeResumeId || null,
+        tailoredResumeSlot: stored.tailoredResumeSlot || null,
+      };
     }
-    return { pending: false, analysis: null, activeResumeId: null };
+    return { pending: false, analysis: null, activeResumeId: null, tailoredResumeSlot: null };
   },
 };
 

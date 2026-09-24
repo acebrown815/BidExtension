@@ -52,13 +52,15 @@ const FN_SRC = SRC.slice(START, END);
  * @param {Object} opts.pendingResponse - what sendMessage(GET_AND_CLEAR_PENDING_AUTOFILL) resolves to.
  * @param {Array}  opts.calls - array this call pushes tagged events onto (togglePanel/autofillForm/waitForFormFieldsReady).
  */
-function buildCheckPendingAutoBidAutofill({ pendingResponse, calls }) {
+function buildCheckPendingAutoBidAutofill({ pendingResponse, calls, workdayDialogPresent = false }) {
   const factory = new Function( // eslint-disable-line no-new-func
-    'pendingResponse', 'calls',
+    'pendingResponse', 'calls', 'workdayDialogPresent',
     `
     let panelOpen = false;
     let currentAnalysis = null;
     let _activeResumeId = 'original-resume';
+    let _tailoredResumeSlot = null;
+    let _tailoredSlotActive = false;
     async function sendMessage(msg) {
       calls.push({ type: 'sendMessage', msg });
       if (msg.type === 'GET_AND_CLEAR_PENDING_AUTOFILL') return pendingResponse;
@@ -68,19 +70,24 @@ function buildCheckPendingAutoBidAutofill({ pendingResponse, calls }) {
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     async function autofillForm() { calls.push({ type: 'autofillForm' }); }
+    async function clickWorkdayAutofillWithResumeIfPresent() {
+      calls.push({ type: 'clickWorkdayAutofillWithResumeIfPresent' });
+      return workdayDialogPresent;
+    }
     function showJobMeta(title, company, location, salary, jobId, language) { calls.push({ type: 'showJobMeta', title, company, location, salary, jobId, language }); }
     function renderAnalysis(data) { calls.push({ type: 'renderAnalysis', data }); }
     function updateMarkAppliedGating(score) { calls.push({ type: 'updateMarkAppliedGating', score }); }
+    function renderSlotSwitcher() { calls.push({ type: 'renderSlotSwitcher' }); }
     const _fakeEl = { style: {} };
     const shadowRoot = { getElementById: () => _fakeEl };
     ${FN_SRC}
     return {
       checkPendingAutoBidAutofill,
-      getState: () => ({ currentAnalysis, _activeResumeId, panelOpen }),
+      getState: () => ({ currentAnalysis, _activeResumeId, panelOpen, _tailoredResumeSlot, _tailoredSlotActive }),
     };
     `,
   );
-  return factory(pendingResponse, calls);
+  return factory(pendingResponse, calls, workdayDialogPresent);
 }
 
 describe('checkPendingAutoBidAutofill — restores analysis/resume across the Apply-click navigation', () => {
@@ -115,7 +122,8 @@ describe('checkPendingAutoBidAutofill — restores analysis/resume across the Ap
     expect(calls.map(c => c.type)).toEqual([
       'sendMessage', 'togglePanel',
       'showJobMeta', 'renderAnalysis', 'updateMarkAppliedGating',
-      'waitForDomSettled', 'waitForFormFieldsReady', 'autofillForm',
+      'waitForDomSettled', 'clickWorkdayAutofillWithResumeIfPresent',
+      'waitForFormFieldsReady', 'autofillForm',
     ]);
   });
 
@@ -146,5 +154,73 @@ describe('checkPendingAutoBidAutofill — restores analysis/resume across the Ap
     expect(state.currentAnalysis).toBeNull();
     expect(state._activeResumeId).toBe('original-resume');
     expect(calls.map(c => c.type)).toContain('autofillForm');
+  });
+
+  // Regression for the real, follow-up bug: Workday's "Start Your
+  // Application" dialog (a plain 3-choice navigation, not a form) can be
+  // what this navigation actually landed on, at ANY hop in the chain —
+  // not just the very first one. Without recognizing and clicking through
+  // it here too, this function fell straight into
+  // waitForFormFieldsReady()'s up-to-10s wait for an input field that
+  // would never appear, then called autofillForm() on a page with
+  // nothing to fill — and, critically, whatever navigation the user (or
+  // nothing) triggered afterward was never preceded by its own
+  // SET_PENDING_AUTOFILL, so the tailored resume slot could still be lost
+  // at this specific, previously-unhandled hop even after the other two
+  // call sites were already fixed.
+  it('clicks through the Workday dialog and returns early, without ever calling waitForFormFieldsReady/autofillForm', async () => {
+    const { checkPendingAutoBidAutofill } = buildCheckPendingAutoBidAutofill({
+      pendingResponse: { pending: true, analysis: { matchScore: 88 }, activeResumeId: 'resume-42', tailoredResumeSlot: { name: 'Tailored' } },
+      calls,
+      workdayDialogPresent: true,
+    });
+
+    await checkPendingAutoBidAutofill();
+
+    expect(calls.map(c => c.type)).toContain('clickWorkdayAutofillWithResumeIfPresent');
+    expect(calls.map(c => c.type)).not.toContain('waitForFormFieldsReady');
+    expect(calls.map(c => c.type)).not.toContain('autofillForm');
+  });
+
+  // Regression for the real, follow-up bug: on any ATS where "Apply"
+  // navigates to a genuinely new URL (confirmed on Workday), the tailored
+  // resume's bytes were silently lost across that navigation — the file
+  // that got attached on the new page was the ORIGINAL, untailored resume,
+  // completely undoing the auto-tailor step that ran one page earlier.
+  it('restores and re-activates the tailored resume slot when one was carried, and re-renders the switcher', async () => {
+    const analysis = { matchScore: 88, company: 'Availity', title: 'Cloud Engineer III' };
+    const tailoredResumeSlot = { name: 'Resume — Tailored', base64: 'ZmFrZQ==', downloadName: 'Resume_Tailored.docx', newScore: 92, newAnalysis: {}, jobMeta: {} };
+    const { checkPendingAutoBidAutofill, getState } = buildCheckPendingAutoBidAutofill({
+      pendingResponse: { pending: true, analysis, activeResumeId: 'resume-42', tailoredResumeSlot },
+      calls,
+    });
+
+    await checkPendingAutoBidAutofill();
+
+    const state = getState();
+    expect(state._tailoredResumeSlot).toEqual(tailoredResumeSlot);
+    expect(state._tailoredSlotActive).toBe(true);
+    expect(calls.map(c => c.type)).toContain('renderSlotSwitcher');
+    // renderSlotSwitcher must run AFTER the slot is restored, or it would
+    // render against the still-null/inactive state.
+    const switcherIdx = calls.findIndex(c => c.type === 'renderSlotSwitcher');
+    const autofillIdx = calls.findIndex(c => c.type === 'autofillForm');
+    expect(switcherIdx).toBeGreaterThan(-1);
+    expect(switcherIdx).toBeLessThan(autofillIdx);
+  });
+
+  it('does not touch the tailored slot or call renderSlotSwitcher when none was carried (no regression)', async () => {
+    const analysis = { matchScore: 88, company: 'Acme', title: 'Engineer' };
+    const { checkPendingAutoBidAutofill, getState } = buildCheckPendingAutoBidAutofill({
+      pendingResponse: { pending: true, analysis, activeResumeId: 'resume-42', tailoredResumeSlot: null },
+      calls,
+    });
+
+    await checkPendingAutoBidAutofill();
+
+    const state = getState();
+    expect(state._tailoredResumeSlot).toBeNull();
+    expect(state._tailoredSlotActive).toBe(false);
+    expect(calls.map(c => c.type)).not.toContain('renderSlotSwitcher');
   });
 });

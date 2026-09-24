@@ -42,13 +42,14 @@ const FN_SRC = SRC.slice(START, END);
  * @param {Object} opts
  * @param {boolean} opts.manualSelection - _manualResumeSelection's starting value.
  * @param {boolean} opts.continuationActive - _autoBidContinuationActive's starting value.
+ * @param {boolean} [opts.tailoredSlotActive=false] - _tailoredSlotActive's starting value.
  * @param {string}  opts.jd - what getConfidentJobDescriptionForRanking() resolves to.
  * @param {string}  opts.topResumeId - the id rankResumes() should put first.
  * @param {string}  opts.activeResumeId - the currently-active resume id (both storage and in-memory).
  * @param {Array}   opts.calls - array this call pushes tagged events onto.
  */
 function buildEnsureBestResumeSelected({
-  manualSelection, continuationActive, jd, topResumeId, activeResumeId, calls,
+  manualSelection, continuationActive, tailoredSlotActive = false, jd, topResumeId, activeResumeId, calls,
 }) {
   global.chrome = {
     storage: {
@@ -66,6 +67,7 @@ function buildEnsureBestResumeSelected({
     `
     let _manualResumeSelection = ${manualSelection};
     let _autoBidContinuationActive = ${continuationActive};
+    let _tailoredSlotActive = ${tailoredSlotActive};
     let _activeResumeId = activeResumeId;
     async function getConfidentJobDescriptionForRanking() { return jd; }
     function extractJobTitle() { return 'whatever this page extracts'; }
@@ -131,5 +133,32 @@ describe('ensureBestResumeSelected — Auto-Bid continuation guard', () => {
 
     expect(calls).toEqual([]);
     expect(getActiveResumeId()).toBe('r1');
+  });
+
+  // Regression for the real, follow-up bug: re-ranking used to run even
+  // with NO navigation/continuation involved at all — the very first
+  // AutoFill pass right after Auto-Bid tailored a resume, on a job page
+  // that already had its own form (autoClickApplyThenAutofillIfNeeded's
+  // "hasTopFrameFields" branch), never sets _autoBidContinuationActive
+  // (that flag only ever gets set inside checkPendingAutoBidAutofill,
+  // i.e. after a navigation) — so THAT guard alone couldn't have caught
+  // this. switchSlot() got called, and — even setting aside its own
+  // separate ordering bug — silently switched away from the tailored
+  // resume to whatever this function's local re-ranking preferred.
+  it('never re-ranks or switches resumes while a tailored resume is active, even with no continuation involved (the actual bug)', async () => {
+    const { ensureBestResumeSelected, getActiveResumeId } = buildEnsureBestResumeSelected({
+      manualSelection: false,
+      continuationActive: false,
+      tailoredSlotActive: true,
+      jd: 'some cached job description',
+      topResumeId: 'r2', // ranking WOULD pick a different resume than active...
+      activeResumeId: 'r1',
+      calls,
+    });
+
+    await ensureBestResumeSelected();
+
+    expect(calls).toEqual([]); // switchSlot never called
+    expect(getActiveResumeId()).toBe('r1'); // active resume untouched
   });
 });

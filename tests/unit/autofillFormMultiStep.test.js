@@ -43,9 +43,12 @@ const AUTOFILL_FORM_SRC = SRC.slice(START, END);
  *   couldn't satisfy, so clicking Next just re-renders the same step with a validation error.
  * @param {Array}    opts.calls - array this call pushes tagged events onto.
  * @param {Array}    [opts.statusMessages] - array setStatus(msg) calls are pushed onto.
+ * @param {boolean}  [opts.tailoredSlotActive=false] - simulates an active tailored resume slot.
+ * @param {Object}   [opts.tailoredResumeSlot=null] - the (fake) tailored resume slot data.
  */
 function buildAutofillForm({
   stepCount, maxSteps = 10, isAutoBid = true, errorAfterClicks = Infinity, calls, statusMessages = [],
+  tailoredSlotActive = false, tailoredResumeSlot = null,
 }) {
   document.body.innerHTML = `
     <div id="jmAutofill"></div>
@@ -55,6 +58,7 @@ function buildAutofillForm({
 
   const factory = new Function( // eslint-disable-line no-new-func
     'shadowRoot', 'stepCount', 'maxSteps', 'isAutoBid', 'errorAfterClicks', 'calls', 'statusMessages',
+    'tailoredSlotActive', 'tailoredResumeSlot',
     `
     let _fieldMap = {};
     let _activeResumeId = 'r1';
@@ -62,6 +66,8 @@ function buildAutofillForm({
     let _coverLetterFileFields = [];
     let currentAnalysis = null;
     let _autoBidAutofillRun = isAutoBid;
+    let _tailoredSlotActive = tailoredSlotActive;
+    let _tailoredResumeSlot = tailoredResumeSlot;
     const MAX_AUTOFILL_STEPS = maxSteps;
     let nextButtonsRemaining = stepCount;
     let nextClickCount = 0;
@@ -88,13 +94,23 @@ function buildAutofillForm({
     function clearStatus() {}
     async function sendMessage(msg) {
       if (msg.type === 'AUTOFILL_IN_FRAMES') return { filled: 0 };
+      if (msg.type === 'SET_PENDING_AUTOFILL') calls.push({ type: 'SET_PENDING_AUTOFILL', msg });
       return {};
+    }
+    async function autoBidClick(el) {
+      await sendMessage({
+        type: 'SET_PENDING_AUTOFILL',
+        analysis: currentAnalysis,
+        activeResumeId: _activeResumeId,
+        tailoredResumeSlot: _tailoredSlotActive ? _tailoredResumeSlot : null,
+      });
+      el.click();
     }
     ${AUTOFILL_FORM_SRC}
     return autofillForm;
     `,
   );
-  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, calls, statusMessages);
+  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, calls, statusMessages, tailoredSlotActive, tailoredResumeSlot);
 }
 
 describe('autofillForm — multi-step wizard navigation', () => {
@@ -192,5 +208,47 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
     expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(2);
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
+  });
+});
+
+// Regression for a real bug found live on Workday's 8-step application
+// wizard: an active tailored resume slot survived the FIRST step
+// transition (handled by autoClickApplyThenAutofillIfNeeded's own
+// SET_PENDING_AUTOFILL call) but was silently dropped again a step or two
+// later — this loop's OWN "pre-Next" SET_PENDING_AUTOFILL call (used when
+// a wizard step is a genuine full-page navigation, not a same-instance SPA
+// route change) never carried it at all, so the file that ended up
+// attached by the time the form was ready to submit was the original
+// resume, not the tailored one.
+describe('autofillForm — carries the tailored resume slot across every "Next" step, not just the first (the actual bug)', () => {
+  let calls;
+
+  beforeEach(() => {
+    calls = [];
+  });
+
+  it('includes the active tailored resume slot in every pre-Next SET_PENDING_AUTOFILL call', async () => {
+    const tailoredResumeSlot = { name: 'Resume — Tailored', base64: 'ZmFrZQ==', downloadName: 'Resume_Tailored.docx', newScore: 92 };
+    const autofillForm = buildAutofillForm({
+      stepCount: 3, calls, tailoredSlotActive: true, tailoredResumeSlot,
+    });
+    await autofillForm();
+
+    const pendingCalls = calls.filter(c => c.type === 'SET_PENDING_AUTOFILL');
+    expect(pendingCalls).toHaveLength(3); // one per "Next" click across the 3-step wizard
+    pendingCalls.forEach(c => {
+      expect(c.msg.tailoredResumeSlot).toEqual(tailoredResumeSlot);
+    });
+  });
+
+  it('sends null for the tailored resume slot when none is active (no regression)', async () => {
+    const autofillForm = buildAutofillForm({ stepCount: 2, calls, tailoredSlotActive: false, tailoredResumeSlot: null });
+    await autofillForm();
+
+    const pendingCalls = calls.filter(c => c.type === 'SET_PENDING_AUTOFILL');
+    expect(pendingCalls).toHaveLength(2);
+    pendingCalls.forEach(c => {
+      expect(c.msg.tailoredResumeSlot).toBeNull();
+    });
   });
 });

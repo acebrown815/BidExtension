@@ -1458,6 +1458,23 @@
         border-color: var(--jm-primary);
         color: var(--jm-primary);
       }
+      /* Persistent confirmation of the file AutoFill actually attached —
+         deliberately distinct from the pill row above (which shows what's
+         SELECTED, not necessarily what was last ATTACHED) so it stays
+         trustworthy as a ground-truth check even if those ever disagree. */
+      .jm-attached-resume {
+        font-size: 11px;
+        color: var(--jm-text-secondary);
+        background: var(--jm-card-bg);
+        border: 1px solid var(--jm-border);
+        border-radius: 6px;
+        padding: 5px 10px;
+        margin: -2px 0 10px;
+        word-break: break-all;
+      }
+      .jm-attached-resume strong {
+        color: var(--jm-text);
+      }
 
       /* Saved jobs tab */
       .jm-saved-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1565,6 +1582,19 @@
                the current JD. -->
           <button class="jm-download-resume-btn" id="jmDownloadResume" style="display:none"
                   title="Download the exact resume file AutoFill would attach, to check it yourself first">&#8681; Resume file</button>
+        </div>
+        <!-- Persistent confirmation of which file AutoFill actually attached
+             on THIS page, last time it ran — set by fillCurrentAutofillStep()
+             right after attachResumeFile() resolves, independent of (and a
+             ground-truth check on) whichever pill above happens to be
+             highlighted as "active". Unlike the transient status toast, this
+             stays visible so it can still be checked right before Submit,
+             not just for the few seconds after AutoFill finishes. Hidden
+             again on a genuinely new job (handleSpaUrlChanged) since it
+             would otherwise show a stale confirmation for a different job's
+             attachment. -->
+        <div class="jm-attached-resume" id="jmAttachedResume" style="display:none">
+          &#128206; Attached to this form: <strong id="jmAttachedResumeName"></strong>
         </div>
         <div class="jm-actions">
           <button class="jm-btn jm-btn-primary" id="jmAnalyze">Analyze Job</button>
@@ -2330,7 +2360,7 @@
 
     _tailoredSlotActive = true;
     renderSlotSwitcher();
-    setStatus(`Showing "${slot.name}" — already downloaded as ${slot.downloadName}. Regenerate to download it again.`, 'info');
+    setStatus(`Showing "${slot.name}" — click "Resume file" to download it as ${slot.downloadName}.`, 'info');
     setTimeout(clearStatus, 4000);
   }
 
@@ -2363,23 +2393,34 @@
     // at, which would otherwise short-circuit below — must restore that
     // resume's own real analysis instead of leaving the tailored view up.
     const wasShowingTailored = _tailoredSlotActive;
-    _tailoredSlotActive = false;
-    // Never switch resumes (or wipe currentAnalysis, below) while an
-    // Auto-Bid Apply-click continuation is active — see
-    // _autoBidContinuationActive's doc comment. Guarding ensureBestResumeSelected()
-    // alone wasn't enough: scanResumeMatch() (fired fire-and-forget from
-    // handleSpaUrlChanged's reset block, which runs BEFORE
-    // checkPendingAutoBidAutofill ever sets this flag) can already be
-    // mid-flight — its own await on getConfidentJobDescriptionForRanking()
-    // means it doesn't reach this call until AFTER the flag has since
-    // become true. Checking it here, centrally, catches every caller
-    // (ensureBestResumeSelected, scanResumeMatch, analyzeJob's auto-select,
-    // analyzeAndPickBest's winner switch) regardless of when each one
-    // started running — confirmed live: this exact race, via
-    // scanResumeMatch, was still wiping the just-restored currentAnalysis
-    // even after ensureBestResumeSelected's own guard was correctly
-    // bailing out.
+    // Never switch resumes (or wipe currentAnalysis, or _tailoredSlotActive
+    // itself, below) while an Auto-Bid Apply-click continuation is active
+    // — see _autoBidContinuationActive's doc comment. Guarding
+    // ensureBestResumeSelected() alone wasn't enough: scanResumeMatch()
+    // (fired fire-and-forget from handleSpaUrlChanged's reset block, which
+    // runs BEFORE checkPendingAutoBidAutofill ever sets this flag) can
+    // already be mid-flight — its own await on
+    // getConfidentJobDescriptionForRanking() means it doesn't reach this
+    // call until AFTER the flag has since become true. Checking it here,
+    // centrally, catches every caller (ensureBestResumeSelected,
+    // scanResumeMatch, analyzeJob's auto-select, analyzeAndPickBest's
+    // winner switch) regardless of when each one started running —
+    // confirmed live: this exact race, via scanResumeMatch, was still
+    // wiping the just-restored currentAnalysis even after
+    // ensureBestResumeSelected's own guard was correctly bailing out.
+    //
+    // Checked BEFORE resetting _tailoredSlotActive below, not after — a
+    // bail-out here must never have already cleared it on the way out.
+    // Confirmed live as a real, separate bug: even with every caller of
+    // this function correctly skipping the SWITCH itself, the line
+    // resetting _tailoredSlotActive used to run unconditionally first, so
+    // a tailored resume's "active" flag still silently flipped back to
+    // false — the file that ended up attached (and the panel's "Attached
+    // to this form" indicator) fell back to whatever resume happened to
+    // be _activeResumeId, not the tailored one, with no navigation or
+    // continuation race required to trigger it.
     if (_autoBidContinuationActive) return;
+    _tailoredSlotActive = false;
     if (id === _activeResumeId && !wasShowingTailored) return;
     try {
       const result = await chrome.storage.local.get('resumes');
@@ -4274,6 +4315,39 @@
   //   3. Fill   — fillFormFromAnswers() immediately writes answers into the form.
 
   /**
+   * Clicks an element as part of Auto-Bid's own automated flow, first
+   * stashing the CURRENT tab's pending-autofill state (analysis, active
+   * resume id, and — critically — an active tailored resume slot) so it
+   * survives if this click causes a navigation. Every click Auto-Bid
+   * performs on the user's behalf routes through here — deliberately NOT
+   * limited to specific, previously-identified click sites (the initial
+   * "Apply" button, a wizard's "Next" control, Workday's own
+   * choice-of-method dialog, ...). Confirmed live, more than once: a
+   * tailored resume survived one hop only to be silently lost on the
+   * NEXT one — each time at a DIFFERENT specific click that hadn't been
+   * covered yet, on a platform (Workday's 8-step wizard) with several
+   * such hops. Rather than keep discovering and special-casing every ATS's
+   * own intermediate dialogs/steps one at a time, every click in this
+   * automated flow now preserves state up front, so a not-yet-seen
+   * platform's own quirk doesn't need its own fix before it's safe.
+   * @param {HTMLElement} el
+   * @async
+   */
+  async function autoBidClick(el) {
+    try {
+      await sendMessage({
+        type: 'SET_PENDING_AUTOFILL',
+        analysis: currentAnalysis,
+        activeResumeId: _activeResumeId,
+        tailoredResumeSlot: _tailoredSlotActive ? _tailoredResumeSlot : null,
+      });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL (autoBidClick) failed:', e && e.message);
+    }
+    el.click();
+  }
+
+  /**
    * Finds a page's "Apply Now"-style call-to-action link/button. Used only
    * by Auto-Bid's automated flow (see autoClickApplyThenAutofillIfNeeded)
    * when the current page has a strong match but no application form yet —
@@ -4432,18 +4506,13 @@
         // _autoBidAutofillRun guard covers that case), but nothing here
         // guarantees a given ATS won't do a genuine full-page navigation
         // for some step instead — that would destroy this content-script
-        // instance and every module-level variable in it, same as the
-        // initial "Apply Now" click (see autoClickApplyThenAutofillIfNeeded).
-        // Stashing this before every click, not just that first one, means
-        // a fresh instance loading on a reloaded step still finds its way
-        // back via checkPendingAutoBidAutofill instead of coming up as a
-        // blank, unanalyzed page.
-        try {
-          await sendMessage({ type: 'SET_PENDING_AUTOFILL', analysis: currentAnalysis, activeResumeId: _activeResumeId });
-        } catch (e) {
-          console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL (pre-Next) failed:', e && e.message);
-        }
-        nextBtn.click();
+        // instance and every module-level variable in it. autoBidClick()
+        // stashes pending-autofill state (including an active tailored
+        // resume slot) before every click, not just the very first one —
+        // see its own doc comment for the real, live-confirmed bug this
+        // fixes: a tailored resume surviving one hop only to be silently
+        // lost on a later one, on a platform with several wizard steps.
+        await autoBidClick(nextBtn);
         await waitForDomSettled();
         await waitForFormFieldsReady();
         if (hasVisibleValidationErrors()) {
@@ -4559,6 +4628,17 @@
     try {
       resumeResult = await attachResumeFile();
     } catch (e) { console.warn('[JobMatch AI][Auto-Bid] attachResumeFile threw:', e && e.message); }
+    // Persistent confirmation of what actually got attached — deliberately
+    // only ever SET here, never cleared just because a later wizard step
+    // has no file field of its own (the resume upload is typically only
+    // one step of several), so it stays visible and checkable right up to
+    // Submit. Shows the resume's own recognizable list name (see
+    // getActiveResumeDisplayName), not the auto-generated attachment
+    // filename — see that function's own doc comment for why.
+    if (resumeResult.attached > 0) {
+      const extMatch = (resumeResult.fileName || '').match(/\.(docx|pdf)$/i);
+      updateAttachedResumeIndicator(getActiveResumeDisplayName() + (extMatch ? extMatch[0] : ''));
+    }
     let coverLetterResult = { attached: 0, fileName: null };
     // Also checks findCoverLetterAttachTrigger() directly, not just the
     // already-detected _coverLetterFileFields — confirmed needed on
@@ -5122,6 +5202,19 @@
    */
   async function ensureBestResumeSelected() {
     if (_manualResumeSelection) return;
+    // Never second-guess resume selection while a tailored resume is the
+    // one active — it was custom-generated for THIS exact job, so
+    // re-ranking against it makes no sense, and switchSlot() below would
+    // otherwise silently wipe _tailoredSlotActive back to false. Confirmed
+    // live: this ran on the VERY FIRST AutoFill pass after Auto-Bid
+    // tailored a resume — no navigation involved at all (the job page
+    // already had its own form), so the _autoBidContinuationActive guard
+    // below (which only ever gets set inside checkPendingAutoBidAutofill,
+    // i.e. AFTER a navigation) never applied here in the first place. The
+    // attached file and the panel's "Attached to this form" indicator
+    // both silently fell back to whatever resume this function's own
+    // re-ranking happened to prefer instead of the tailored one.
+    if (_tailoredSlotActive) return;
     // Never second-guess resume selection during an Auto-Bid Apply-click
     // continuation (see _autoBidContinuationActive's doc comment) — we
     // already know exactly which resume the ORIGINAL page's analysis used
@@ -5422,6 +5515,52 @@
     }
 
     return { attached, fileName: attached > 0 ? fileName : null };
+  }
+
+  /**
+   * Returns the human-facing name for whichever resume is currently
+   * active — the tailored slot's own name (e.g. "18. Senior Developer —
+   * Tailored") when that's the one in use, otherwise the active resume's
+   * own saved list name (e.g. "18. Senior Developer"), the exact name
+   * shown on its switcher pill.
+   *
+   * Deliberately NOT the auto-generated attachment filename
+   * buildActiveResumeFile() produces (e.g. "Resume_<CandidateName>.docx")
+   * — that name is derived from the parsed profile's `name` field, which
+   * can be wrong for a resume whose own content confused the parser.
+   * Confirmed live: one resume's candidate name parsed out as
+   * "Jobboards" (presumably picked up from the original file's own name
+   * or header), producing the meaningless "Resume_Jobboards.docx" as the
+   * attachment filename — showing that in the panel was more confusing
+   * than helpful. The resume's OWN list name is a far more reliable,
+   * recognizable label, and it's fine for it to read differently than
+   * the literal bytes-on-disk filename actually used for the attachment.
+   * @returns {string}
+   */
+  function getActiveResumeDisplayName() {
+    if (_tailoredSlotActive && _tailoredResumeSlot) return _tailoredResumeSlot.name;
+    return (_resumes.find(r => r.id === _activeResumeId) || {}).name || 'Resume';
+  }
+
+  /**
+   * Shows the persistent "Attached to this form: <name>" line under the
+   * resume switcher — ground-truth confirmation of the file AutoFill last
+   * actually attached on this page, independent of whichever pill happens
+   * to be highlighted "active" above it. Distinct on purpose: highlighting
+   * reflects the current SELECTION, not necessarily what was physically
+   * attached (a genuinely new job selects a resume before ever attaching
+   * anything, e.g.), and this is meant to stay trustworthy even if a
+   * future bug ever made those two disagree — the same class of bug this
+   * whole feature exists in response to (a wrong resume silently attached
+   * with no visible confirmation of which one it actually was).
+   * @param {string} displayName
+   */
+  function updateAttachedResumeIndicator(displayName) {
+    const el = shadowRoot && shadowRoot.getElementById('jmAttachedResume');
+    const nameEl = shadowRoot && shadowRoot.getElementById('jmAttachedResumeName');
+    if (!el || !nameEl || !displayName) return;
+    nameEl.textContent = displayName;
+    el.style.display = 'block';
   }
 
   /**
@@ -7171,7 +7310,10 @@
   /**
    * Generates a tailored DOCX resume by sending rewritten bullets to the
    * background service worker, which edits the DOCX directly using JSZip.
-   * Downloads the modified DOCX file.
+   * Does NOT download it automatically — it's added as a pill in the
+   * resume switcher (_tailoredResumeSlot), same as any other resume, and
+   * the user downloads it on demand later via the existing "Resume file"
+   * button once it's selected.
    * @async
    */
   async function generateTailoredResume() {
@@ -7258,23 +7400,13 @@
         downloadName = `${baseName}_${counter}.docx`;
       }
 
-      // Convert base64 to blob and trigger download
-      const binaryString = atob(result.base64);
-      const bytes = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      const blob = new Blob([bytes.buffer], {
-        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = downloadName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // No automatic download here — generating a tailored resume just adds
+      // it as a pill in the resume switcher below (in-memory, never
+      // persisted). The user downloads it on demand later via the existing
+      // "Resume file" button, same as any other resume: select this
+      // pill first (buildActiveResumeFile() already checks
+      // _tailoredSlotActive and hands back these exact bytes — see
+      // downloadActiveResumeFile()), then click Download.
 
       // Keep it available as an extra pill at the end of the resume
       // switcher so the user can view its Match Score without regenerating
@@ -7313,7 +7445,7 @@
       let html = `
         <div class="jm-resume-stat-row">
           <span style="font-size:16px;">&#10003;</span>
-          <span><strong>Resume downloaded</strong> as <strong>${escapeHTML(downloadName)}</strong></span>
+          <span><strong>Tailored resume ready</strong> as <strong>${escapeHTML(downloadName)}</strong> — select it above and click <strong>Resume file</strong> to download</span>
         </div>
         ${scoreHtml}
         <div class="jm-resume-stat-row" style="color:var(--jm-text-secondary);font-size:12px;">
@@ -7328,7 +7460,7 @@
         html += `<div style="font-size:11px;color:var(--jm-text-secondary);margin-top:4px;">${result.totalBullets - result.replacedCount} bullet(s) could not be matched — the text may be split differently in the DOCX.</div>`;
       }
 
-      html += `<div class="jm-resume-warn">&#9888; Review the downloaded resume for accuracy before submitting.</div>`;
+      html += `<div class="jm-resume-warn">&#9888; Review the tailored resume for accuracy before submitting.</div>`;
       status.innerHTML = html;
     } catch (err) {
       status.className = 'jm-resume-status-card error';
@@ -7639,6 +7771,45 @@
   }
 
   /**
+   * Workday's "Start Your Application" dialog — shown after an initial
+   * Apply click on a myworkdayjobs.com posting, confirmed live on
+   * Availity's careers site — offers three choices, each a plain
+   * navigating <a role="button">, not a form to fill: "Autofill with
+   * Resume", "Apply Manually", and "Use My Last Application". Nothing
+   * else in this file's field-detection/filling logic would ever act on
+   * this dialog (it isn't a form), so without recognizing and clicking
+   * through it, Auto-Bid's automated flow just stalls here. "Autofill
+   * with Resume" is the only one of the three that actually uses the
+   * resume this extension just spent effort selecting/tailoring — the
+   * other two skip that (a manual re-entry flow, or reusing a stale prior
+   * application), so it's the only safe default to click automatically.
+   * @returns {HTMLElement|null}
+   */
+  function findWorkdayAutofillWithResumeLink() {
+    const link = document.querySelector('a[data-automation-id="autofillWithResume"]');
+    if (!link || link.offsetParent === null) return null;
+    return link;
+  }
+
+  /**
+   * Clicks through Workday's "Start Your Application" dialog if it's
+   * currently showing. Routes through autoBidClick() like every other
+   * click in this automated flow, so the pending-autofill payload
+   * (analysis, active resume id, and an active tailored resume slot)
+   * survives this click's navigation the same way it does everywhere
+   * else — see autoBidClick's own doc comment.
+   * @async
+   * @returns {Promise<boolean>} true if the dialog was found and clicked (a navigation is now in flight).
+   */
+  async function clickWorkdayAutofillWithResumeIfPresent() {
+    const link = findWorkdayAutofillWithResumeLink();
+    if (!link) return false;
+    if ((link.getAttribute('target') || '').toLowerCase() === '_blank') return false;
+    await autoBidClick(link);
+    return true;
+  }
+
+  /**
    * If the current page has a strong match but no application form yet —
    * e.g. CATS (catsone.com) job postings, whose real form lives on a
    * SEPARATE page reached only by clicking "Apply Now" — clicks that link
@@ -7670,6 +7841,12 @@
     // that's what gates AutoFill's multi-step wizard navigation.
     _autoBidAutofillRun = true;
     try {
+      // Workday's "Start Your Application" dialog (see
+      // clickWorkdayAutofillWithResumeIfPresent's own doc comment) can
+      // already be showing the very first time this runs — check for it
+      // before anything else, since it isn't a form detectFormFields()
+      // would ever recognize.
+      if (await clickWorkdayAutofillWithResumeIfPresent()) return;
       // Fields actually detected in THIS frame are the one fully reliable
       // signal — if we have them, just fill them.
       const hasTopFrameFields = detectFormFields().length > 0;
@@ -7723,35 +7900,32 @@
         // then correctly find nothing visible to click through to. Only
         // click it when it isn't already expanded.
         if (applyBtn.getAttribute('aria-expanded') !== 'true') {
-          applyBtn.click();
+          // Just opens a menu on every platform confirmed so far, but
+          // autoBidClick() costs nothing extra when nothing navigates —
+          // cheaper than having to prove a given ATS's toggle can never
+          // possibly do more than that.
+          await autoBidClick(applyBtn);
           await waitForDomSettled();
         }
         const menuItem = findDropdownApplyMenuItem(applyBtn);
         if (!menuItem) {
           // Opened a menu this couldn't make sense of — leave it open
-          // rather than guessing further; there's no navigation about to
-          // happen, so nothing to stash a pending-autofill flag for.
+          // rather than guessing further.
           return;
         }
         if ((menuItem.getAttribute('target') || '').toLowerCase() === '_blank') return;
         finalApplyEl = menuItem;
       }
-      try {
-        // Carry the analysis result (matchScore, matchingSkills, company,
-        // title, ...) and the active resume id across this navigation —
-        // clicking finalApplyEl destroys this content-script instance and
-        // every module-level variable in it, so the FRESH instance that
-        // loads on the new page (see checkPendingAutoBidAutofill) has no
-        // way to know which job/resume it's even looking at otherwise.
-        // That new page often has no visible job description of its own
-        // at all (e.g. Dice's application wizard just shows a
-        // title/company summary), so without this, a cover-letter-upload
-        // field there could never generate a real cover letter.
-        await sendMessage({ type: 'SET_PENDING_AUTOFILL', analysis: currentAnalysis, activeResumeId: _activeResumeId });
-      } catch (e) {
-        console.warn('[JobMatch AI][Auto-Bid] SET_PENDING_AUTOFILL failed:', e && e.message);
-      }
-      finalApplyEl.click();
+      // Carry the analysis result (matchScore, matchingSkills, company,
+      // title, ...), the active resume id, and an active tailored resume
+      // slot across this click's navigation — see autoBidClick's own doc
+      // comment for why every click in this flow does this, not just this
+      // one. Clicking finalApplyEl can destroy this content-script
+      // instance and every module-level variable in it, so the FRESH
+      // instance that loads on the new page (see
+      // checkPendingAutoBidAutofill) would otherwise have no way to know
+      // which job/resume/tailoring it was even in the middle of.
+      await autoBidClick(finalApplyEl);
     } finally {
       _autoBidAutofillRun = false;
     }
@@ -7868,13 +8042,13 @@
    * @async
    */
   async function checkPendingAutoBidAutofill() {
-    let result = { pending: false, analysis: null, activeResumeId: null };
+    let result = { pending: false, analysis: null, activeResumeId: null, tailoredResumeSlot: null };
     try {
       result = await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' });
     } catch (e) {
       console.warn('[JobMatch AI][Auto-Bid] GET_AND_CLEAR_PENDING_AUTOFILL failed:', e && e.message);
     }
-    const { pending, analysis, activeResumeId } = result || {};
+    const { pending, analysis, activeResumeId, tailoredResumeSlot } = result || {};
     if (!pending) return;
     // Restore the previous page's analysis/resume selection. Whether the
     // Apply click caused a real navigation (a fresh content-script
@@ -7888,6 +8062,16 @@
     // SET_PENDING_AUTOFILL in background.js.
     if (analysis) currentAnalysis = analysis;
     if (activeResumeId) _activeResumeId = activeResumeId;
+    // Restore the tailored resume too, and re-activate it — the real bug
+    // this fixes: without this, AutoFill on this new page fell back to
+    // attaching the ORIGINAL, untailored resume (a file genuinely gets
+    // attached, so nothing looks obviously broken, but it silently
+    // defeats the auto-tailor step that ran on the previous page). See
+    // this function's own call site in autoClickApplyThenAutofillIfNeeded.
+    if (tailoredResumeSlot) {
+      _tailoredResumeSlot = tailoredResumeSlot;
+      _tailoredSlotActive = true;
+    }
     // Held for the rest of this function so a SECOND SPA URL-change event
     // firing mid-flight (confirmed on Dice — its router settles into the
     // post-click route across more than one pushState/replaceState update)
@@ -7918,6 +8102,11 @@
         shadowRoot.getElementById('jmRewriteBulletsBtn').style.display = 'flex';
         shadowRoot.getElementById('jmTailoredResumeBtn').style.display = 'flex';
       }
+      // Same reasoning as above, for the resume switcher specifically — a
+      // fresh panel instance has no tailored pill in it at all yet, so
+      // without this the switcher wouldn't show the tailored resume as
+      // active even though it's the one AutoFill is about to attach below.
+      if (tailoredResumeSlot) renderSlotSwitcher();
       // Wait for the route swap to actually finish rendering before trusting
       // waitForFormFieldsReady()'s generic "is there ANY input on the page"
       // check — on a client-side (SPA) route change, that check can already
@@ -7925,6 +8114,18 @@
       // etc.), well before the new route's own form has rendered. See
       // waitForDomSettled's doc comment.
       await waitForDomSettled();
+      // The page this navigation landed on can itself be Workday's "Start
+      // Your Application" dialog rather than an actual form — checked
+      // BEFORE waitForFormFieldsReady() below, which waits (up to 10s) for
+      // an input field to appear that never will on this dialog (it's
+      // only links). Same check as autoClickApplyThenAutofillIfNeeded's
+      // own, needed here too since this dialog can appear after EITHER
+      // the very first Apply click or a later one, and this function is
+      // what every subsequent hop in the chain runs through. Carries the
+      // SAME restored pending-autofill payload (including the tailored
+      // resume slot) across this click's own navigation, same as
+      // everywhere else in this file.
+      if (await clickWorkdayAutofillWithResumeIfPresent()) return;
       await waitForFormFieldsReady();
       // This continuation is always part of Auto-Bid's automated flow —
       // see _autoBidAutofillRun's doc comment.
@@ -8286,7 +8487,11 @@
           'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
           'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice',
           'jmAutofillWarning', 'jmCoverLetterSection', 'jmBulletSection',
-          'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn'
+          'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn',
+          // A genuinely new job/posting hasn't had anything attached yet —
+          // don't leave the PREVIOUS job's "Attached to this form" line
+          // visible and looking like it applies to this one.
+          'jmAttachedResume',
         ].forEach(id => {
           const el = shadowRoot.getElementById(id);
           if (el) el.style.display = 'none';
