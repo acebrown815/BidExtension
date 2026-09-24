@@ -154,6 +154,14 @@
   // (a real resume or the tailored one) ever looks "active" at a time.
   let _tailoredSlotActive = false;
 
+  // The AI's revised skills-section categories (everything except the
+  // Languages line, which has its own review UI/field) from the most
+  // recent rewriteBullets() run — generated as part of that SAME call
+  // (see buildFullResumeTailorPrompt) rather than a separate AI round
+  // trip, and passed straight through to GENERATE_TAILORED_RESUME with no
+  // review UI of its own, same as the primary-language detection.
+  let _tailoredSkillCategories = [];
+
   // ─── Persistent analysis cache (chrome.storage.local) ──────────
   // Caching analysis results prevents redundant API calls when the user
   // closes and reopens the panel or navigates back to a job they already viewed.
@@ -6964,6 +6972,10 @@
         languagesWrap.style.display = 'none';
       }
 
+      // Skills-section categories (everything except Languages) — no
+      // review UI of their own, just stashed for GENERATE_TAILORED_RESUME.
+      _tailoredSkillCategories = (response && Array.isArray(response.skillCategories)) ? response.skillCategories : [];
+
       // The JD's single primary/mandatory language (see buildBulletRewritePrompt's
       // Step 1) — highlighted in the bullet text below so it visually stands
       // out over every other language/skill mentioned.
@@ -7156,6 +7168,7 @@
         resumeId: _activeResumeId,
         newSummary,
         languages,
+        skillCategories: _tailoredSkillCategories,
         jobDescription: jd,
         jobTitle: currentAnalysis.title || '',
         company: currentAnalysis.company || ''

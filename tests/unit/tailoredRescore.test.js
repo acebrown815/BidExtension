@@ -62,4 +62,38 @@ describe('buildTailoredProfileForRescoring', () => {
     expect(out.summary).toBe('y');
     expect(out.skills).toEqual(['Go']);
   });
+
+  // The actual bug: a tailored resume's displayed Match Score stayed
+  // identical to the pre-tailoring score no matter how much the skills
+  // section itself changed, because the rescore step never saw any of the
+  // skillCategories tailoring — only the separate `languages` field.
+  describe('skillCategories — the actual bug (rescore was blind to the tailored skills section)', () => {
+    it('adds every skillCategories item to the skills used for scoring', () => {
+      const skillCategories = [
+        { label: 'Java & Backend', items: ['Java', 'Spring Boot', 'Hibernate'] },
+        { label: 'Observability', items: ['Splunk', 'Dynatrace'] },
+      ];
+      const out = buildTailoredProfileForRescoring(profile, '', [], [], skillCategories);
+      expect(out.skills).toEqual(expect.arrayContaining(['JavaScript', 'Node.js', 'Java', 'Spring Boot', 'Hibernate', 'Splunk', 'Dynatrace']));
+    });
+
+    it('combines languages and skillCategories items without duplicating', () => {
+      const skillCategories = [{ label: 'Java & Backend', items: ['Java', 'Spring Boot'] }];
+      const out = buildTailoredProfileForRescoring(profile, '', ['Java', 'Go'], [], skillCategories);
+      expect(out.skills.filter(s => s === 'Java')).toHaveLength(1); // named in both languages and a category — added once
+      expect(out.skills).toEqual(expect.arrayContaining(['Go', 'Java', 'Spring Boot']));
+    });
+
+    it('does not duplicate a skillCategories item already in the original skills', () => {
+      const skillCategories = [{ label: 'Languages', items: ['JavaScript'] }];
+      const out = buildTailoredProfileForRescoring(profile, '', [], [], skillCategories);
+      expect(out.skills.filter(s => s === 'JavaScript')).toHaveLength(1);
+    });
+
+    it('tolerates a missing or malformed skillCategories argument', () => {
+      expect(buildTailoredProfileForRescoring(profile, '', ['Go'], [], undefined).skills).toContain('Go');
+      expect(buildTailoredProfileForRescoring(profile, '', ['Go'], [], null).skills).toContain('Go');
+      expect(buildTailoredProfileForRescoring(profile, '', ['Go'], [], [{ label: 'Empty' }]).skills).toContain('Go');
+    });
+  });
 });

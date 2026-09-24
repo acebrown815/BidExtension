@@ -22,31 +22,53 @@ const profile = {
   ],
 };
 
+const skillCategories = [
+  { label: 'Cloud & DevOps', items: ['AWS', 'Docker'] },
+];
+
 describe('buildBulletRewritePrompt — bullet rules', () => {
   it('includes the job description and the missing skills', () => {
-    const messages = buildBulletRewritePrompt(profile, 'We need a Go developer with Databricks experience.', ['Go', 'Databricks']);
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'We need a Go developer with Databricks experience.', ['Go', 'Databricks']);
     const content = messages[0].content;
     expect(content).toContain('We need a Go developer with Databricks experience.');
     expect(content).toContain('Go, Databricks');
   });
 
-  it('instructs the model to replace an irrelevant skill mention with a missing one, not just append', () => {
-    const messages = buildBulletRewritePrompt(profile, 'JD text', ['Go']);
-    expect(messages[0].content).toMatch(/REPLACE that mention with the primary language or one of the missing skills/);
+  it('includes the current skills section categories', () => {
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'JD text', ['Go']);
+    expect(messages[0].content).toContain('Cloud & DevOps: AWS, Docker');
   });
 
-  it('still prohibits fabricating employer/title/date/number claims', () => {
-    const messages = buildBulletRewritePrompt(profile, 'JD text', ['Go']);
-    expect(messages[0].content).toMatch(/never fabricate a new employer, title, date, number, or result/);
+  it('instructs the model to swap out an irrelevant skill mention for a missing one, not just append', () => {
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'JD text', ['Go']);
+    expect(messages[0].content).toMatch(/swap it out for the primary language or one of the missing skills/);
+  });
+
+  // User-requested: this whole resume — bullets, skills section included —
+  // should be freely rewritten (including specific technologies/numbers/
+  // results) to target a 90%+ match, in ONE consolidated call. The only
+  // facts this pipeline treats as fixed are employer/title/dates, and
+  // those aren't part of what this prompt returns at all (see the doc comment).
+  it('explicitly allows adjusting technologies/numbers/results, and targets a 90%+ match', () => {
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'JD text', ['Go']);
+    const content = messages[0].content;
+    expect(content).toMatch(/90%\+/);
+    expect(content).not.toMatch(/never fabricate/);
+  });
+
+  it('asks the model to rewrite the skills section, allowing categories to be renamed/refocused', () => {
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'JD text', ['Go']);
+    expect(messages[0].content).toMatch(/"skillCategories"/);
+    expect(messages[0].content).toMatch(/rename it and replace its items/);
   });
 
   it('asks the model to identify the JD primary/mandatory skill(s) first', () => {
-    const messages = buildBulletRewritePrompt(profile, 'JD text', []);
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'JD text', []);
     expect(messages[0].content).toMatch(/PRIMARY or MANDATORY/);
   });
 
   it('asks for a single "primaryLanguage" field and instructs featuring it across multiple bullets', () => {
-    const messages = buildBulletRewritePrompt(profile, 'Senior Golang Developer role.', ['Go']);
+    const messages = buildBulletRewritePrompt(profile, skillCategories, 'Senior Golang Developer role.', ['Go']);
     const content = messages[0].content;
     expect(content).toContain('"primaryLanguage"');
     expect(content).toMatch(/MORE THAN ONE bullet/);
@@ -80,9 +102,11 @@ describe('buildSingleBulletRewritePrompt — bullet rules', () => {
     expect(messages[0].content).toContain('Do NOT mention or reference any of these skills under any circumstances: Rust');
   });
 
-  it('still prohibits fabricating a new employer/title/date/number', () => {
+  it('explicitly allows adjusting technologies/numbers/results, not just lightly rewording', () => {
     const messages = buildSingleBulletRewritePrompt('Built REST APIs using PHP.', 'JD text', [], '', []);
-    expect(messages[0].content).toMatch(/never fabricate a new employer, title, date, or a result\/number/);
+    const content = messages[0].content;
+    expect(content).toMatch(/feel free to adjust or add technologies, tools, numbers, and results/);
+    expect(content).not.toMatch(/never fabricate/);
   });
 
   it('falls back to a neutral instruction when there are no missing skills for this bullet', () => {
