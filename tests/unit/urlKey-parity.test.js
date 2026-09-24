@@ -28,6 +28,9 @@ const cases = [
   'https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer/apply',
   'https://acme.com/jobs/123/apply',
   'https://acme.com/apply',
+  'https://www.ziprecruiter.com/apply?jid=abc111',
+  'https://careers.example.com/job?postingId=111',
+  'https://acme.com/jobs/123?ref=homepage&source=newsletter&from=serp',
   'not a url',
   '',
 ];

@@ -41,6 +41,25 @@ describe('normalizeUrlForCache — collapses noise', () => {
   });
 });
 
+describe('normalizeUrlForCache — collapses noise (additional tracking/referral params)', () => {
+  it('drops ref/referrer/referer/source/src/from and a bare "utm"', () => {
+    const base = normalizeUrlForCache('https://acme.com/jobs/123');
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?ref=homepage')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?referrer=google')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?referer=google')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?source=newsletter')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?src=email')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?from=serp')).toBe(base);
+    expect(normalizeUrlForCache('https://acme.com/jobs/123?utm=x')).toBe(base);
+  });
+
+  it('drops jr_id — confirmed a per-visit referral id on catsone.com, not a job identifier', () => {
+    const withParam = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer?jr_id=6a4c4722971cd25b06f9a307');
+    const withoutParam = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/15742823-CNET-Developer');
+    expect(withParam).toBe(withoutParam);
+  });
+});
+
 describe('normalizeUrlForCache — preserves job identifiers', () => {
   it('keeps Greenhouse gh_jid', () => {
     const k1 = normalizeUrlForCache('https://acme.greenhouse.io/?gh_jid=4567&utm_source=li');
@@ -103,6 +122,27 @@ describe('normalizeUrlForCache — preserves job identifiers', () => {
   it('keeps two different CATS job ids distinct', () => {
     const a = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/111-aaa/apply');
     const b = normalizeUrlForCache('https://timberlinegrp.catsone.com/careers/7276/jobs/222-bbb/apply');
+    expect(a).not.toBe(b);
+  });
+
+  // The actual bug: an earlier version of this function used an ALLOWLIST
+  // of known job-id query params and dropped every other one. A platform
+  // not on that list, whose job id lives ONLY in an unlisted query param
+  // with an otherwise generic/shared path, made two DIFFERENT job
+  // postings collapse to the identical key — so the second job silently
+  // showed as "Applied" the moment its page loaded, even though the user
+  // never applied to it.
+  it('keeps two different jobs distinct on a platform with an unrecognized job-id query param (the actual bug)', () => {
+    const a = normalizeUrlForCache('https://www.ziprecruiter.com/apply?jid=abc111');
+    const b = normalizeUrlForCache('https://www.ziprecruiter.com/apply?jid=xyz999');
+    expect(a).not.toBe(b);
+    expect(a).toContain('jid=abc111');
+    expect(b).toContain('jid=xyz999');
+  });
+
+  it('keeps an arbitrary, previously-unlisted job-id param name (not just a hardcoded few)', () => {
+    const a = normalizeUrlForCache('https://careers.example.com/job?postingId=111');
+    const b = normalizeUrlForCache('https://careers.example.com/job?postingId=222');
     expect(a).not.toBe(b);
   });
 });
