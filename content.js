@@ -4462,6 +4462,69 @@
   }
 
   /**
+   * Safety net for a real, only-partially-diagnosed bug found live on a
+   * Hireology-hosted careers form: "First name"/"Email address"/"Phone
+   * number" fields (labeled with a trailing "(required)"/"(optional)" —
+   * see directFill.js's cleanLabel fix for that half of the story) stayed
+   * empty across repeated attempts, while sibling fields like city/zip
+   * were inconsistent — filled on one run, empty on the next, on the SAME
+   * page. That inconsistency doesn't fit a pure label-matching bug; it
+   * fits a common ATS pattern instead: uploading a resume triggers the
+   * SITE's own async resume-parse-and-autofill (a "smart apply" feature),
+   * which can clear a field back to empty while "loading", then either
+   * repopulate it (sometimes) or leave it blank if its own parse fails —
+   * running well AFTER attachResumeFile()'s call, which happens before
+   * this step's text-field fill in fillCurrentAutofillStep().
+   *
+   * Runs after a short delay (long enough for that kind of async site
+   * behavior to have already happened) and re-fills a small, deliberately
+   * narrow set of known personal-info fields — matched by a cleaned,
+   * near-exact label, the same fields directFill.js's own profileMap
+   * covers — if they're STILL empty despite matching the profile. Logs
+   * clearly so a live run's console shows directly whether this is what's
+   * happening. Never touches a field that already has a value, so it
+   * can't clobber something the user edited by hand in the meantime.
+   * @async
+   * @returns {Promise<number>} How many fields were recovered.
+   */
+  async function verifyAndRefillPersonalInfoFields() {
+    await sleep(1500);
+    let profile;
+    try {
+      profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
+    } catch (_) { return 0; }
+    if (!profile) return 0;
+
+    const cleanLabel = (t) => (t || '').replace(/\s*\((?:required|optional)\)\s*$/i, '').trim().toLowerCase();
+    const nameParts = (profile.name || '').trim().split(/\s+/).filter(Boolean);
+    const map = {
+      'first name': nameParts[0] || '',
+      'preferred first name': nameParts[0] || '',
+      'last name': nameParts.slice(1).join(' '),
+      'full name': profile.name || '',
+      'name': profile.name || '',
+      'email': profile.email || '',
+      'email address': profile.email || '',
+      'phone': profile.phone || '',
+      'phone number': profile.phone || '',
+    };
+
+    let recovered = 0;
+    document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])').forEach(input => {
+      if (input.offsetParent === null) return;
+      if (input.value && input.value.trim()) return; // already has a value — nothing to recover
+      const label = cleanLabel(getFieldLabel(input));
+      const value = map[label];
+      if (!value) return;
+      console.warn('[JobMatch AI][Auto-Bid] verifyAndRefillPersonalInfoFields: "%s" was still empty 1500ms after the main fill — re-filling (likely cleared by the page\'s own JS afterward)', label);
+      fillInput(input, value);
+      showAutofillBadge(input);
+      recovered++;
+    });
+    return recovered;
+  }
+
+  /**
    * Fills every fillable field on the CURRENT step of the form — one pass
    * of detect/attach/direct-fill/AI-fill, no wizard-navigation concerns of
    * its own (see autofillForm(), which loops this across "Next"-button
@@ -4625,9 +4688,19 @@
       totalFilled += iframeFilled;
     } catch (_) { /* best-effort — top-frame fill above still stands */ }
 
+    // See verifyAndRefillPersonalInfoFields's own doc comment — a
+    // defensive recheck for a real bug where some ATS platforms' own JS
+    // clears name/email/phone back to empty shortly after we fill them.
+    let recoveredCount = 0;
+    try {
+      recoveredCount = await verifyAndRefillPersonalInfoFields();
+      totalFilled += recoveredCount;
+    } catch (_) { /* best-effort */ }
+
     let msg = `Filled ${totalFilled} field${totalFilled === 1 ? '' : 's'}.`;
     if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
     if (iframeFilled > 0) msg += ` (${iframeFilled} in an embedded form.)`;
+    if (recoveredCount > 0) msg += ` Re-filled ${recoveredCount} field${recoveredCount === 1 ? '' : 's'} the page cleared after our fill.`;
     if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
     setStatus(msg, 'success');
     setTimeout(clearStatus, 4000);

@@ -82,8 +82,27 @@
     return '';
   }
 
+  // Real bug found live on a Hireology-hosted careers form: its labels are
+  // literally written as "First name (required)", "Email address
+  // (required)", "City (optional)", etc. — the requirement annotation is
+  // part of the label's own visible text, not a separate element. matchQA
+  // below does an EXACT (non-fuzzy) match against a short profileMap key
+  // like "first name" for these common personal-info fields, specifically
+  // so it never mismatches an unrelated field — but that exactness means
+  // "first name (required)" doesn't match "first name" at all, silently
+  // skipping the field here and leaving it for the AI-driven Pass 2 (which
+  // costs an extra round trip, and isn't guaranteed to fill it the same
+  // way). Stripping a trailing "(required)"/"(optional)" annotation before
+  // the exact-match lookup fixes this for any ATS using this common
+  // labeling convention, not just Hireology.
   function cleanLabel(text) {
-    return (text || '').replace(/\*/g, '').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+    return (text || '')
+      .replace(/\*/g, '')
+      .replace(/\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\s*\((?:required|optional)\)\s*$/i, '')
+      .trim();
   }
 
   /**
