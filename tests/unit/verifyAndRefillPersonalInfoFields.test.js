@@ -33,14 +33,15 @@ if (START === -1 || END === -1 || END <= START) {
 }
 const FN_SRC = SRC.slice(START, END);
 
-function buildHarness({ profile, getFieldLabelImpl } = {}) {
+function buildHarness({ profile, getFieldLabelImpl, onSleep } = {}) {
   const filledCalls = [];
   const badgedEls = [];
   const factory = new Function( // eslint-disable-line no-new-func
-    'profile', 'filledCalls', 'badgedEls', 'getFieldLabelImpl',
+    'profile', 'filledCalls', 'badgedEls', 'getFieldLabelImpl', 'onSleep',
     `
     const _activeResumeId = 'r1';
-    async function sleep() {} // resolves immediately — no real 1500ms wait in tests
+    let _sleepCallCount = 0;
+    async function sleep() { if (onSleep) onSleep(++_sleepCallCount); } // resolves immediately — no real delay in tests
     async function sendMessage(msg) {
       if (msg.type === 'GET_PROFILE') return profile;
       return null;
@@ -52,7 +53,7 @@ function buildHarness({ profile, getFieldLabelImpl } = {}) {
     return verifyAndRefillPersonalInfoFields;
     `,
   );
-  return { run: factory(profile, filledCalls, badgedEls, getFieldLabelImpl), filledCalls, badgedEls };
+  return { run: factory(profile, filledCalls, badgedEls, getFieldLabelImpl, onSleep), filledCalls, badgedEls };
 }
 
 // Labels come straight from each input's own <label for="...">, exactly
@@ -136,6 +137,44 @@ describe('verifyAndRefillPersonalInfoFields — the actual bug (fields cleared a
     const recovered = await run();
     expect(recovered).toBe(0);
     expect(filledCalls).toHaveLength(0);
+  });
+
+  // Regression for a real bug found live on an Ashby-hosted application
+  // form (its own "Autofill from resume" feature clears/re-writes fields
+  // asynchronously, well after a single fixed-delay check can catch it —
+  // see this function's own doc comment). A single check at 1500ms can
+  // itself land mid-clear: it "recovers" the field, but the page's own
+  // slower cycle then wipes it out again shortly after. This simulates
+  // exactly that — the field gets cleared again between the two checks —
+  // and verifies the SECOND pass catches it.
+  it('catches a field that gets cleared again between the first and second check', async () => {
+    document.body.innerHTML = `
+      <input id="first_name-0" type="text" value="">
+      <label for="first_name-0">First name</label>
+    `;
+    const onSleep = (callCount) => {
+      if (callCount === 2) {
+        // Simulate the page's own slower async cycle wiping out the value
+        // our FIRST pass just recovered, right before the second check runs.
+        document.getElementById('first_name-0').value = '';
+      }
+    };
+    const { run, filledCalls } = buildHarness({ profile, getFieldLabelImpl: getFieldLabelViaDom, onSleep });
+    const recovered = await run();
+    expect(recovered).toBe(2); // once per pass
+    expect(document.getElementById('first_name-0').value).toBe('Randolph'); // left filled by the second pass
+    expect(filledCalls).toHaveLength(2);
+  });
+
+  it('does only one pass worth of work when nothing gets cleared again (no regression)', async () => {
+    document.body.innerHTML = `
+      <input id="first_name-0" type="text" value="">
+      <label for="first_name-0">First name</label>
+    `;
+    const { run, filledCalls } = buildHarness({ profile, getFieldLabelImpl: getFieldLabelViaDom });
+    const recovered = await run();
+    expect(recovered).toBe(1); // first pass recovers it, second pass sees it's already filled
+    expect(filledCalls).toHaveLength(1);
   });
 
   it('does nothing when the profile itself has no usable value for a field', async () => {

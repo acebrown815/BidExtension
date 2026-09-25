@@ -4553,11 +4553,23 @@
    * clearly so a live run's console shows directly whether this is what's
    * happening. Never touches a field that already has a value, so it
    * can't clobber something the user edited by hand in the meantime.
+   *
+   * Runs the check TWICE (at ~1500ms, then ~1500ms after that again) rather
+   * than once — confirmed live on an Ashby form (its own "Autofill from
+   * resume" pane, which parses the just-uploaded resume server-side) that
+   * a single check at a fixed 1500ms delay can itself land mid-clear: the
+   * site's own async parse hadn't finished re-populating the field yet, so
+   * the field looked non-empty a moment later purely from OUR recovery
+   * fill — but the site's own slower clear-and-refill cycle then completed
+   * shortly AFTER that, re-clearing (or re-writing without properly
+   * updating the site's own validation-tracking state) what we'd just set,
+   * with nothing left afterward to catch it. A second, later check re-fills
+   * again if that happened, and is a no-op (skips every field) if it
+   * didn't.
    * @async
-   * @returns {Promise<number>} How many fields were recovered.
+   * @returns {Promise<number>} How many fields were recovered (across both checks).
    */
   async function verifyAndRefillPersonalInfoFields() {
-    await sleep(1500);
     let profile;
     try {
       profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId });
@@ -4578,18 +4590,26 @@
       'phone number': profile.phone || '',
     };
 
-    let recovered = 0;
-    document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])').forEach(input => {
-      if (input.offsetParent === null) return;
-      if (input.value && input.value.trim()) return; // already has a value — nothing to recover
-      const label = cleanLabel(getFieldLabel(input));
-      const value = map[label];
-      if (!value) return;
-      console.warn('[JobMatch AI][Auto-Bid] verifyAndRefillPersonalInfoFields: "%s" was still empty 1500ms after the main fill — re-filling (likely cleared by the page\'s own JS afterward)', label);
-      fillInput(input, value);
-      showAutofillBadge(input);
-      recovered++;
-    });
+    const runOnePass = (afterMs) => {
+      let recovered = 0;
+      document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])').forEach(input => {
+        if (input.offsetParent === null) return;
+        if (input.value && input.value.trim()) return; // already has a value — nothing to recover
+        const label = cleanLabel(getFieldLabel(input));
+        const value = map[label];
+        if (!value) return;
+        console.warn(`[JobMatch AI][Auto-Bid] verifyAndRefillPersonalInfoFields: "%s" was still empty ${afterMs}ms after the main fill — re-filling (likely cleared by the page's own JS afterward)`, label);
+        fillInput(input, value);
+        showAutofillBadge(input);
+        recovered++;
+      });
+      return recovered;
+    };
+
+    await sleep(1500);
+    let recovered = runOnePass(1500);
+    await sleep(1500);
+    recovered += runOnePass(3000);
     return recovered;
   }
 
@@ -4768,12 +4788,19 @@
       totalFilled += iframeFilled;
     } catch (_) { /* best-effort — top-frame fill above still stands */ }
 
-    // See verifyAndRefillPersonalInfoFields's own doc comment — a
-    // defensive recheck for a real bug where some ATS platforms' own JS
-    // clears name/email/phone back to empty shortly after we fill them.
+    // See verifyAndRefillPersonalInfoFields's and verifyAndReattachResumeFile's
+    // own doc comments — defensive rechecks for a real bug where some ATS
+    // platforms' own JS clears name/email/phone (or the resume file input)
+    // back to empty shortly after we fill them. Run concurrently — both
+    // are independent, delay-based checks with nothing to gain from
+    // serializing their waits.
     let recoveredCount = 0;
+    let reattachedResume = 0;
     try {
-      recoveredCount = await verifyAndRefillPersonalInfoFields();
+      [recoveredCount, reattachedResume] = await Promise.all([
+        verifyAndRefillPersonalInfoFields().catch(() => 0),
+        verifyAndReattachResumeFile(resumeResult.attached).catch(() => 0),
+      ]);
       totalFilled += recoveredCount;
     } catch (_) { /* best-effort */ }
 
@@ -4781,6 +4808,7 @@
     if (resumeResult.attached > 0) msg += ` Attached resume (${resumeResult.fileName}).`;
     if (iframeFilled > 0) msg += ` (${iframeFilled} in an embedded form.)`;
     if (recoveredCount > 0) msg += ` Re-filled ${recoveredCount} field${recoveredCount === 1 ? '' : 's'} the page cleared after our fill.`;
+    if (reattachedResume > 0) msg += ` Re-attached the resume file after the page cleared it.`;
     if (skipped.length > 0) msg += ` ${skipped.length} left for you to fill in manually.`;
     setStatus(msg, 'success');
     setTimeout(clearStatus, 4000);
@@ -5515,6 +5543,71 @@
     }
 
     return { attached, fileName: attached > 0 ? fileName : null };
+  }
+
+  /**
+   * Safety net for a real bug found live on an Ashby-hosted application
+   * form (jobs.ashbyhq.com/.../application): attachResumeFile() reported
+   * success (the panel's own "Attached to this form" indicator showed a
+   * resume name) and the required Name field visibly had a value too, yet
+   * submitting the form still produced "Missing entry for required field:
+   * Resume" AND "Missing entry for required field: Name" — confirmed by
+   * the user resubmitting minutes later with no change, ruling out a
+   * simple timing race with our OWN fill.
+   *
+   * The likely mechanism (same family of bug verifyAndRefillPersonalInfoFields
+   * already exists for, on the same page even, but with no file-input
+   * equivalent): Ashby's own "Autofill from resume" feature runs its own
+   * async parse-and-populate cycle off of a resume upload, which can clear
+   * a file input's `.files` back to empty as part of that cycle — same
+   * general class of "the page's own JS clears what we just filled"
+   * behavior already confirmed on other ATS platforms for text fields,
+   * just never checked for the file input itself before now.
+   *
+   * Runs after attachResumeFile() and after a delay long enough for that
+   * kind of async site behavior to have already happened, and re-attaches
+   * to any field we successfully attached to that now shows an empty
+   * `.files` list. Deliberately skips the synthetic drag-event simulation
+   * attachResumeFile() does on the first attempt — that dispatches with
+   * `bubbles: true`, which could itself be what reaches an unrelated
+   * page-level "drop anywhere to autofill" listener in the first place;
+   * the retry only needs the native input + 'change' event, the technique
+   * already proven to work broadly across every other ATS this extension
+   * supports.
+   * @async
+   * @param {number} previouslyAttached - the `attached` count attachResumeFile() returned.
+   * @returns {Promise<number>} How many fields were re-attached.
+   */
+  async function verifyAndReattachResumeFile(previouslyAttached) {
+    if (!previouslyAttached) return 0;
+    await sleep(2000);
+
+    const stillAttached = _resumeFileFields.filter(({ el }) => el.isConnected && el.files && el.files.length > 0).length;
+    if (stillAttached >= previouslyAttached) return 0; // nothing was cleared
+
+    const built = await buildActiveResumeFile();
+    if (!built) return 0;
+    const { file, fileName: _fileName, ext, mime } = built;
+
+    let reattached = 0;
+    for (const { el } of _resumeFileFields) {
+      if (!el.isConnected) continue;
+      if (el.files && el.files.length > 0) continue; // still has its file — untouched
+      if (!fileAcceptsType(el, ext, mime)) continue;
+      try {
+        console.warn('[JobMatch AI][Auto-Bid] verifyAndReattachResumeFile: resume file was cleared after our fill — re-attaching (likely cleared by the page\'s own JS afterward)');
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        el.files = dt.files;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        showAutofillBadge(el);
+        reattached++;
+      } catch (err) {
+        console.warn('[JobMatch AI] Could not re-attach resume file to field:', err.message);
+      }
+    }
+    return reattached;
   }
 
   /**
