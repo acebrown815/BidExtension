@@ -30,7 +30,7 @@
  * and flushed to the active slot on every save.
  * @type {{
  *   name: string, email: string, phone: string, location: string,
- *   linkedin: string, website: string, summary: string,
+ *   linkedin: string, github: string, website: string, summary: string,
  *   skills: string[], experience: Object[], education: Object[],
  *   certifications: string[], projects: Object[],
  *   resumeFileName?: string
@@ -38,7 +38,7 @@
  */
 let profileData = {
   name: '', email: '', phone: '', location: '',
-  linkedin: '', website: '', summary: '',
+  linkedin: '', github: '', website: '', summary: '',
   skills: [], experience: [], education: [],
   certifications: [], projects: []
 };
@@ -84,6 +84,7 @@ async function autoSaveProfile() {
   profileData.phone    = document.getElementById('pPhone').value.trim();
   profileData.location = document.getElementById('pLocation').value.trim();
   profileData.linkedin = document.getElementById('pLinkedin').value.trim();
+  profileData.github   = document.getElementById('pGithub').value.trim();
   profileData.website  = document.getElementById('pWebsite').value.trim();
   profileData.summary  = document.getElementById('pSummary').value.trim();
 
@@ -442,6 +443,7 @@ function populateProfileForm() {
   document.getElementById('pPhone').value    = profileData.phone    || '';
   document.getElementById('pLocation').value = profileData.location || '';
   document.getElementById('pLinkedin').value = profileData.linkedin || '';
+  document.getElementById('pGithub').value   = profileData.github   || '';
   document.getElementById('pWebsite').value  = profileData.website  || '';
   document.getElementById('pSummary').value  = profileData.summary  || '';
 
@@ -453,7 +455,7 @@ function populateProfileForm() {
 }
 
 // ─── Dirty tracking for personal info fields ─────────────────────────────────
-['pName', 'pEmail', 'pPhone', 'pLocation', 'pLinkedin', 'pWebsite', 'pSummary'].forEach(id => {
+['pName', 'pEmail', 'pPhone', 'pLocation', 'pLinkedin', 'pGithub', 'pWebsite', 'pSummary'].forEach(id => {
   document.getElementById(id).addEventListener('input', markProfileDirty);
 });
 
@@ -752,6 +754,7 @@ document.getElementById('saveProfileBtn').addEventListener('click', async () => 
   profileData.phone    = document.getElementById('pPhone').value.trim();
   profileData.location = document.getElementById('pLocation').value.trim();
   profileData.linkedin = document.getElementById('pLinkedin').value.trim();
+  profileData.github   = document.getElementById('pGithub').value.trim();
   profileData.website  = document.getElementById('pWebsite').value.trim();
   profileData.summary  = document.getElementById('pSummary').value.trim();
 
@@ -2208,7 +2211,7 @@ function ensureActiveResume() {
  */
 function blankProfileData() {
   return {
-    name: '', email: '', phone: '', location: '', linkedin: '', website: '',
+    name: '', email: '', phone: '', location: '', linkedin: '', github: '', website: '',
     summary: '', skills: [], experience: [], education: [], certifications: [], projects: []
   };
 }
@@ -2232,6 +2235,7 @@ function syncCurrentProfileFromForm() {
   profileData.phone    = document.getElementById('pPhone').value.trim();
   profileData.location = document.getElementById('pLocation').value.trim();
   profileData.linkedin = document.getElementById('pLinkedin').value.trim();
+  profileData.github   = document.getElementById('pGithub').value.trim();
   profileData.website  = document.getElementById('pWebsite').value.trim();
   profileData.summary  = document.getElementById('pSummary').value.trim();
 }

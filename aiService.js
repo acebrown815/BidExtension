@@ -552,6 +552,7 @@ Return ONLY a JSON object with this structure (use empty strings/arrays for miss
   "phone": "phone number",
   "location": "City, State",
   "linkedin": "LinkedIn URL",
+  "github": "GitHub profile URL",
   "website": "portfolio/website URL",
   "summary": "professional summary",
   "skills": ["skill1", "skill2"],
@@ -747,6 +748,9 @@ RULES:
 2) TEXT/TEXTAREA: Use qa_hint if available. Otherwise, if a SAVED Q&A ANSWERS section appears below, search it
    for a matching question and use its answer. Otherwise generate from the resume profile. Keep answers
    professional. If insufficient data → NEEDS_USER_INPUT.
+   - LinkedIn URL, GitHub URL, and portfolio/website URL are DIFFERENT fields with different values.
+     NEVER substitute one for another (e.g. never put the LinkedIn URL into a GitHub field, or vice versa)
+     even if only one of them is present in the profile. If the specific one asked for is missing → NEEDS_USER_INPUT.
 
 3) CHECKBOX: Return "Yes" to check, "No" to uncheck.
 

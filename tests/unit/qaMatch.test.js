@@ -101,4 +101,34 @@ describe('qaQuestionMatchesLabel — should NOT match', () => {
     expect(qaQuestionMatchesLabel(null, 'Anything')).toBe(false);
     expect(qaQuestionMatchesLabel('Anything', undefined)).toBe(false);
   });
+
+  // Real bug found live on a Greenhouse-hosted careers form: the saved
+  // Q&A answer for "LinkedIn Profile URL" got matched against the form's
+  // "Github/Gitlab Profile URL" field, filling it with the LinkedIn URL
+  // instead of leaving it blank. Root cause: after tokenizing (the "/" in
+  // "Github/Gitlab" splits into two separate words), the only overlap
+  // between the two questions was "profile" and "url" — generic filler
+  // words that appear in nearly every "<platform> Profile URL"-style
+  // question and carry no platform-specific meaning, but happened to hit
+  // the >=2-shared-keyword bar anyway. Not GitHub-specific: the same
+  // false match would happen between any two "<platform> Profile URL"
+  // questions (LinkedIn/GitHub/Portfolio/Twitter/etc.) sharing nothing but
+  // these words.
+  it('does NOT match "LinkedIn Profile URL" against "Github/Gitlab Profile URL" — the real bug', () => {
+    expect(qaQuestionMatchesLabel('LinkedIn Profile URL', 'Github/Gitlab Profile URL')).toBe(false);
+  });
+
+  it('does NOT match other distinct "<platform> Profile URL"-style question pairs sharing only filler words', () => {
+    expect(qaQuestionMatchesLabel('LinkedIn Profile URL', 'Portfolio / Personal Website URL')).toBe(false);
+    expect(qaQuestionMatchesLabel('GitHub Profile URL', 'Twitter Profile URL')).toBe(false);
+  });
+
+  it('still matches the SAME platform question written differently (no regression)', () => {
+    expect(qaQuestionMatchesLabel('GitHub Profile URL', 'GitHub/GitLab Profile URL')).toBe(false);
+    // ^ intentionally false too: GitHub and GitLab are different platforms/
+    // fields once "profile"/"url" stop counting as shared keywords — the
+    // matcher no longer has any basis to conflate them, which is correct.
+    expect(qaQuestionMatchesLabel('LinkedIn Profile URL', 'LinkedIn Profile URL')).toBe(true); // exact match still works
+    expect(qaQuestionMatchesLabel('LinkedIn Profile URL', 'LinkedIn Profile')).toBe(true); // containment strategy still works
+  });
 });
