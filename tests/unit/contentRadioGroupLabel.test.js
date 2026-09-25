@@ -94,7 +94,7 @@ describe('content.js getRadioGroupLabel (AI-facing question_text for radio group
     expect(getRadioGroupLabel([radios[2], radios[0], radios[1]])).toBe('What is your gender identity?');
   });
 
-  it('falls back to the generic resolver for a radio group with no fieldset/legend structure', () => {
+  it('finds the sibling label via the structural container fallback, even with no fieldset/role/radio-group class at all', () => {
     document.body.innerHTML = `
       <label for="r">Are you willing to relocate?</label>
       <div id="r">
@@ -103,12 +103,14 @@ describe('content.js getRadioGroupLabel (AI-facing question_text for radio group
       </div>
     `;
     const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-    // No fieldset ancestor and no id on the radios — getRadioGroupLabel
-    // finds no group container at all, so it falls through to
-    // getFieldLabel(radios[0]), which humanizes the shared `name`
-    // attribute (its own strategy 6) rather than finding the sibling
-    // <label for="r"> (the radios' id-less <div id="r"> wrapper isn't
-    // itself a <label>, so no earlier strategy matches it either).
-    expect(getRadioGroupLabel(radios)).toBe('relocate');
+    // No fieldset/role="radiogroup"/radio-group-class ancestor — but
+    // findRadioGroupContainer's structural fallback (see the Lever fix)
+    // finds <div id="r"> anyway, since it's the smallest ancestor
+    // containing both radios; its own previous sibling is the real
+    // question label, which the sibling-walk then correctly finds. Used
+    // to fall all the way through to getFieldLabel(radios[0])'s "humanize
+    // the shared name attribute" last resort ("relocate") — this is
+    // strictly better.
+    expect(getRadioGroupLabel(radios)).toBe('Are you willing to relocate?');
   });
 });

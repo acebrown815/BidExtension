@@ -114,3 +114,43 @@ describe('getRadioGroupLabel — no group structure at all', () => {
     expect(getRadioGroupLabel(radiosFromDom(), dummyFallback)).toBe('FALLBACK_SHOULD_NOT_BE_USED');
   });
 });
+
+// Regression for a real bug found live on Lever: its own custom-question
+// radio groups use no <fieldset>, no role="radiogroup", and no class
+// containing "radio-group" at all — just its own ATS-specific class names
+// ("application-field"/"application-question"). findRadioGroupContainer's
+// old explicit-signal-only search found nothing, so this fell all the way
+// through to the single-element fallback, which picked up the FIRST
+// option's own wrapping <label> text ("No") as if it were the whole
+// question — the AI never saw "Do you require Visa sponsorship..." at all.
+describe('getRadioGroupLabel — Lever-style custom question with no semantic group markup at all (the actual bug)', () => {
+  const LEVER_SPONSORSHIP_HTML = `
+    <li class="application-question custom-question">
+      <div>
+        <div class="application-label full-width multiple-choice">
+          <div class="text">Do you require Visa sponsorship to work in your location?<span class="required">✱</span></div>
+        </div>
+        <div class="application-field full-width required-field">
+          <ul data-qa="multiple-choice">
+            <li><label><input type="radio" name="cards[83e19ce0-bc76-43eb-b041-10f491022ced][field0]" value="No" required="required"><span class="application-answer-alternative">No</span></label></li>
+            <li><label><input type="radio" name="cards[83e19ce0-bc76-43eb-b041-10f491022ced][field0]" value="Yes, sponsorship is required" required="required"><span class="application-answer-alternative">Yes, sponsorship is required</span></label></li>
+          </ul>
+        </div>
+      </div>
+    </li>
+  `;
+
+  it('resolves the real question via the structural container fallback, not the first option\'s own "No"', () => {
+    document.body.innerHTML = LEVER_SPONSORSHIP_HTML;
+    const label = getRadioGroupLabel(radiosFromDom(), dummyFallback);
+    expect(label).toContain('Do you require Visa sponsorship');
+    expect(label).not.toBe('No');
+    expect(label).not.toBe('FALLBACK_SHOULD_NOT_BE_USED');
+  });
+
+  it('resolves the same way regardless of which radio in the group is passed first', () => {
+    document.body.innerHTML = LEVER_SPONSORSHIP_HTML;
+    const radios = radiosFromDom().reverse(); // "Yes, sponsorship is required" first this time
+    expect(getRadioGroupLabel(radios, dummyFallback)).toContain('Do you require Visa sponsorship');
+  });
+});

@@ -213,7 +213,7 @@ describe('getRadioGroupLabel (direct access — proves the container-detection b
     expect(getRadioGroupLabel(radios)).toBe('What is your gender identity?');
   });
 
-  it('falls back to the generic resolver for a radio group with no fieldset/legend structure', () => {
+  it('finds the sibling label via the structural container fallback, even with no fieldset/legend structure', () => {
     document.body.innerHTML = `
       <label for="r">Are you willing to relocate?</label>
       <div id="r">
@@ -223,9 +223,12 @@ describe('getRadioGroupLabel (direct access — proves the container-detection b
     `;
     const { getRadioGroupLabel } = loadDirectFillLabelHelpers();
     const radios = Array.from(document.querySelectorAll('input[type="radio"]'));
-    // No fieldset ancestor is found at all, so this legitimately falls
-    // through to getElementLabel(radios[0]), which humanizes the shared
-    // `name` attribute.
-    expect(getRadioGroupLabel(radios)).toBe('relocate');
+    // findRadioGroupContainer's structural fallback (see the Lever fix)
+    // finds <div id="r"> — the smallest ancestor containing both radios
+    // — even with no fieldset/role/radio-group class anywhere; its
+    // previous sibling is the real question label. Used to fall all the
+    // way through to getElementLabel(radios[0])'s "humanize the shared
+    // name attribute" last resort ("relocate") — this is strictly better.
+    expect(getRadioGroupLabel(radios)).toBe('Are you willing to relocate?');
   });
 });
