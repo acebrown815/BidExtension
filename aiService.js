@@ -751,6 +751,10 @@ RULES:
    - LinkedIn URL, GitHub URL, and portfolio/website URL are DIFFERENT fields with different values.
      NEVER substitute one for another (e.g. never put the LinkedIn URL into a GitHub field, or vice versa)
      even if only one of them is present in the profile. If the specific one asked for is missing → NEEDS_USER_INPUT.
+   - If a single field's label lists SEVERAL platforms as acceptable (e.g. "LinkedIn, GitHub, Personal
+     Website or other social profile"), it still expects exactly ONE URL as the answer — this is almost
+     always a single-value URL input that rejects anything else. NEVER join multiple URLs together with a
+     comma or "and"/"or". Pick just ONE (prefer LinkedIn if present, otherwise whichever one is available).
 
 3) CHECKBOX: Return "Yes" to check, "No" to uncheck.
 

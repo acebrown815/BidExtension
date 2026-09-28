@@ -33,13 +33,13 @@ if (START === -1 || END === -1 || END <= START) {
 }
 const BLOCK_SRC = SRC.slice(START, END);
 
-function buildHarness({ profileLocation, suggestionTexts = [] } = {}) {
+function buildHarness({ profileLocation, savedLocationAnswer = '', suggestionTexts = [] } = {}) {
   const filledValues = [];
   const clickedTexts = [];
   const suggestionEls = suggestionTexts.map(t => ({ text: t, el: { click: () => clickedTexts.push(t) } }));
 
   const factory = new Function( // eslint-disable-line no-new-func
-    'sendMessage', 'fillInput', 'waitForVisibleOptions', 'clickElement', '_activeResumeId',
+    'sendMessage', 'fillInput', 'findSavedLocationAnswer', 'findBestLocationMatch', 'waitForVisibleOptions', 'clickElement', '_activeResumeId',
     `
     return async function run(input, questionText) {
       ${BLOCK_SRC}
@@ -50,13 +50,20 @@ function buildHarness({ profileLocation, suggestionTexts = [] } = {}) {
 
   const sendMessage = async (msg) => {
     if (msg.type === 'GET_PROFILE') return { location: profileLocation };
+    if (msg.type === 'GET_QA_LIST') return [];
     return {};
   };
   const fillInput = (input, value) => { filledValues.push(value); };
+  const findSavedLocationAnswer = () => savedLocationAnswer;
+  // findBestLocationMatch's own matching logic has its own dedicated
+  // tests (findBestLocationMatch.test.js) — here it's a simple passthrough
+  // to the first suggestion, since these tests are about the type-then-
+  // click flow itself, not the disambiguation logic.
+  const findBestLocationMatch = (suggestions) => suggestions[0];
   const waitForVisibleOptions = async () => suggestionEls;
   const clickElement = (el) => { if (el && el.click) el.click(); };
 
-  const run = factory(sendMessage, fillInput, waitForVisibleOptions, clickElement, 'resume-1');
+  const run = factory(sendMessage, fillInput, findSavedLocationAnswer, findBestLocationMatch, waitForVisibleOptions, clickElement, 'resume-1');
   return { run, filledValues, clickedTexts };
 }
 
@@ -98,5 +105,30 @@ describe('fillCustomDropdown — city/location special case (the actual bug)', (
     const { run: runOther, filledValues: filledOther } = buildHarness({ profileLocation: 'Summerfield, FL, USA' });
     expect(await runOther({}, 'What is your gender?')).toBe('FELL_THROUGH');
     expect(filledOther).toEqual([]);
+  });
+
+  // Requested explicitly: a saved Q&A answer (e.g. the built-in "City"
+  // question) is the more deliberately-curated source of truth when the
+  // user has filled one in, and should be preferred over the resume-
+  // parsed profile.location rather than the two ever being mixed up.
+  it('prefers a saved Q&A location answer over profile.location when both exist', async () => {
+    const { run, filledValues } = buildHarness({
+      profileLocation: 'Summerfield, FL, USA', // resume-parsed — should be ignored
+      savedLocationAnswer: 'Austin, TX, USA', // the user's own saved Q&A answer — should win
+      suggestionTexts: ['Austin, TX, USA'],
+    });
+    const result = await run({}, 'Location (City)');
+    expect(result).toBe(true);
+    expect(filledValues).toEqual(['Austin']); // typed from the Q&A answer, not the resume
+  });
+
+  it('falls back to profile.location when no Q&A answer was saved (no regression)', async () => {
+    const { run, filledValues } = buildHarness({
+      profileLocation: 'Summerfield, FL, USA',
+      savedLocationAnswer: '',
+      suggestionTexts: ['Summerfield, FL, USA'],
+    });
+    await run({}, 'Location (City)');
+    expect(filledValues).toEqual(['Summerfield']);
   });
 });

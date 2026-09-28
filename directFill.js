@@ -188,7 +188,26 @@
   // Shared by the checkbox handler (section 4) and the custom yes/no
   // button-toggle handler (section 5): whether a Q&A answer reads as a
   // yes/no-shaped answer at all, and if so, which side it lands on.
-  const YES_NO_ANSWER_RE = /^(yes|no|true|false|i am|i do|i have|i don't|i am not)/i;
+  const YES_NO_ANSWER_RE = /^(yes|no|true|false|1|0)\b|^i\s+(?:am|do|have|was|would|did|will)\s+(?:not\s+)?\w|^i\s+(?:don't|doesn't|didn't|haven't|hasn't|hadn't|isn't|wasn't|wouldn't|won't|can't|couldn't)\b/i;
+
+  // Whether a yes/no-shaped answer specifically reads as NEGATIVE — MUST be
+  // checked before AFFIRMATIVE_ANSWER_RE (see that constant's own comment
+  // for why: it only anchors on a leading phrase like "I am", with no way
+  // to notice a negation word immediately after it on its own).
+  const NEGATIVE_ANSWER_RE = /^(no|false|0)\b|^i\s+(?:am|do|have|was|would|did|will)\s+not\b|^i\s+(?:don't|doesn't|didn't|haven't|hasn't|hadn't|isn't|wasn't|wouldn't|won't|can't|couldn't)\b/i;
+
+  // Whether a yes/no-shaped answer reads as AFFIRMATIVE. Deliberately
+  // naive about negation on its own — "I am not a protected veteran"
+  // starts with "I am" and would test true here — so every caller MUST
+  // check NEGATIVE_ANSWER_RE first and only fall back to this when that's
+  // false. Real bug found live: a saved "Veteran status" answer of "I am
+  // not a protected veteran" got matched (via matchQA's short-label
+  // containment check — "Veteran" is contained in "Veteran status") against
+  // an unrelated "Which of the following communities do you belong to?"
+  // checkbox literally labeled "Veteran", and this regex alone read it as
+  // an affirmative "yes, check this box" — checking a box for a community
+  // the user explicitly said they don't belong to, because it can't see
+  // the "not" that follows "I am".
   const AFFIRMATIVE_ANSWER_RE = /^(yes|true|1|checked|agree|accept|i am|i do|i have)/i;
 
   // ─── Option matching for dropdowns ────────────────────────────
@@ -456,7 +475,7 @@
       // Only fill if the Q&A answer is clearly a yes/no type
       if (!YES_NO_ANSWER_RE.test(answer)) return;
 
-      const shouldCheck = AFFIRMATIVE_ANSWER_RE.test(answer);
+      const shouldCheck = !NEGATIVE_ANSWER_RE.test(answer) && AFFIRMATIVE_ANSWER_RE.test(answer);
       if (cb.checked !== shouldCheck) {
         dbg(`Direct fill checkbox: "${label}" matched`);
         // A single click toggles the checkbox; we only get here when the
@@ -496,7 +515,7 @@
       const answer = matchQA(label, qaList, profile);
       if (!answer || !YES_NO_ANSWER_RE.test(answer)) return;
 
-      const wantsYes = AFFIRMATIVE_ANSWER_RE.test(answer);
+      const wantsYes = !NEGATIVE_ANSWER_RE.test(answer) && AFFIRMATIVE_ANSWER_RE.test(answer);
       const target = wantsYes ? toggle.yesBtn : toggle.noBtn;
       dbg(`Direct fill yes/no toggle: "${label}" -> ${wantsYes ? 'Yes' : 'No'}`);
       clickNatively(target);

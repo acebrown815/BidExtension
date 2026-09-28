@@ -1471,6 +1471,7 @@
         padding: 5px 10px;
         margin: -2px 0 10px;
         word-break: break-all;
+        line-height: initial;
       }
       .jm-attached-resume strong {
         color: var(--jm-text);
@@ -6338,6 +6339,52 @@
   }
 
   /**
+   * Finds a saved Q&A answer for a location/city question (e.g. the
+   * built-in "City" Q&A entry) — checked BEFORE falling back to the
+   * resume-parsed profile.location for the Location-autocomplete special
+   * case below. The Q&A answer is the more deliberately-curated source of
+   * truth when the user has actually filled one in; profile.location is
+   * whatever the resume parser happened to extract, used only when no
+   * saved answer exists.
+   * @param {Array<{question: string, answer: string}>} qaList
+   * @returns {string}
+   */
+  function findSavedLocationAnswer(qaList) {
+    if (!Array.isArray(qaList)) return '';
+    const locationRe = /\bcity\b|\blocation\b/i;
+    const zipRe = /\bzip\s*code\b|\bzipcode\b|\bpostal\s*code\b/i;
+    const match = qaList.find(qa => qa && qa.answer && locationRe.test(qa.question || '') && !zipRe.test(qa.question || ''));
+    return (match && match.answer || '').trim();
+  }
+
+  /**
+   * Picks the suggestion that best matches the user's full saved location
+   * (e.g. "Denver, CO, USA") rather than always trusting whichever
+   * suggestion a live-search widget happens to render first — the first
+   * result is usually right, but not when multiple places share the same
+   * city name in different states/countries and only typing the bare city
+   * name (the part before the first comma) was enough to trigger the
+   * search. Falls back to the first suggestion when nothing scores a
+   * confident match, which is exactly the previous, simpler behavior.
+   * @param {Array<{text: string, el: HTMLElement}>} suggestions
+   * @param {string} fullLocation - the profile's saved location string.
+   * @returns {{text: string, el: HTMLElement}}
+   */
+  function findBestLocationMatch(suggestions, fullLocation) {
+    const parts = (fullLocation || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) return suggestions[0]; // no state/country to disambiguate with
+    const allParts = suggestions.find(s => {
+      const text = s.text.toLowerCase();
+      return parts.every(p => text.includes(p));
+    });
+    if (allParts) return allParts;
+    // At least match the second part (state/province) to avoid picking a
+    // same-named city in the wrong state when a full match isn't found.
+    const statePart = suggestions.find(s => s.text.toLowerCase().includes(parts[1]));
+    return statePart || suggestions[0];
+  }
+
+  /**
    * Fills a custom ARIA dropdown by: opening it, reading its options,
    * sending them to the AI, and clicking the AI's chosen option.
    * @async
@@ -6402,22 +6449,32 @@
     }
 
     // Same story as the zip/postal case above, for a plain city/location
-    // field (e.g. Greenhouse's own "Location (City)" — confirmed live,
-    // failing with "no options ever rendered"): it's Google-Places-backed
-    // and only renders suggestions once something is actually typed.
-    // Opening it with a click alone, then waiting for options that were
-    // never going to appear, is exactly why this used to silently fail.
+    // field (e.g. Greenhouse's "Location (City)", Ashby's own "Location"
+    // combobox — confirmed live, failing with "no options ever rendered"):
+    // it's Google-Places-backed and only renders suggestions once
+    // something is actually typed. Opening it with a click alone, then
+    // waiting for options that were never going to appear, is exactly why
+    // this used to silently fail.
+    //
+    // Prefers a saved Q&A answer (e.g. the built-in "City" question) over
+    // the resume-parsed profile.location — requested explicitly: Q&A is
+    // the more deliberately-curated source of truth when the user filled
+    // one in, with the resume-derived value used only as a fallback.
     if (/\b(?:city|location)\b/i.test(questionText) && !/\bzip|postal\b/i.test(questionText)) {
       try {
+        const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
+        const savedLocation = findSavedLocationAnswer(qaList);
         const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
-        const city = (profile.location || '').split(',')[0].trim();
+        const fullLocation = savedLocation || profile.location || '';
+        const city = fullLocation.split(',')[0].trim();
         if (city) {
           fillInput(input, city);
           const suggestions = await waitForVisibleOptions(input);
           if (suggestions.length > 0) {
-            // The first suggestion is Google Places' own best match for
-            // what was just typed — exactly what a human would click first.
-            clickElement(suggestions[0].el);
+            // Prefer a suggestion matching the FULL saved location (city +
+            // state/country) over always trusting the first result — see
+            // findBestLocationMatch's own doc comment for why.
+            clickElement(findBestLocationMatch(suggestions, fullLocation).el);
             return true;
           }
           // No suggestion ever rendered — the typed city is still in the
@@ -6851,6 +6908,22 @@
    * @param {string} value - The value to set.
    */
   function fillInput(input, value) {
+    // Defensive guard for a real bug found live on an Ashby form: a field
+    // labeled to accept several platforms ("LinkedIn, GitHub, Personal
+    // Website or other social profile") is still a single-value `type=
+    // "url"` input — the AI, trying to be complete, answered with BOTH the
+    // LinkedIn and GitHub URLs joined together, which fails the input's
+    // own URL-format validation entirely (the browser/page can't parse
+    // "url1, url2" as one URL), reporting the whole field as invalid/
+    // missing even though it visibly held text. A `type="url"` input can
+    // only ever hold ONE valid URL matching its own placeholder pattern
+    // (e.g. "https://example.com...") — if the value contains more than
+    // one URL-shaped token, keep only the first, cleanly formatted one.
+    if (input.type === 'url' && value) {
+      const urls = value.match(/https?:\/\/\S+/g);
+      if (urls && urls.length > 1) value = urls[0].replace(/[,;\s]+$/, '');
+    }
+
     // React-compatible value setter
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
