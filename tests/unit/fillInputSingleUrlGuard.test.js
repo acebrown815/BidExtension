@@ -66,4 +66,33 @@ describe('fillInput — single-URL guard for type="url" inputs (the actual Ashby
     fillInput(el, 'https://linkedin.com/in/a, https://github.com/b');
     expect(el.value).toBe('https://linkedin.com/in/a, https://github.com/b');
   });
+
+  // Live on Ashby: "Please provide relevant work samples you'd like to share
+  // with the hiring team" (placeholder "https://example.com...") — with no
+  // portfolio URL in the profile, the AI wrote a sentence, which the page
+  // flagged as an invalid URL.
+  it('refuses a prose answer with no URL in it, leaving the field empty', () => {
+    const el = makeInput('url');
+    const ok = fillInput(el, 'Portfolio/work samples available upon request (e.g., full-stack dashboards, REST/GraphQL API services, and cloud-native deployments).');
+    expect(ok).toBe(false);
+    expect(el.value).toBe('');
+  });
+
+  it('pulls the URL out of prose that contains one', () => {
+    const el = makeInput('url');
+    expect(fillInput(el, 'You can see my work at https://github.com/acebrown815.')).toBe(true);
+    expect(el.value).toBe('https://github.com/acebrown815');
+  });
+
+  it('adds https:// to a bare domain answer', () => {
+    const el = makeInput('url');
+    fillInput(el, 'github.com/acebrown815');
+    expect(el.value).toBe('https://github.com/acebrown815');
+  });
+
+  it('still fills plain text fields with prose', () => {
+    const el = makeInput('text');
+    expect(fillInput(el, 'Available upon request.')).toBe(true);
+    expect(el.value).toBe('Available upon request.');
+  });
 });

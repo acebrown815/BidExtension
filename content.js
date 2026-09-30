@@ -2833,7 +2833,16 @@
    * @returns {string}
    */
   function textExcludingForms(el) {
-    const forms = el.querySelectorAll('form');
+    // Only hide forms a user actually fills in. Salesforce Visualforce
+    // career sites (*.my.salesforce-sites.com, e.g. fRecruit__ApplyJob)
+    // wrap the ENTIRE job description in an <apex:form> whose only
+    // controls are a hidden view-state input and "Apply" submit buttons —
+    // hiding it left ~77 chars of page chrome, below every "confident"
+    // threshold, so no JD was found and resume ranking never ran.
+    const forms = Array.from(el.querySelectorAll('form')).filter(f => f.querySelector(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]), select, textarea, ' +
+      '[role="combobox"], [role="radio"], [role="checkbox"], [role="listbox"], [contenteditable="true"]'
+    ));
     if (forms.length === 0) return el.innerText.trim();
     const previousDisplay = Array.from(forms, f => f.style.display);
     forms.forEach(f => { f.style.display = 'none'; });
@@ -2878,6 +2887,12 @@
       // Indeed
       '#jobDescriptionText',
       '.jobsearch-jobDescriptionText',
+      // Rippling (ats.rippling.com) — everything else on the page uses
+      // hashed emotion classes, there's no JSON-LD JobPosting, and no
+      // main/article/[role="main"] landmark for the fallback below, so
+      // without this the page yields no confident JD at all and resume
+      // ranking silently never runs.
+      '.ATS_htmlPreview',
       // Generic
       '[class*="job-description"]',
       '[class*="jobDescription"]',
@@ -5063,7 +5078,9 @@
 
       // Regular text / textarea
       seen.add(qid);
-      const fieldType = tag === 'textarea' ? 'textarea' : 'text';
+      // 'url' tells the AI this input accepts only a URL (see aiService.js
+      // rule 2) — _fieldMap still fills it through the plain-text path.
+      const fieldType = tag === 'textarea' ? 'textarea' : (input.type === 'url' ? 'url' : 'text');
       questions.push({
         question_id: qid,
         question_text: label || input.placeholder || input.name || '',
@@ -5073,6 +5090,48 @@
       _fieldMap[qid] = { el: input, type: fieldType };
       qIndex++;
     });
+
+    // ── 2b. Rippling: non-searchable dropdowns ──
+    // Rippling renders its plain (non-searchable) selects as a bare
+    // <div role="combobox" tabindex="0"> with no <input> or <select> behind
+    // it at all — invisible to both passes above. That's every employer
+    // custom Yes/No question and the Gender/Hispanic/Veteran EEO selects.
+    // Its searchable selects (Pronouns, Race) use <input role="combobox">
+    // and are already handled by pass 2. The options only render once the
+    // trigger is clicked, so fillCustomDropdown() reads them at fill time.
+    //
+    // Also, on any site: a <button role="combobox"> inside a <form> — the
+    // Radix/shadcn Select trigger (seen on xyzai.io). Its hidden native
+    // <select> has no options until the popup is first opened, so pass 1
+    // skips it too. Restricted to buttons inside a <form> so site-search
+    // or nav comboboxes are never touched.
+    const comboSelector = isRipplingPage()
+      ? 'div[role="combobox"], form button[role="combobox"]'
+      : 'form button[role="combobox"]';
+    {
+      document.querySelectorAll(comboSelector).forEach(trigger => {
+        if (trigger.offsetParent === null) return;
+        const qid = trigger.id;
+        if (!qid || seen.has(qid)) return;
+        // A Radix select whose hidden native <select> already has a
+        // name/id and options was registered by pass 1 — don't ask twice.
+        const nativeSel = trigger.parentElement && trigger.parentElement.querySelector('select');
+        if (nativeSel && seen.has(nativeSel.id || nativeSel.name)) return;
+        if (!isFieldEligible(trigger)) return;
+        const label = getFieldLabel(trigger);
+        if (!label) return;
+        seen.add(qid);
+        questions.push({
+          question_id: qid,
+          question_text: label,
+          field_type: 'dropdown',
+          required: trigger.getAttribute('aria-required') === 'true',
+          available_options: [] // read during fill
+        });
+        _fieldMap[qid] = { el: trigger, type: 'custom_dropdown', optionTexts: [], questionText: label };
+        qIndex++;
+      });
+    }
 
     // ── 3. Radio button groups ──
     const radioGroups = {};
@@ -5116,6 +5175,53 @@
         questions.push(clean);
       }
     }
+
+    // ── 3b. Yes/No button toggles (Ashby-style) ──
+    // Two <button aria-pressed data-option="yes|no"> plus a hidden decoy
+    // checkbox the page only ever writes to. Registered as a Yes/No radio
+    // question so the AI answers it, and filled by clicking the real button
+    // (see fillYesNoToggle). Must run BEFORE pass 4: claiming the decoy
+    // checkbox's qid here stops it being registered as a plain checkbox,
+    // whose fill clicks only the decoy — which the page ignores, and which
+    // for a "No" answer (already unchecked) meant nothing was clicked at all.
+    const toggleGroups = new Set();
+    document.querySelectorAll('button[aria-pressed]').forEach(btn => {
+      const group = btn.parentElement;
+      if (!group || toggleGroups.has(group)) return;
+      toggleGroups.add(group);
+      if (group.offsetParent === null) return;
+      // Form fields only — never a "Was this helpful? Yes / No" page widget.
+      if (!group.closest('form, [data-field-path]')) return;
+      const buttons = Array.from(group.children).filter(el => el.tagName === 'BUTTON' && el.hasAttribute('aria-pressed'));
+      if (buttons.length !== 2) return; // only unambiguous yes/no pairs
+      const optionOf = b => (b.getAttribute('data-option') || b.textContent).trim().toLowerCase();
+      const yesBtn = buttons.find(b => optionOf(b) === 'yes');
+      const noBtn = buttons.find(b => optionOf(b) === 'no');
+      if (!yesBtn || !noBtn) return;
+
+      const decoy = group.querySelector('input');
+      if (!isFieldEligible(decoy || group)) return;
+      const qid = (decoy && (decoy.name || decoy.id)) || ('toggle_' + qIndex);
+      if (seen.has(qid)) return;
+      // Already answered (by the user or directFill) — never override, but
+      // still claim the decoy so pass 4 doesn't register it as a checkbox.
+      if (buttons.some(b => b.getAttribute('aria-pressed') === 'true')) { seen.add(qid); return; }
+      const entry = group.closest('[data-field-path], .field, .form-group, .form-field, [class*="field"], [class*="Field"]');
+      const labelEl = entry && entry.querySelector('label');
+      const label = labelEl && !labelEl.contains(group) ? labelEl.textContent.trim() : '';
+      if (!label) return;
+
+      seen.add(qid);
+      questions.push({
+        question_id: qid,
+        question_text: label,
+        field_type: 'radio',
+        required: /required/i.test(labelEl.className),
+        available_options: ['Yes', 'No']
+      });
+      _fieldMap[qid] = { type: 'yesno_toggle', yesBtn, noBtn, decoyName: decoy && decoy.name, questionText: label };
+      qIndex++;
+    });
 
     // ── 4. Standalone checkboxes ──
     document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -5800,10 +5906,16 @@
    * @returns {string} The best label text found, or ''.
    */
   function getFieldLabel(input) {
+    // 0. Rippling-only override — see getRipplingFieldLabel().
+    if (isRipplingPage()) {
+      const rippling = getRipplingFieldLabel(input);
+      if (rippling) return rippling;
+    }
+
     // 1. <label for="id">
     if (input.id) {
       const label = document.querySelector(`label[for="${CSS.escape(input.id)}"]`);
-      if (label) return label.textContent.trim();
+      if (label) return labelTextWithoutBadges(label);
     }
 
     // 2. Wrapping <label>
@@ -5890,6 +6002,61 @@
       node = parent;
     }
 
+    return '';
+  }
+
+  /**
+   * A <label>'s text minus any child element that is only a
+   * "Required"/"Optional" badge. shadcn/ui forms (seen on xyzai.io) render
+   * `<label><span>Name</span><span>Required</span></label>`, whose
+   * textContent is "NameRequired" — which never matches a saved Q&A
+   * question like "Name", so the no-AI Q&A pass skipped every field.
+   * @param {HTMLLabelElement} label
+   * @returns {string}
+   */
+  function labelTextWithoutBadges(label) {
+    const badges = Array.from(label.querySelectorAll('*')).filter(el =>
+      el.children.length === 0 && /^\(?(required|optional)\)?$/i.test(el.textContent.trim()));
+    if (badges.length === 0) return label.textContent.trim();
+    const clone = label.cloneNode(true);
+    const cloneEls = Array.from(clone.querySelectorAll('*'));
+    const allEls = Array.from(label.querySelectorAll('*'));
+    badges.forEach(b => cloneEls[allEls.indexOf(b)].remove());
+    return clone.textContent.trim();
+  }
+
+  /** @returns {boolean} true on a Rippling-hosted job board (ats.rippling.com). */
+  function isRipplingPage() {
+    return /(^|\.)rippling\.com$/i.test(location.hostname);
+  }
+
+  /**
+   * Rippling's application form defeats getFieldLabel()'s generic chain:
+   *   - Employer custom questions ("Will you now or in the future require
+   *     sponsorship…") put the question in a <p> inside a sibling
+   *     `.marginBottom--4` wrapper, and the control itself has no label,
+   *     aria-labelledby, or placeholder — only a randomized `name`
+   *     ("ypZ1CumqiDZ") that step 6 would humanize into gibberish, or a
+   *     generic aria-label="Select" that step 3 would return verbatim.
+   *   - Standard fields (Gender, Hispanic/Latino…) DO have
+   *     aria-labelledby="field-88-label", but also aria-label="Select...",
+   *     which step 3 checks first.
+   * @param {Element} el
+   * @returns {string} The field's real question text, or '' to fall back
+   *   to the generic chain.
+   */
+  function getRipplingFieldLabel(el) {
+    const block = el.closest('.marginY--36');
+    const question = block && block.querySelector('.marginBottom--4 p');
+    const questionText = question && question.textContent.trim();
+    if (questionText) return questionText;
+    // aria-labelledby can list several ids ("file-input-11 field-9-label") —
+    // only the "*-label" one is the field's visible label.
+    const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(id => /-label$/.test(id));
+    for (const id of ids) {
+      const text = document.getElementById(id)?.textContent.trim();
+      if (text) return text;
+    }
     return '';
   }
 
@@ -6131,10 +6298,19 @@
           fillCheckboxFromRef(ref.el, val);
           showAutofillBadge(ref.el);
           filled++;
-        } else {
-          fillInput(ref.el, val);
+        } else if (ref.type === 'yesno_toggle') {
+          const btn = fillYesNoToggle(ref, val);
+          if (btn) {
+            showAutofillBadge(btn);
+            filled++;
+          } else {
+            skipped.push(qid);
+          }
+        } else if (fillInput(ref.el, val)) {
           showAutofillBadge(ref.el);
           filled++;
+        } else {
+          skipped.push(qid);
         }
       } catch (e) {
         skipped.push(qid);
@@ -6304,7 +6480,7 @@
         await fillCustomDropdown(ref.el, ref.questionText || value);
         showAutofillBadge(ref.el);
       } else {
-        fillInput(ref.el, value);
+        if (!fillInput(ref.el, value)) continue;
         showAutofillBadge(ref.el);
       }
       filled++;
@@ -6851,6 +7027,37 @@
    * @param {HTMLInputElement} cb    - The checkbox element.
    * @param {string}           value - The AI's answer string.
    */
+  /**
+   * Answers an Ashby-style Yes/No button toggle (see detectFormFields pass
+   * 3b) by clicking the real button — its own click handler is the only
+   * thing that updates the page's state.
+   * @param {{yesBtn: HTMLButtonElement, noBtn: HTMLButtonElement}} ref
+   * @param {string} value - The AI's answer ("Yes", "No", "No, I will not…").
+   * @returns {HTMLButtonElement|null} The button clicked, or null if the
+   *   answer isn't clearly yes or no (skip rather than guess).
+   */
+  function fillYesNoToggle(ref, value) {
+    const v = String(value).trim().toLowerCase();
+    let option = null;
+    if (/^(no|false|n)\b|^i (do|will|am) not\b|^i don't\b|^not\b/.test(v)) option = 'no';
+    else if (/^(yes|true|y)\b/.test(v)) option = 'yes';
+    if (!option) return null;
+    let btn = option === 'yes' ? ref.yesBtn : ref.noBtn;
+    // Forms like Ashby's carry several of these toggles, filled one after
+    // another — clicking one can re-render its neighbours and detach the
+    // button captured at detection time. Re-find the live one through the
+    // decoy input's (stable) name.
+    if (!btn.isConnected && ref.decoyName) {
+      const decoy = document.querySelector(`input[name="${CSS.escape(ref.decoyName)}"]`);
+      const group = decoy && decoy.parentElement;
+      btn = group && Array.from(group.querySelectorAll('button[aria-pressed]')).find(b =>
+        (b.getAttribute('data-option') || b.textContent).trim().toLowerCase() === option);
+    }
+    if (!btn || !btn.isConnected) return null;
+    if (btn.getAttribute('aria-pressed') !== 'true') clickNatively(btn);
+    return btn;
+  }
+
   function fillCheckboxFromRef(cb, value) {
     const shouldCheck = /^(yes|true|1|checked|agree|accept)$/i.test(String(value).trim());
     if (cb.checked !== shouldCheck) {
@@ -6919,9 +7126,25 @@
     // only ever hold ONE valid URL matching its own placeholder pattern
     // (e.g. "https://example.com...") — if the value contains more than
     // one URL-shaped token, keep only the first, cleanly formatted one.
+    //
+    // Same field type, opposite failure (also live on Ashby — "Please
+    // provide relevant work samples…", placeholder "https://example.com..."):
+    // with no portfolio URL in the profile, the AI wrote a sentence
+    // ("Portfolio/work samples available upon request…"), which the page
+    // flags as an invalid URL. Prose with a URL inside keeps just the URL;
+    // prose with none is never written — an empty optional field is
+    // better than one that blocks submission.
     if (input.type === 'url' && value) {
-      const urls = value.match(/https?:\/\/\S+/g);
-      if (urls && urls.length > 1) value = urls[0].replace(/[,;\s]+$/, '');
+      // A bare "github.com/jane" (the whole answer, nothing else) is still
+      // a URL — just missing its scheme.
+      const bare = value.trim();
+      if (/^(www\.)?[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}(\/\S*)?$/i.test(bare)) value = 'https://' + bare;
+      const urls = value.match(/https?:\/\/[^\s,;)"'<>]+/g);
+      if (!urls) {
+        console.warn('[JobMatch AI][Auto-Bid] fillInput: refusing non-URL answer for a type="url" field: %o', value);
+        return false;
+      }
+      value = urls[0].replace(/[.,;:]+$/, '');
     }
 
     // React-compatible value setter
@@ -6946,6 +7169,7 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.dispatchEvent(new Event('blur', { bubbles: true }));
+    return true;
   }
 
 

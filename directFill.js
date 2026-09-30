@@ -30,12 +30,12 @@
     // 1. <label for="id">
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (label) return cleanLabel(label.textContent);
+      if (label) return cleanLabel(labelTextWithoutBadges(label));
     }
 
     // 2. Wrapping <label>
     const parentLabel = el.closest('label');
-    if (parentLabel) return cleanLabel(parentLabel.textContent);
+    if (parentLabel) return cleanLabel(labelTextWithoutBadges(parentLabel));
 
     // 3. aria-label
     if (el.getAttribute('aria-label')) return cleanLabel(el.getAttribute('aria-label'));
@@ -103,6 +103,22 @@
       .trim()
       .replace(/\s*\((?:required|optional)\)\s*$/i, '')
       .trim();
+  }
+
+  // A <label>'s text minus any child element that is only a
+  // "Required"/"Optional" badge — shadcn/ui forms (seen on xyzai.io) render
+  // `<label><span>Name</span><span>Required</span></label>`, whose
+  // textContent "NameRequired" never matched a saved Q&A question. Mirrors
+  // content.js's labelTextWithoutBadges.
+  function labelTextWithoutBadges(label) {
+    const allEls = Array.from(label.querySelectorAll('*'));
+    const badges = allEls.filter(e =>
+      e.children.length === 0 && /^\(?(required|optional)\)?$/i.test(e.textContent.trim()));
+    if (badges.length === 0) return label.textContent;
+    const clone = label.cloneNode(true);
+    const cloneEls = Array.from(clone.querySelectorAll('*'));
+    badges.forEach(b => cloneEls[allEls.indexOf(b)].remove());
+    return clone.textContent;
   }
 
   /**

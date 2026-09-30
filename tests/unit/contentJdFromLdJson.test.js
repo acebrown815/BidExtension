@@ -218,3 +218,60 @@ describe('content.js textExcludingForms / JazzHR-style pages', () => {
     expect(after).toBe(before);
   });
 });
+
+// Regression test for a live bug on Rippling (ats.rippling.com): the JD sits
+// in a single div.ATS_htmlPreview wrapped only in hashed emotion classes
+// (css-1s1ia0e etc.), with no JSON-LD JobPosting and no main/article/
+// [role="main"] landmark — so extractJobDescriptionConfident() returned ''
+// and resume ranking (★ top-3) silently never ran.
+describe('content.js extractJobDescriptionConfident — Rippling pages', () => {
+  it('extracts the JD from .ATS_htmlPreview when nothing else on the page matches', () => {
+    document.body.innerHTML = `
+      <div id="__next"><div class="css-1s1ia0e epvls061"><div class="">
+        <div class="ATS_htmlPreview">
+          <div><p><b><strong>About BizzyCar</strong></b></p><p><span>BizzyCar is a B2B SaaS company transforming the automotive care experience.</span></p></div>
+          <div><p><b><strong>What we're looking for</strong></b></p>
+            <ul><li><span>Strong hands-on experience with </span><b><strong>Ruby on Rails</strong></b><span> and </span><b><strong>Angular</strong></b></li></ul>
+          </div>
+        </div>
+      </div></div></div>
+    `;
+    const jd = extractJobDescriptionConfident();
+    expect(jd).toContain('About BizzyCar');
+    expect(jd).toContain('Ruby on Rails');
+  });
+});
+
+// Regression test for a live bug on a Salesforce Visualforce career site
+// (smartpeople.my.salesforce-sites.com/recruit/fRecruit__ApplyJob): the whole
+// JD is wrapped in an <apex:form> whose only controls are a hidden view-state
+// input and "Apply" submit buttons. textExcludingForms() hid that form, left
+// ~77 chars of page chrome, and no confident JD was found — so resumes were
+// never ranked. A form with nothing to fill in must not be excluded.
+describe('content.js extractJobDescriptionConfident — Salesforce Visualforce pages', () => {
+  const SALESFORCE_MAIN_HTML = `
+    <main role="main">
+      <h1>Applicant Portal : Job Details: Full Stack Developer</h1>
+      <form id="j_id0:j_id1:j_id55:j_id200" method="post" action="/recruit/fRecruit__ApplyJob" role="form">
+        <input type="hidden" name="j_id0:j_id1:j_id55:j_id200" value="j_id0:j_id1:j_id55:j_id200">
+        <input type="submit" value="Apply" class="btn btn-primary">
+        <div>Vacancy Name Full Stack Developer</div>
+        <div>Brief Description</div>
+        <p>${'We are looking for a versatile, hands-on Full-Stack Developer working across Java backend services and React user interfaces. '.repeat(4)}</p>
+        <input type="submit" value="Apply" class="btn btn-primary">
+      </form>
+    </main>
+  `;
+
+  it('keeps a JD wrapped in a form that has no fillable fields', () => {
+    document.body.innerHTML = SALESFORCE_MAIN_HTML;
+    const jd = extractJobDescriptionConfident();
+    expect(jd).toContain('Brief Description');
+    expect(jd).toContain('Java backend services and React');
+  });
+
+  it('still excludes a form that has real fields (JazzHR case unaffected)', () => {
+    document.body.innerHTML = `<main>${JAZZHR_STYLE_MAIN_HTML}</main>`;
+    expect(textExcludingForms(document.querySelector('main'))).not.toContain('First Name');
+  });
+});

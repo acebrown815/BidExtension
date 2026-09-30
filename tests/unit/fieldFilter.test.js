@@ -67,6 +67,27 @@ describe('isSensitiveFieldName — Ashby "_systemfield_*" carve-out', () => {
   });
 });
 
+// React 19 useId() ids (`_R_12jav5ubtb_`), suffixed by shadcn/ui /
+// react-hook-form (`-form-item`) — every field on xyzai.io's application form
+// carried one, so the underscore heuristic excluded the whole form and
+// AutoFill reported "No form fields found on this page".
+describe('isSensitiveFieldName — React useId carve-out', () => {
+  it('allows React 19 useId-based field ids', () => {
+    expect(isSensitiveFieldName('_R_12jav5ubtb_-form-item')).toBe(false);
+    expect(isSensitiveFieldName('_R_ajav5ubtb_-form-item')).toBe(false);
+    expect(isSensitiveFieldName('_r_1a_')).toBe(false);
+  });
+
+  it('still blocks a useId-shaped name that contains a sensitive pattern', () => {
+    expect(isSensitiveFieldName('_R_12jav5ubtb_-csrf')).toBe(true);
+  });
+
+  it('still blocks other underscore-prefixed internal names', () => {
+    expect(isSensitiveFieldName('_internal')).toBe(true);
+    expect(isSensitiveFieldName('_rails_state')).toBe(true);
+  });
+});
+
 describe('isSensitiveFieldName — robustness', () => {
   it('returns false for empty/null/non-string input', () => {
     expect(isSensitiveFieldName('')).toBe(false);
