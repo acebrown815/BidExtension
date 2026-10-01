@@ -242,6 +242,36 @@ describe('content.js extractJobDescriptionConfident — Rippling pages', () => {
   });
 });
 
+// Regression test for a live bug on Factorial (encamina.factorialhr.com/
+// job_posting/ai-developer-325671): server-rendered page with the JD in a
+// bare div.styledText — no JSON-LD JobPosting and no main/article/
+// [role="main"]/.content/#content landmark — so no confident JD was found
+// and the default top-3 resume ranking never ran.
+describe('content.js extractJobDescriptionConfident — Factorial pages', () => {
+  it('extracts the JD from .styledText when nothing else on the page matches', () => {
+    document.body.innerHTML = `
+      <div class="topNav"><a href="/#jobs">Ofertas de trabajo</a></div>
+      <div class="relative bg-white z-30"><div class="py-16 sm:py-32"><div class="container mx-auto pl-6 pr-6">
+        <h1>AI Developer</h1>
+        <div class="pl-4 pr-4 block w-full sm:block sm:w-7/12 sm:ml-1/12">
+          <div class="styledText">
+            <p>Buscamos incorporar un/a <strong>Desarrollador/a de Inteligencia Artificial (AI Developer)</strong>.</p>
+            <ul class="f1-bullet-list">
+              <li><p>Tienes experiencia profesional desarrollando software con tecnologías como <strong>C#, Python o TypeScript</strong>.</p></li>
+              <li><p>Has trabajado construyendo soluciones cloud sobre <strong>Microsoft Azure</strong>.</p></li>
+            </ul>
+          </div>
+        </div>
+        <a class="buttonThemed" href="/apply/ai-developer-325671">Inscríbete ahora</a>
+      </div></div></div>
+    `;
+    const jd = extractJobDescriptionConfident();
+    expect(jd).toContain('Desarrollador/a de Inteligencia Artificial');
+    expect(jd).toContain('C#, Python o TypeScript');
+    expect(jd).not.toContain('Ofertas de trabajo');
+  });
+});
+
 // Regression test for a live bug on a Salesforce Visualforce career site
 // (smartpeople.my.salesforce-sites.com/recruit/fRecruit__ApplyJob): the whole
 // JD is wrapped in an <apex:form> whose only controls are a hidden view-state

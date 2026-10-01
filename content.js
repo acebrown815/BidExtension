@@ -2893,6 +2893,11 @@
       // without this the page yields no confident JD at all and resume
       // ranking silently never runs.
       '.ATS_htmlPreview',
+      // Factorial (*.factorialhr.com/job_posting/...) — server-rendered
+      // Rails page with the JD in a bare div.styledText, no JSON-LD
+      // JobPosting and no main/article/[role="main"]/.content/#content
+      // landmark, so same failure mode as Rippling above.
+      '.styledText',
       // Generic
       '[class*="job-description"]',
       '[class*="jobDescription"]',
