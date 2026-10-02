@@ -272,6 +272,40 @@ describe('content.js extractJobDescriptionConfident — Factorial pages', () => 
   });
 });
 
+// Regression test for a live bug on the JobDiva candidate portal
+// (www1.jobdiva.com/portal/?a=...#/jobs/33180732): React SPA that renders the
+// JD body in an unnamed div.col-12.py-3.notranslate next to a
+// span.jd-desc-title heading — no JSON-LD JobPosting and no landmark — so no
+// confident JD was found and the default top-3 resume ranking never ran.
+describe('content.js extractJobDescriptionConfident — JobDiva portal pages', () => {
+  it('extracts the JD body next to the "Job Description" heading, not the facility section', () => {
+    document.body.innerHTML = `
+      <div id="jobdivaheader"><div id="logo-container" class="container"></div></div>
+      <div id="root" class="flex-grow-1"><div class="container">
+        <div class="row"><div class="col-12 py-2 jd-details-section"><span class="jd-svg-span-10">Remote</span></div></div>
+        <div class="row">
+          <div class="col-12 py-3"><span class="jd-desc-title">Job Description</span></div>
+          <div class="col-12 py-3 notranslate">
+            <p>We are seeking a <strong>Senior Data Engineer</strong> to build streaming pipelines.</p>
+            <ul><li>5+ years with Python, Spark and Kafka</li><li>Experience with AWS Glue and Snowflake</li></ul>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col-12 py-3"><span class="jd-desc-title">About This Facility</span></div>
+          <div class="col-12"><div class="row"><div class="col-12 col-md-6 col-lg-4 py-3">
+            <div>Our flagship downtown campus has been serving the community for over fifty years with excellence.</div>
+          </div></div></div>
+        </div>
+      </div></div>
+    `;
+    const jd = extractJobDescriptionConfident();
+    expect(jd).toContain('Senior Data Engineer');
+    expect(jd).toContain('Python, Spark and Kafka');
+    expect(jd).not.toContain('Job Description');
+    expect(jd).not.toContain('flagship downtown campus');
+  });
+});
+
 // Regression test for a live bug on a Salesforce Visualforce career site
 // (smartpeople.my.salesforce-sites.com/recruit/fRecruit__ApplyJob): the whole
 // JD is wrapped in an <apex:form> whose only controls are a hidden view-state

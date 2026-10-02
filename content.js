@@ -2917,6 +2917,22 @@
       }
     }
 
+    // JobDiva candidate portal (www1.jobdiva.com/portal/?a=...#/jobs/<id>) —
+    // React SPA that renders the JD body in an unnamed
+    // div.col-12.py-3.notranslate, a sibling of the "Job Description"
+    // span.jd-desc-title heading, inside a bare div.row. No JSON-LD and no
+    // main/article/.content landmark, so nothing above or below matches.
+    // The same heading class is reused for "About This Facility", whose row
+    // has no .notranslate body — so key off the body, not the heading.
+    for (const title of document.querySelectorAll('.jd-desc-title')) {
+      const row = title.closest('.row');
+      const body = row && Array.from(row.children).find(c => c.classList.contains('notranslate'));
+      if (body) {
+        const text = textExcludingForms(body);
+        if (text.length > 100) return text;
+      }
+    }
+
     // Some ATS platforms (e.g. Dover) render the JD inside CSS-in-JS class
     // names with hashed/generated suffixes (e.g.
     // "InboundApplication__JobDescriptionWrapper-gHhUWm") that no selector
