@@ -61,6 +61,14 @@ function buildCheckPendingAutoBidAutofill({ pendingResponse, calls, workdayDialo
     let _activeResumeId = 'original-resume';
     let _tailoredResumeSlot = null;
     let _tailoredSlotActive = false;
+    let _manualResumeSelection = false;
+    // Real implementation (also pins + persists) is covered by
+    // autoBidResumeLock.test.js.
+    async function lockAutoBidResumeSelection(id) {
+      if (!id) return;
+      _manualResumeSelection = true;
+      _activeResumeId = id;
+    }
     async function sendMessage(msg) {
       calls.push({ type: 'sendMessage', msg });
       if (msg.type === 'GET_AND_CLEAR_PENDING_AUTOFILL') return pendingResponse;

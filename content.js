@@ -8275,6 +8275,9 @@
     // that's what gates AutoFill's multi-step wizard navigation.
     _autoBidAutofillRun = true;
     try {
+      // Auto-Bid is committing to apply with whichever resume its analysis
+      // just chose — pin it for every step that follows.
+      await lockAutoBidResumeSelection(_activeResumeId);
       // Workday's "Start Your Application" dialog (see
       // clickWorkdayAutofillWithResumeIfPresent's own doc comment) can
       // already be showing the very first time this runs — check for it
@@ -8465,6 +8468,46 @@
   }
 
   /**
+   * Pins the resume Auto-Bid's analysis picked for THIS application, for
+   * every remaining step of it. analyzeJob() may pick a resume that isn't
+   * the local keyword-ranking's top one (it AI-compares the top 3 — see
+   * analyzeAndPickBest), and several things re-rank later: scanResumeMatch()
+   * on panel open / a "new job" URL change, and ensureBestResumeSelected()
+   * at the start of every AutoFill step. Workday's apply flow (posting →
+   * "Start Your Application" → /apply/autofillWithResume → 6 steps) hits
+   * those repeatedly; the _autoBidContinuationActive guard only covers the
+   * moment a continuation is running, not the gaps between hops. Marking
+   * the choice as a manual one makes all of them leave it alone; a
+   * genuinely different job still clears it (handleSpaUrlChanged).
+   *
+   * Also writes it back as the stored active resume (same keys
+   * switchSlot() writes) so a fresh page's loadResumeState() — which
+   * re-reads activeResumeId from storage when the panel opens — can't
+   * overwrite the restored id with a different one.
+   * @param {string|null} id
+   * @returns {Promise<void>}
+   */
+  async function lockAutoBidResumeSelection(id) {
+    if (!id) return;
+    _manualResumeSelection = true;
+    _activeResumeId = id;
+    try {
+      const { resumes = [], activeResumeId } = await chrome.storage.local.get(['resumes', 'activeResumeId']);
+      if (activeResumeId === id) return;
+      const target = resumes.find(r => r.id === id);
+      if (!target) return;
+      await chrome.storage.local.set({
+        activeResumeId: id,
+        profile: target.profile,
+        rawResumeBase64: target.rawResumeBase64 || null,
+        resumeFileType: target.resumeFileType || null,
+      });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] lockAutoBidResumeSelection: could not persist active resume:', e && e.message);
+    }
+  }
+
+  /**
    * Checked once, on every fresh top-frame page load — see the
    * isRealTopFrame() init branch below. Picks up the flag
    * autoClickApplyThenAutofillIfNeeded left in the background service
@@ -8495,7 +8538,9 @@
     // nothing to generate against. See the doc comment on
     // SET_PENDING_AUTOFILL in background.js.
     if (analysis) currentAnalysis = analysis;
-    if (activeResumeId) _activeResumeId = activeResumeId;
+    // Restore AND pin it — before togglePanel() below, whose
+    // loadResumeState() re-reads the stored active resume.
+    await lockAutoBidResumeSelection(activeResumeId);
     // Restore the tailored resume too, and re-activate it — the real bug
     // this fixes: without this, AutoFill on this new page fell back to
     // attaching the ORIGINAL, untailored resume (a file genuinely gets
