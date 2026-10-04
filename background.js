@@ -425,6 +425,16 @@ async function handleMatchDropdown(questionText, options, resumeId) {
   for (const opt of options) {
     if (opt.toLowerCase().trim() === choiceLower) return opt;
   }
+  // Punctuation/whitespace-insensitive match: models routinely echo an
+  // option like "Online Job Board – LinkedIn" (en dash, Workday) back as
+  // "Online Job Board - LinkedIn", which neither the exact check above nor
+  // the containment check below accepts.
+  const choiceNorm = choiceLower.replace(/[^a-z0-9]/g, '');
+  if (choiceNorm) {
+    for (const opt of options) {
+      if (opt.toLowerCase().replace(/[^a-z0-9]/g, '') === choiceNorm) return opt;
+    }
+  }
   // Partial match as a secondary fallback: catches minor wording differences
   // (e.g. "United States" vs "United States of America").
   for (const opt of options) {

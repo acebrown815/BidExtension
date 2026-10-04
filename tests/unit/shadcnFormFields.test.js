@@ -49,7 +49,7 @@ beforeAll(() => {
       const label = el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
       return label ? labelTextWithoutBadges(label) : '';
     }
-    const isFieldEligible = () => true;
+    const isFieldEligible = () => true; const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]'; const isWorkdaySelectTrigger = () => false; const getWorkdayFieldLabel = () => '';
     const seen = new Set();
     const questions = [];
     const _fieldMap = {};
@@ -142,7 +142,7 @@ describe('detectFormFields pass 2b — no duplicate when the native <select> was
     const run = new Function('location', `
       function isRipplingPage() { return false; }
       function getFieldLabel() { return 'Hours'; }
-      const isFieldEligible = () => true;
+      const isFieldEligible = () => true; const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]'; const isWorkdaySelectTrigger = () => false; const getWorkdayFieldLabel = () => '';
       const seen = new Set(['hours']);
       const questions = [];
       const _fieldMap = {};

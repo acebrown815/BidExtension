@@ -5043,6 +5043,14 @@
       if (input.offsetParent === null) return;
       // C3b: skip CSRF/tracking/honeypot fields.
       if (!isFieldEligible(input)) return;
+      // Workday single-selects pair their <button aria-haspopup="listbox">
+      // with an unnamed sibling <input type="text"> that holds the chosen
+      // option's id and doubles as the listbox's typeahead. It resolves to
+      // the same question as the button, so it used to be registered as a
+      // separate TEXT field — typing the answer into it popped the list
+      // open on its own, and the dropdown fill's own click then toggled it
+      // shut again. The button (pass 2b) is the real field.
+      if (isWorkdaySelectCompanionInput(input)) return;
       const label = getFieldLabel(input);
       const qid = input.id || input.name || ('q_' + qIndex);
       if ((!label && !input.id && !input.name) || seen.has(qid)) return;
@@ -5126,20 +5134,33 @@
     // <select> has no options until the popup is first opened, so pass 1
     // skips it too. Restricted to buttons inside a <form> so site-search
     // or nav comboboxes are never touched.
-    const comboSelector = isRipplingPage()
+    //
+    // Also, on any site: Workday's apply-flow single-selects (see
+    // isWorkdaySelectTrigger) — a bare <button aria-haspopup="listbox">
+    // with no role="combobox" and no <form> anywhere on the page, whose
+    // options are only rendered (in a popper appended to <body>) once it's
+    // clicked. fillCustomDropdown() routes these to fillWorkdaySelect().
+    const comboSelector = (isRipplingPage()
       ? 'div[role="combobox"], form button[role="combobox"]'
-      : 'form button[role="combobox"]';
+      : 'form button[role="combobox"]') + ', ' + WORKDAY_SELECT_TRIGGER_SELECTOR;
     {
       document.querySelectorAll(comboSelector).forEach(trigger => {
         if (trigger.offsetParent === null) return;
         const qid = trigger.id;
         if (!qid || seen.has(qid)) return;
+        const isWorkdaySelect = isWorkdaySelectTrigger(trigger);
+        // Workday keeps the chosen option's id in the button's value
+        // attribute ('' while it still reads "Select One") — leave an
+        // already-answered select (e.g. a pre-filled Country) alone.
+        if (isWorkdaySelect && (trigger.getAttribute('value') || '').trim()) return;
         // A Radix select whose hidden native <select> already has a
         // name/id and options was registered by pass 1 — don't ask twice.
         const nativeSel = trigger.parentElement && trigger.parentElement.querySelector('select');
         if (nativeSel && seen.has(nativeSel.id || nativeSel.name)) return;
         if (!isFieldEligible(trigger)) return;
-        const label = getFieldLabel(trigger);
+        // Workday's own aria-label is just " Select One Required" — the
+        // question lives in the field's <label>/<legend>.
+        const label = (isWorkdaySelect && getWorkdayFieldLabel(trigger)) || getFieldLabel(trigger);
         if (!label) return;
         seen.add(qid);
         questions.push({
@@ -6636,6 +6657,10 @@
       }
     }
 
+    // Workday's apply-flow selects need a human-like open → wait for the
+    // newly rendered list → pick → confirm sequence of their own.
+    if (isWorkdaySelectTrigger(input)) return await fillWorkdaySelect(input, questionText);
+
     // Some location-autocomplete fields (Google-Places-backed, common on
     // ATS wizards — confirmed on Dice) explicitly accept a raw ZIP/postal
     // code as an alternative to a city name: Dice's own placeholder spells
@@ -6811,6 +6836,233 @@
 
     console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: no option matched aiChoice="%s" against optionTexts=%o', aiChoice, optionTexts);
     document.body.click();
+    return false;
+  }
+
+  // ── Workday apply-flow single-selects ──────────────────────────────
+  // Confirmed on *.myworkdayjobs.com (My Information / Application
+  // Questions steps): each select is
+  //   div[data-automation-id="formField-…"] … <label>/<legend> question
+  //     <button aria-haspopup="listbox" value="" id=… name=…>Select One</button>
+  //     <input type="text" class="…">   ← unnamed value-holder/typeahead
+  // and its options don't exist anywhere in the DOM until the button is
+  // clicked: Workday then appends a popper straight under <body> holding
+  // <ul role="listbox" id=…> (the button's new aria-controls) with
+  // <li role="option" data-value=…><div>Yes</div></li> items, the first a
+  // disabled "Select One" placeholder. Choosing one closes the popper and
+  // writes the option's data-value into the button's value attribute.
+
+  const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]';
+
+  /** @param {Element} el @returns {boolean} */
+  function isWorkdaySelectTrigger(el) {
+    return !!(el && el.matches && el.matches(WORKDAY_SELECT_TRIGGER_SELECTOR));
+  }
+
+  /**
+   * The unnamed sibling input Workday pairs with each select button (see
+   * the block comment above) — never a field of its own.
+   * @param {HTMLInputElement} input
+   * @returns {boolean}
+   */
+  function isWorkdaySelectCompanionInput(input) {
+    if (input.id || input.name || !input.parentElement) return false;
+    return Array.from(input.parentElement.children).some(isWorkdaySelectTrigger);
+  }
+
+  /**
+   * The question text for a Workday form field: its <legend> (Application
+   * Questions) or <label> (My Information), minus the trailing required
+   * asterisk.
+   * @param {HTMLElement} trigger
+   * @returns {string}
+   */
+  function getWorkdayFieldLabel(trigger) {
+    const field = trigger.closest('[data-automation-id^="formField-"]');
+    if (!field) return '';
+    const labelEl = field.querySelector('legend') || field.querySelector('label');
+    if (!labelEl) return '';
+    const text = (labelEl.innerText || labelEl.textContent || '').replace(/\s+/g, ' ').trim();
+    return text.replace(/\s*\*\s*$/, '').trim();
+  }
+
+  /**
+   * Opens a dropdown the way a person would and returns only the options
+   * THAT click produced. Snapshots every [role="option"] already in the
+   * page first, clicks the trigger, then polls: the listbox the trigger
+   * now points at (aria-controls) if there is one, otherwise whichever
+   * options are new since the snapshot. Waits until the list has rendered
+   * AND stopped changing (same count on consecutive polls), since some
+   * lists render in batches. Skips disabled placeholder rows ("Select
+   * One"). If a synthetic pointer click didn't open it, tries one native
+   * click before giving up.
+   * @param {HTMLElement} trigger
+   * @param {number} [maxWaitMs=5000]
+   * @returns {Promise<Array<{text: string, el: HTMLElement}>>}
+   */
+  async function openListboxAndCaptureNewOptions(trigger, maxWaitMs = 5000) {
+    const before = new Set(document.querySelectorAll('[role="option"]'));
+    const alreadyOpen = trigger.getAttribute('aria-expanded') === 'true';
+    if (!alreadyOpen) {
+      try { trigger.scrollIntoView({ block: 'center' }); } catch (_) {}
+      trigger.focus();
+      clickElement(trigger);
+    }
+
+    const collect = () => {
+      const lbId = trigger.getAttribute('aria-controls') || trigger.getAttribute('aria-owns');
+      const lb = lbId && document.getElementById(lbId);
+      const nodes = lb
+        ? Array.from(lb.querySelectorAll('[role="option"]'))
+        : Array.from(document.querySelectorAll('[role="option"]')).filter(o => alreadyOpen || !before.has(o));
+      const seenText = new Set();
+      const out = [];
+      for (const el of nodes) {
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || seenText.has(text)) continue;
+        seenText.add(text);
+        out.push({ el, text });
+      }
+      return out;
+    };
+
+    const start = Date.now();
+    let triedNativeClick = alreadyOpen;
+    let lastCount = -1;
+    let stablePolls = 0;
+    while (Date.now() - start < maxWaitMs) {
+      await sleep(150);
+      if (!triedNativeClick && Date.now() - start >= 600 && trigger.getAttribute('aria-expanded') !== 'true' && collect().length === 0) {
+        triedNativeClick = true;
+        trigger.click();
+        continue;
+      }
+      const opts = collect();
+      if (opts.length > 0 && opts.length === lastCount) {
+        if (++stablePolls >= 2) return opts;
+      } else {
+        stablePolls = 0;
+      }
+      lastCount = opts.length;
+    }
+    return collect();
+  }
+
+  /**
+   * Picks the option whose visible text best matches `choice`: exact
+   * (case-insensitive), then punctuation/whitespace-insensitive (so an
+   * AI's "Online Job Board - LinkedIn" still finds an en-dash "Online Job
+   * Board – LinkedIn"), then containment either way.
+   * @param {Array<{text: string, el: HTMLElement}>} options
+   * @param {string} choice
+   * @returns {{text: string, el: HTMLElement}|null}
+   */
+  function findOptionByText(options, choice) {
+    const choiceLower = (choice || '').toLowerCase().trim();
+    if (!choiceLower) return null;
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const choiceNorm = norm(choiceLower);
+    return options.find(o => o.text.toLowerCase().trim() === choiceLower)
+      || (choiceNorm && options.find(o => norm(o.text) === choiceNorm))
+      || options.find(o => {
+        const optLower = o.text.toLowerCase().trim();
+        return optLower.includes(choiceLower) || choiceLower.includes(optLower);
+      })
+      || null;
+  }
+
+  /**
+   * Did choosing `opt` actually register on this Workday select? Re-finds
+   * the trigger by id (React may have replaced the node) and checks that
+   * its value now holds the option's data-value — or, if the option has
+   * none, that the button now reads the option's text.
+   * @param {HTMLElement} trigger
+   * @param {{text: string, el: HTMLElement}} opt
+   * @returns {boolean}
+   */
+  function workdaySelectCommitted(trigger, opt) {
+    const live = (trigger.id && document.getElementById(trigger.id)) || trigger;
+    const value = (live.getAttribute('value') || '').trim();
+    const dataValue = opt.el.getAttribute('data-value');
+    if (dataValue) return value === dataValue;
+    return !!value || (live.textContent || '').trim() === opt.text;
+  }
+
+  /**
+   * Fills one Workday select: open it, read only the options that click
+   * rendered, ask the matcher (saved Q&A/profile first, AI fallback) which
+   * one fits, click it, and confirm it stuck. Escalates if the click
+   * didn't register: a native .click(), then the keyboard — ArrowDown
+   * through the listbox until the option is the active one, then Enter.
+   * @param {HTMLElement} trigger
+   * @param {string} questionText
+   * @returns {Promise<boolean>}
+   */
+  async function fillWorkdaySelect(trigger, questionText) {
+    const label = getWorkdayFieldLabel(trigger) || questionText;
+    const options = await openListboxAndCaptureNewOptions(trigger);
+    if (options.length === 0) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: no options rendered after opening "%s"', label);
+      document.body.click();
+      return false;
+    }
+
+    let choice;
+    try {
+      choice = await sendMessage({
+        type: 'MATCH_DROPDOWN',
+        questionText: label,
+        options: options.map(o => o.text),
+        resumeId: _activeResumeId
+      });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: MATCH_DROPDOWN threw for "%s":', label, e && e.message);
+    }
+    const opt = choice && choice !== 'SKIP' && choice !== 'NEEDS_USER_INPUT' ? findOptionByText(options, choice) : null;
+    if (!opt) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: no option for "%s" (choice=%o, options=%o)', label, choice, options.map(o => o.text));
+      // Close it again without choosing anything.
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      document.body.click();
+      return false;
+    }
+
+    try { opt.el.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+    clickElement(opt.el);
+    await sleep(300);
+    if (workdaySelectCommitted(trigger, opt)) return true;
+
+    if (opt.el.isConnected) {
+      opt.el.click();
+      await sleep(300);
+      if (workdaySelectCommitted(trigger, opt)) return true;
+    }
+
+    // Keyboard fallback, on the list as it is now (re-opened if it closed).
+    let listbox = opt.el.isConnected ? opt.el.closest('[role="listbox"]') : null;
+    let target = opt;
+    if (!listbox) {
+      const reopened = await openListboxAndCaptureNewOptions(trigger);
+      target = findOptionByText(reopened, opt.text);
+      listbox = target && target.el.closest('[role="listbox"]');
+    }
+    if (listbox && target) {
+      const key = (k, code) => listbox.dispatchEvent(new KeyboardEvent('keydown', { key: k, code, keyCode: code, which: code, bubbles: true, cancelable: true }));
+      listbox.focus();
+      const total = listbox.querySelectorAll('[role="option"]').length;
+      for (let i = 0; i <= total && listbox.getAttribute('aria-activedescendant') !== target.el.id; i++) {
+        key('ArrowDown', 40);
+        await sleep(50);
+      }
+      key('Enter', 13);
+      await sleep(300);
+      if (workdaySelectCommitted(trigger, target)) return true;
+    }
+
+    console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: "%s" → "%s" did not register after click, native click and keyboard', label, opt.text);
     return false;
   }
 

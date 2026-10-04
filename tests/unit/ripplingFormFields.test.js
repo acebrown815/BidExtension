@@ -47,7 +47,7 @@ beforeAll(() => {
     `
     ${helpers}
     const getFieldLabel = getRipplingFieldLabel;
-    const isFieldEligible = () => true;
+    const isFieldEligible = () => true; const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]'; const isWorkdaySelectTrigger = () => false; const getWorkdayFieldLabel = () => '';
     const seen = new Set();
     const questions = [];
     const _fieldMap = {};
