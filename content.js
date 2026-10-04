@@ -8837,12 +8837,29 @@
    * `/candidate/<sessionId>/job/<jobId>`: the session id's own NEXT
    * segment ("job") isn't actually labeling it, it's labeling the id
    * AFTER it.
+   *
+   * Workday (*.myworkdayjobs.com) is the one non-hex exception: its job
+   * slug ends in the requisition id ("..._P751304-1", "..._R0017183"),
+   * under a /job/<location>/ path. Workday's router rewrites the opened
+   * URL in place on load (adds /en-US/, changes the tenant's case) and
+   * routes Apply to <slug>/apply/... — confirmed live on
+   * zillow.wd5.myworkdayjobs.com: with no id recognized, that rewrite
+   * looked like a new job, cancelled the in-flight Auto-Bid analysis, and
+   * the "Apply" button was never clicked.
    * @param {string} url
    * @returns {string|null} The lowercased id, or null if none is found.
    */
   function extractJobIdFromUrl(url) {
     try {
-      const segments = new URL(url).pathname.split('/').filter(Boolean);
+      const parsed = new URL(url);
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      if (/\.myworkdayjobs\.com$/i.test(parsed.hostname)) {
+        const jobIdx = segments.findIndex(seg => seg.toLowerCase() === 'job');
+        for (let i = jobIdx + 1; jobIdx !== -1 && i < segments.length; i++) {
+          const m = segments[i].match(/_([A-Za-z]{0,5}\d{4,}(?:-\d+)?)$/);
+          if (m) return 'workday:' + m[1].toLowerCase();
+        }
+      }
       const idRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$|^[0-9a-f]{20,}$/i;
       const jobWordRe = /job|posting|position|req|application|vacan/i;
       for (let i = 0; i < segments.length; i++) {
@@ -8871,8 +8888,15 @@
     const isDifferentJob = urlChanged && !sameUnderlyingJob;
     if (urlChanged) {
       _lastUrl = currentUrl;
+    }
+    if (isDifferentJob) {
       // Bump the analyze generation so any in-flight analyzeJob() against
       // the previous URL becomes stale and bails before touching the UI (I3).
+      // Not for a URL change within the SAME posting (Workday's own
+      // on-load /en-US/ rewrite, an /apply step, a success page): the JD
+      // and the analysis are still valid, and bumping here silently
+      // cancelled Auto-Bid's in-flight analyzeJob() — so no score, and
+      // the Apply button never got clicked.
       _analyzeGen++;
     }
     if (isDifferentJob) {

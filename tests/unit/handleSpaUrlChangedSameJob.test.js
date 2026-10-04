@@ -159,9 +159,12 @@ describe('handleSpaUrlChanged — same underlying job survives a real Submit-to-
     expect(els.jmMarkApplied.style.display).toBe('flex'); // never touched — still whatever it was
     expect(calls).not.toContain('scanResumeMatch');
     expect(calls).not.toContain('checkIfApplied');
-    // _lastUrl/_analyzeGen still advance for a later, genuinely new nav.
+    // _lastUrl still advances for a later, genuinely new nav — but
+    // _analyzeGen does not: the same posting's analysis is still valid, and
+    // bumping it would cancel an in-flight analyzeJob() (see the Workday
+    // tests below).
     expect(state._lastUrl).toBe('https://www.dice.com/job-applications/ef34f6e2-38d0-4ecb-aac9-838fed17b01f/wizard/success');
-    expect(state._analyzeGen).toBe(1);
+    expect(state._analyzeGen).toBe(0);
   });
 
   it('still resets everything for a genuinely different job posting (no regression)', () => {
@@ -189,6 +192,58 @@ describe('handleSpaUrlChanged — same underlying job survives a real Submit-to-
 
     handleSpaUrlChanged();
 
+    expect(getState().currentAnalysis).toBeNull();
+  });
+});
+
+// Regression test for a live bug on Workday Auto-Bid
+// (zillow.wd5.myworkdayjobs.com/zillow_group_external/job/Remote-USA/
+// Principal-Software-Development-Engineer--Backend_P751304-1): Workday's
+// router rewrites the opened URL in place on load (adds /en-US/, changes the
+// tenant's case — the page's own canonical link is /en-US/Zillow_Group_External/...).
+// With no recognizable id in a Workday URL, that rewrite looked like a new
+// job: it bumped _analyzeGen (cancelling Auto-Bid's in-flight analyzeJob(),
+// so there was never a score) and wiped currentAnalysis — and the "Apply"
+// button was never clicked.
+describe('handleSpaUrlChanged — Workday requisition ids', () => {
+  const OPENED = 'https://zillow.wd5.myworkdayjobs.com/zillow_group_external/job/Remote-USA/Principal-Software-Development-Engineer--Backend_P751304-1';
+  const REWRITTEN = 'https://zillow.wd5.myworkdayjobs.com/en-US/Zillow_Group_External/job/Remote-USA/Principal-Software-Development-Engineer--Backend_P751304-1';
+
+  it('extracts the same requisition id from the opened, rewritten and /apply URLs', () => {
+    const { extractJobIdFromUrl } = buildHarness({ lastUrl: '' });
+    expect(extractJobIdFromUrl(OPENED)).toBe('workday:p751304-1');
+    expect(extractJobIdFromUrl(REWRITTEN)).toBe('workday:p751304-1');
+    expect(extractJobIdFromUrl(REWRITTEN + '/apply/autofillWithResume')).toBe('workday:p751304-1');
+    expect(extractJobIdFromUrl('https://zayo.wd1.myworkdayjobs.com/en-US/zayo_careers/job/Remote---USA/Senior-Software-Engineer---Application-Development_R0017183'))
+      .toBe('workday:r0017183');
+  });
+
+  it('does not cancel the in-flight analysis or wipe it on Workday\'s on-load URL rewrite', () => {
+    window.happyDOM.setURL(REWRITTEN);
+    const { handleSpaUrlChanged, getState, calls } = buildHarness({
+      lastUrl: OPENED,
+      currentAnalysis: { title: 'Principal Software Development Engineer, Backend', matchScore: 88 },
+    });
+
+    handleSpaUrlChanged();
+
+    const state = getState();
+    expect(state._analyzeGen).toBe(0);
+    expect(state.currentAnalysis).toEqual({ title: 'Principal Software Development Engineer, Backend', matchScore: 88 });
+    expect(calls).not.toContain('scanResumeMatch');
+    expect(state._lastUrl).toBe(REWRITTEN);
+  });
+
+  it('still treats a different Workday requisition as a new job', () => {
+    window.happyDOM.setURL('https://zillow.wd5.myworkdayjobs.com/en-US/Zillow_Group_External/job/Remote-USA/Software-Development-Engineer_P748929-1');
+    const { handleSpaUrlChanged, getState } = buildHarness({
+      lastUrl: REWRITTEN,
+      currentAnalysis: { title: 'Principal', matchScore: 88 },
+    });
+
+    handleSpaUrlChanged();
+
+    expect(getState()._analyzeGen).toBe(1);
     expect(getState().currentAnalysis).toBeNull();
   });
 });
