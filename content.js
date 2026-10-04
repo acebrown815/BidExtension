@@ -5311,8 +5311,7 @@
    * @returns {boolean}
    */
   function looksLikeResumeUpload(el, label) {
-    const probe = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')]
-      .filter(Boolean).join(' ').toLowerCase();
+    const probe = uploadFieldProbeText(el, label);
     if (!probe) return false;
     if (/cover[\s_-]?letter|coverletter|portfolio|transcript|writing[\s_-]?sample|references?\b/i.test(probe)) return false;
     return /resum[eé]|\bcv\b|curriculum vitae/i.test(probe);
@@ -5330,11 +5329,35 @@
    * @returns {boolean}
    */
   function looksLikeCoverLetterUpload(el, label) {
-    const probe = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')]
-      .filter(Boolean).join(' ').toLowerCase();
+    const probe = uploadFieldProbeText(el, label);
     if (!probe) return false;
     if (/resum[eé]|\bcv\b|curriculum vitae|portfolio|transcript|writing[\s_-]?sample|references?\b/i.test(probe)) return false;
     return /cover[\s_-]?letter|coverletter/i.test(probe);
+  }
+
+  /**
+   * Builds the lowercase text looksLikeResumeUpload()/looksLikeCoverLetterUpload()
+   * classify a file input by: its resolved label plus its own id/name/
+   * aria-label/data-testid, plus the data-automation-id of the input and
+   * its nearest few ancestors. That last part is needed on Workday
+   * (*.myworkdayjobs.com apply flow, "Autofill with Resume" step): the
+   * real input carries only data-automation-id="file-upload-input-ref",
+   * its visible text is a generic "Upload either DOC, DOCX, HTML, PDF, or
+   * TXT file types" / "Select file", and the ONLY resume signal is the
+   * wrapping div[data-automation-id="resumeUpload"] two levels up —
+   * without it the field was never classified, nothing was attached, and
+   * AutoFill reported "No form fields found" on that step.
+   * @param {HTMLInputElement} el
+   * @param {string} label
+   * @returns {string}
+   */
+  function uploadFieldProbeText(el, label) {
+    const parts = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')];
+    let node = el;
+    for (let i = 0; i < 4 && node && node !== document.body; i++, node = node.parentElement) {
+      parts.push(node.getAttribute('data-automation-id'));
+    }
+    return parts.filter(Boolean).join(' ').toLowerCase();
   }
 
   /**

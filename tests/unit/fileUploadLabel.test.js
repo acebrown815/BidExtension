@@ -294,3 +294,32 @@ describe('looksLikeResumeUpload / looksLikeCoverLetterUpload — Dice wizard cla
     expect(looksLikeCoverLetterUpload(el, label)).toBe(false);
   });
 });
+
+// Regression test for a live bug on Workday (zayo.wd1.myworkdayjobs.com/.../
+// apply/autofillWithResume, step 1 "Autofill with Resume"): the real file
+// input has no id/name/aria-label and only generic "Upload either DOC..." /
+// "Select file" text nearby — the only resume signal is the wrapping
+// div[data-automation-id="resumeUpload"] — so it was never classified as a
+// resume field, nothing was attached, and AutoFill did nothing on that step.
+describe('looksLikeResumeUpload — Workday "Autofill with Resume" step', () => {
+  it('classifies the input inside data-automation-id="resumeUpload" as a resume upload', () => {
+    document.body.innerHTML = `
+      <div data-automation-id="applyFlowAutoFillPage">
+        <div data-automation-id="formField-" class="css-7t35fz"><div class="css-15rz5ap"><div>
+          <div class="css-r2m5aj">Upload either DOC, DOCX, HTML, PDF, or TXT file types (5MB max)</div>
+          <div data-automation-id="resumeUpload" class="css-1s544wy"><div class="css-wtpnzt">
+            <div data-automation-id="file-upload-drop-zone" class="css-1ikudie">
+              <div class="css-1ge88gr">Drop file here</div>
+              <div class="css-xszj4y"><div>or</div><button type="button" data-automation-id="select-files" id="input-48"><span>Select file</span></button></div>
+            </div>
+            <input data-automation-id="file-upload-input-ref" type="file" class="css-1hyfx7x">
+          </div></div>
+        </div></div></div>
+      </div>
+    `;
+    const fileInput = document.querySelector('input[type="file"]');
+    const label = getFieldLabel(fileInput);
+    expect(looksLikeResumeUpload(fileInput, label)).toBe(true);
+    expect(looksLikeCoverLetterUpload(fileInput, label)).toBe(false);
+  });
+});
