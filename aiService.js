@@ -560,6 +560,7 @@ Return ONLY a JSON object with this structure (use empty strings/arrays for miss
     {
       "title": "Job Title",
       "company": "Company Name",
+      "location": "City, State, or Remote (empty if not stated)",
       "dates": "Start - End",
       "description": "responsibilities and achievements"
     }

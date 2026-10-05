@@ -24,6 +24,20 @@
 // "gender identity" doesn't accidentally match the broader "gender" bucket.
 
 const TOPIC_PATTERNS = {
+  // Relatives / close relationships working at the hiring company — a
+  // conflict-of-interest question ("Do you have any relatives who work at
+  // Louisiana Blue? Relatives are defined as: spouse, parent, … people who
+  // live within your household…", Amentum's "relatives or significant
+  // relationships with someone currently working at Amentum?"). Checked
+  // first: its long wording also mentions "work", "employ", "household" —
+  // which work_auth's patterns used to match (see below) — and with no
+  // saved answer it defaults to "No" (see Step 4).
+  relatives_at_company: [
+    /\brelatives?\b[\s\S]*\b(?:work|employ)/i,
+    /\bfamily members?\b[\s\S]*\b(?:work|employ)/i,
+    /\b(?:related to|relationships? with)\b[\s\S]*\b(?:employee|work(?:s|ing)?\s+(?:at|for))/i
+  ],
+
   // More specific gender identity questions (cis/trans identity) — must
   // come BEFORE the broader "gender" topic below: /\bgender\b/i also
   // matches inside "gender identity", so checking gender first would
@@ -93,7 +107,10 @@ const TOPIC_PATTERNS = {
 
   // Work authorization — "Are you legally authorized to work in the US?"
   work_auth: [
-    /\bauthori[zs]/i, /\bwork.*(?:us|united states|u\.s)/i,
+    // "us" needs word boundaries: unanchored, it matched inside "household"
+    // ("…who WORK at Louisiana Blue? … within your HOUSehold…"), turning a
+    // relatives question into a work-authorization one and answering "Yes".
+    /\bauthori[zs]/i, /\bwork\b.*(?:\bus\b|\bunited states\b|\bu\.s\.?)/i,
     /\blegal.*work\b/i, /\beligib.*work\b/i, /\bemploy.*eligib/i
   ]
 };
@@ -108,6 +125,7 @@ const TOPIC_PATTERNS = {
 // question text includes phrases like "authorized to work" or "legally authorized".
 
 const TOPIC_TO_QA_KEYWORDS = {
+  relatives_at_company: ['relative', 'family member', 'related to', 'relationship with'],
   gender:             ['gender'],
   gender_identity:    ['gender identity'],
   sexual_orientation: ['sexual orientation'],
@@ -511,6 +529,18 @@ function matchAnswerToOption(savedAnswer, options, topic) {
 // ─── Fallback: find a "decline to answer" option ─────────────────────────────
 
 /**
+ * The plain "No" answer among a question's options ("No", "No, I do not",
+ * "I do not have any relatives…", "None").
+ * @param {string[]} options
+ * @returns {string|null}
+ */
+function findNegativeOption(options) {
+  return options.find(o => /^\s*no\b/i.test(o))
+    || options.find(o => /^\s*(?:i\s+)?(?:do not|don't|have no)\b|^\s*none\b/i.test(o))
+    || null;
+}
+
+/**
  * Scans the available options for any variant of "prefer not to answer" /
  * "decline to self-identify". These phrases are the standard EEO fallback on
  * most job application platforms.
@@ -629,6 +659,13 @@ function deterministicFieldMatcher(questionText, options, qaList, profile) {
       // Use decline only when the user has no saved answer at all
       return { matched: true, option: decline, topic };
     }
+  }
+
+  // Relatives at the hiring company: the candidate has none unless they
+  // saved otherwise — same "only with no saved answer" rule as above.
+  if (topic === 'relatives_at_company' && candidateAnswers.length === 0) {
+    const no = findNegativeOption(options);
+    if (no) return { matched: true, option: no, topic };
   }
 
   // ── Step 5: Deterministic matching failed ─────────────────────────────────

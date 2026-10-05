@@ -148,6 +148,9 @@
   }
 
   function setNativeInputValue(el, value) {
+    // Workday collects the country code in its own selector and rejects a
+    // phone number that repeats it — see lib/phoneFormat.js.
+    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustPhoneValueForField(el, value);
     // React overrides the value setter, so we need to use the native one
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
@@ -390,6 +393,10 @@
       // Skip inputs that are part of React Select (combobox search inputs)
       if (input.getAttribute('role') === 'combobox') continue;
       if (input.getAttribute('aria-autocomplete')) continue;
+      // Workday "prompt" selects: the input is only a search box — typing an
+      // answer into it selects nothing (content.js's fillWorkdayPrompt picks
+      // from the popup list instead).
+      if (input.getAttribute('data-uxi-widget-type') === 'selectinput') continue;
       // Skip hidden inputs inside React Select containers
       if (input.closest('[class*="css-"][class*="-container"]') || input.closest('[class*="select__"]')) continue;
       if (input.type === 'hidden') continue;

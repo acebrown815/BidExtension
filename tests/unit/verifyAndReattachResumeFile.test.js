@@ -23,7 +23,7 @@ import path from 'node:path';
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 const SRC = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
 
-const START_MARKER = 'async function verifyAndReattachResumeFile(previouslyAttached) {';
+const START_MARKER = '  /**\n   * A file input whose widget keeps a LIST of uploaded files';
 const END_MARKER = '\n  /**\n   * Returns the human-facing name for whichever resume is currently';
 const START = SRC.indexOf(START_MARKER);
 const END = SRC.indexOf(END_MARKER);
@@ -122,5 +122,43 @@ describe('verifyAndReattachResumeFile — the actual Ashby bug (resume file clea
     const reattached = await run(1);
     expect(reattached).toBe(0);
     expect(showAutofillBadgeCalls).toHaveLength(0);
+  });
+});
+
+// Regression test for Workday's "My Experience" Resume/CV field ("Upload a file
+// (5MB max)", <input type="file" multiple data-automation-id="file-upload-input-ref">):
+// Workday moves each delivered file into its own list and empties the input,
+// which this check read as "cleared by the page" — re-attaching uploaded the
+// same resume a second time.
+describe('verifyAndReattachResumeFile — accumulating (multi-file / Workday) inputs', () => {
+  beforeEach(() => { document.body.innerHTML = ''; });
+
+  it('never re-attaches to a Workday file-upload-input-ref the widget emptied by design', async () => {
+    const el = makeFileInput('wd-upload', []);
+    el.setAttribute('data-automation-id', 'file-upload-input-ref');
+    const { run, showAutofillBadgeCalls } = buildHarness({ resumeFileFields: [{ el, label: 'Upload a file (5MB max)' }], builtResume: BUILT });
+
+    expect(await run(1)).toBe(0);
+    expect(el.files).toEqual([]);
+    expect(showAutofillBadgeCalls).toEqual([]);
+  });
+
+  it('never re-attaches to a plain multiple file input', async () => {
+    const el = makeFileInput('multi', []);
+    el.multiple = true;
+    const { run } = buildHarness({ resumeFileFields: [{ el, label: 'Attachments' }], builtResume: BUILT });
+    expect(await run(1)).toBe(0);
+  });
+
+  it('still re-attaches a cleared single-file input next to an accumulating one', async () => {
+    const wd = makeFileInput('wd-upload', []);
+    wd.setAttribute('data-automation-id', 'file-upload-input-ref');
+    const single = makeFileInput('single', []);
+    const { run, showAutofillBadgeCalls } = buildHarness({
+      resumeFileFields: [{ el: wd, label: 'Upload a file' }, { el: single, label: 'Resume' }],
+      builtResume: BUILT,
+    });
+    expect(await run(2)).toBe(1);
+    expect(showAutofillBadgeCalls).toEqual(['single']);
   });
 });

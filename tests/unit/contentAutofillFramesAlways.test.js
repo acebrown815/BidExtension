@@ -81,6 +81,7 @@ function buildAutofillForm({
     async function waitForDomSettled() {}
     async function waitForFormFieldsReady() {}
     function hasVisibleValidationErrors() { return false; }
+    async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}
     function detectFormFields() { return topFrameQuestions; }

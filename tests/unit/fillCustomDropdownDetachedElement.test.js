@@ -43,7 +43,7 @@ function buildHarness({ inputId, freshElementId, freshInputIsConnected = true })
     'document', 'warnCalls',
     `
     const console = { warn: (...args) => warnCalls.push(args), log: () => {} };
-    const isWorkdaySelectTrigger = () => false;
+    const isWorkdaySelectTrigger = () => false; const isWorkdayPromptInput = () => false;
     ${GUARD_SRC}
       return 'PROCEEDED';
     }

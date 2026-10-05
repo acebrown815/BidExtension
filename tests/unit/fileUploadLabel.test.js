@@ -323,3 +323,47 @@ describe('looksLikeResumeUpload — Workday "Autofill with Resume" step', () => 
     expect(looksLikeCoverLetterUpload(fileInput, label)).toBe(false);
   });
 });
+
+// Regression test for Workday's "My Experience" step (bcbsla.wd1.myworkdayjobs.com):
+// the required "Upload a file (5MB max)" field's only resume signal is
+// data-fkit-id="resumeAttachments--attachments" on its formField- wrapper, five
+// levels above the input — past the old 4-level walk — so nothing was attached
+// and the step failed "The field Upload a file (5MB max) is required".
+describe('looksLikeResumeUpload — Workday "My Experience" Resume/CV attachments', () => {
+  it('classifies the attachments input via its formField wrapper\'s data-fkit-id', () => {
+    document.body.innerHTML = `
+      <div role="group" aria-labelledby="Resume/CV-section"><h4 id="Resume/CV-section">Resume/CV</h4>
+        <div data-fkit-id="resumeAttachments--null">
+          <div data-automation-id="formField-" data-fkit-id="resumeAttachments--attachments">
+            <label id="label30"><span>Upload a file (5MB max)<abbr aria-hidden="true">*</abbr></span></label>
+            <div class="css-15rz5ap"><div style="width: 100%;">
+              <div data-automation-id="attachments-FileUpload" aria-labelledby="label30"><div class="css-wtpnzt">
+                <div data-automation-id="file-upload-drop-zone"><div>Drop files here</div>
+                  <div><div>or</div><button type="button" data-automation-id="select-files" id="resumeAttachments--attachments"><span>Select files</span></button></div>
+                </div>
+                <input data-automation-id="file-upload-input-ref" type="file" multiple="">
+              </div></div>
+            </div></div>
+          </div>
+        </div>
+      </div>
+    `;
+    const fileInput = document.querySelector('input[type="file"]');
+    const label = getFieldLabel(fileInput);
+    expect(looksLikeResumeUpload(fileInput, label)).toBe(true);
+    expect(looksLikeCoverLetterUpload(fileInput, label)).toBe(false);
+  });
+
+  it('does not read past the field wrapper into page-level containers', () => {
+    document.body.innerHTML = `
+      <div data-automation-id="resumeSection"><div><div><div><div>
+        <div data-automation-id="formField-coverLetter" data-fkit-id="coverLetter--attachments">
+          <label>Upload a file</label><div><div><input type="file" data-automation-id="file-upload-input-ref"></div></div>
+        </div>
+      </div></div></div></div></div>
+    `;
+    const fileInput = document.querySelector('input[type="file"]');
+    expect(looksLikeResumeUpload(fileInput, getFieldLabel(fileInput))).toBe(false);
+    expect(looksLikeCoverLetterUpload(fileInput, getFieldLabel(fileInput))).toBe(true);
+  });
+});

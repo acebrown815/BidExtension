@@ -233,3 +233,37 @@ describe('deterministicFieldMatcher — combined sponsorship/work-authorization 
     expect(result).toEqual({ matched: true, option: 'Yes', topic: 'sponsorship' });
   });
 });
+
+// Regression test for a live bug on Workday (bcbsla.wd1.myworkdayjobs.com,
+// Application Questions): the relatives question below was answered "Yes".
+// work_auth's /\bwork.*(?:us|…)/ matched "WORK at Louisiana Blue … HOUSehold"
+// (an unanchored "us" inside "household"), so the saved work-authorization
+// answer "Yes" was used. Relatives questions now have their own topic and
+// default to "No" when nothing is saved for them.
+describe('deterministicFieldMatcher — relatives at the hiring company', () => {
+  const LOUISIANA_BLUE = 'Do you have any relatives who work at Louisiana Blue? Relatives are defined as: spouse, parent, parent-in-law, child, grandparent, grandchild, sister, brother, sister or brother-in-law, aunt, uncle, niece, nephew, step-brother, step-sister, stepchild or step-parent, fiancée, as well as any individual with whom you have a close personal relationship with. This also includes people who live within your household, but to whom you may not be directly related to. NOTE: Failure to disclose will result in lack of further consideration, and/or termination (if hired).';
+  const AMENTUM = 'To help us avoid conflicts of interest in administering our employment policies regarding work assignments, please indicate if you have relatives or significant relationships with someone currently working at Amentum?';
+  const WORK_AUTH_QA = [{ question: 'Are you legally authorized to work in the US?', answer: 'Yes' }];
+
+  it('classifies the live questions as relatives_at_company, not work_auth', () => {
+    expect(detectTopic(LOUISIANA_BLUE)).toBe('relatives_at_company');
+    expect(detectTopic(AMENTUM)).toBe('relatives_at_company');
+  });
+
+  it('answers "No" when nothing is saved for it, ignoring the work-authorization "Yes"', () => {
+    expect(deterministicFieldMatcher(LOUISIANA_BLUE, ['Yes', 'No'], WORK_AUTH_QA, null))
+      .toEqual({ matched: true, option: 'No', topic: 'relatives_at_company' });
+    expect(deterministicFieldMatcher(AMENTUM, ['Yes', 'No'], [], null).option).toBe('No');
+  });
+
+  it('still honors a saved answer for it', () => {
+    const qa = [{ question: 'Do you have relatives working here?', answer: 'Yes' }];
+    expect(deterministicFieldMatcher(LOUISIANA_BLUE, ['Yes', 'No'], qa, null).option).toBe('Yes');
+  });
+
+  it('work_auth still matches real work-authorization questions, but not "us" inside a word', () => {
+    expect(detectTopic('Are you legally eligible to work in the U.S.?')).toBe('work_auth');
+    expect(detectTopic('Can you work in the US without restriction?')).toBe('work_auth');
+    expect(detectTopic('Will you work from your household office?')).toBeNull();
+  });
+});

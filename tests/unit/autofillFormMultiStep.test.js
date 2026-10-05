@@ -83,6 +83,7 @@ function buildAutofillForm({
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     function hasVisibleValidationErrors() { return nextClickCount >= errorAfterClicks; }
+    async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}
     function detectFormFields() { calls.push({ type: 'detectFormFields' }); return []; }

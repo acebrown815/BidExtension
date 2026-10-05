@@ -78,6 +78,8 @@ function buildCheckPendingAutoBidAutofill({ pendingResponse, calls, workdayDialo
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     async function autofillForm() { calls.push({ type: 'autofillForm' }); }
+    const isWorkdayHost = () => false;
+    const WORKDAY_DIALOG_WAIT_MS = 0;
     async function clickWorkdayAutofillWithResumeIfPresent() {
       calls.push({ type: 'clickWorkdayAutofillWithResumeIfPresent' });
       return workdayDialogPresent;

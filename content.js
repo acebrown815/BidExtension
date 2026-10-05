@@ -4534,6 +4534,15 @@
       // every single one of its MAX_AUTOFILL_STEPS iterations — not a true
       // infinite loop, but indistinguishable from one in practice.
       for (let step = 1; step <= MAX_AUTOFILL_STEPS; step++) {
+        // Workday tenants that start the apply flow with a Create Account /
+        // Sign In step — see handleWorkdayAccountStep().
+        const accountStep = await handleWorkdayAccountStep();
+        if (accountStep === 'stop') break;
+        if (accountStep === 'advanced') {
+          await waitForDomSettled();
+          await waitForFormFieldsReady();
+          continue;
+        }
         await fillCurrentAutofillStep();
         if (!_autoBidAutofillRun) break;
         const nextBtn = findNextStepButton();
@@ -4666,6 +4675,13 @@
     try {
       await ensureBestResumeSelected();
     } catch (_) {}
+
+    // Workday "My Experience": add and fill one Work Experience / Education
+    // panel per resume entry before the generic detection below runs (it
+    // then skips those managed panels).
+    try { await fillWorkdayMyExperienceStep(); } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdayMyExperienceStep threw:', e && e.message);
+    }
 
     // Step 1: detect fields and store DOM references
     _fieldMap = {};
@@ -5051,6 +5067,26 @@
       // open on its own, and the dropdown fill's own click then toggled it
       // shut again. The button (pass 2b) is the real field.
       if (isWorkdaySelectCompanionInput(input)) return;
+      // Workday's "prompt" select (see isWorkdayPromptInput): its input is
+      // only a search box — the value is chosen from a (possibly nested)
+      // popup list, so register it as a dropdown, never as text.
+      if (isWorkdayPromptInput(input)) {
+        const promptQid = input.id;
+        if (!promptQid || seen.has(promptQid)) return;
+        seen.add(promptQid);
+        if (workdayPromptHasSelection(input)) return; // already answered (e.g. Country Phone Code)
+        const promptLabel = getWorkdayFieldLabel(input) || getFieldLabel(input) || '';
+        questions.push({
+          question_id: promptQid,
+          question_text: promptLabel,
+          field_type: 'dropdown',
+          required: input.getAttribute('aria-required') === 'true',
+          available_options: [] // read level by level during fill
+        });
+        _fieldMap[promptQid] = { el: input, type: 'custom_dropdown', optionTexts: [], questionText: promptLabel };
+        qIndex++;
+        return;
+      }
       const label = getFieldLabel(input);
       const qid = input.id || input.name || ('q_' + qIndex);
       if ((!label && !input.id && !input.name) || seen.has(qid)) return;
@@ -5368,6 +5404,13 @@
    * wrapping div[data-automation-id="resumeUpload"] two levels up —
    * without it the field was never classified, nothing was attached, and
    * AutoFill reported "No form fields found" on that step.
+   *
+   * Also reads data-fkit-id, walking up to (and including) the field's own
+   * formField- wrapper but never past it: on Workday's "My Experience"
+   * step the required "Upload a file (5MB max)" field's only resume signal
+   * is data-fkit-id="resumeAttachments--attachments" on that wrapper, five
+   * levels up — beyond the old 4-level walk — so it was never attached and
+   * the step failed with "The field Upload a file (5MB max) is required".
    * @param {HTMLInputElement} el
    * @param {string} label
    * @returns {string}
@@ -5375,8 +5418,11 @@
   function uploadFieldProbeText(el, label) {
     const parts = [label, el.id, el.name, el.getAttribute('aria-label'), el.getAttribute('data-testid')];
     let node = el;
-    for (let i = 0; i < 4 && node && node !== document.body; i++, node = node.parentElement) {
-      parts.push(node.getAttribute('data-automation-id'));
+    for (let i = 0; i < 7 && node && node !== document.body; i++, node = node.parentElement) {
+      const automationId = node.getAttribute('data-automation-id');
+      parts.push(automationId, node.getAttribute('data-fkit-id'));
+      if (automationId && automationId.startsWith('formField')) break;
+      if (i >= 3 && !node.closest('[data-automation-id^="formField"]')) break;
     }
     return parts.filter(Boolean).join(' ').toLowerCase();
   }
@@ -5701,10 +5747,15 @@
         // isn't universally needed, so a failure here shouldn't undo the
         // native-input attachment above.
         try {
-          const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
-          ['dragenter', 'dragover', 'drop'].forEach(type => {
-            dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
-          });
+          // Not on an accumulating input: its widget already took the file
+          // from 'change', and a drop bubbling into the same widget adds it
+          // a second time — see isAccumulatingFileInput.
+          if (!isAccumulatingFileInput(el)) {
+            const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
+            ['dragenter', 'dragover', 'drop'].forEach(type => {
+              dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+            });
+          }
         } catch (_) { /* best-effort only */ }
 
         showAutofillBadge(el);
@@ -5750,19 +5801,40 @@
    * @param {number} previouslyAttached - the `attached` count attachResumeFile() returned.
    * @returns {Promise<number>} How many fields were re-attached.
    */
+  /**
+   * A file input whose widget keeps a LIST of uploaded files (a `multiple`
+   * input, or Workday's file-upload-input-ref, which moves each file into
+   * its own list and empties the input). Every extra delivery of the same
+   * file to such a widget becomes another copy — confirmed on Workday's
+   * "My Experience" Resume/CV field ("Upload a file (5MB max)", multiple),
+   * which listed the resume twice: once from 'change', once from the
+   * synthetic drop that bubbled from the input into the same widget (and a
+   * third time was possible from verifyAndReattachResumeFile, which read
+   * the deliberately emptied input as "cleared by the page").
+   * @param {HTMLInputElement} el
+   * @returns {boolean}
+   */
+  function isAccumulatingFileInput(el) {
+    return !!(el && (el.multiple || el.getAttribute('data-automation-id') === 'file-upload-input-ref'));
+  }
+
   async function verifyAndReattachResumeFile(previouslyAttached) {
     if (!previouslyAttached) return 0;
     await sleep(2000);
 
-    const stillAttached = _resumeFileFields.filter(({ el }) => el.isConnected && el.files && el.files.length > 0).length;
-    if (stillAttached >= previouslyAttached) return 0; // nothing was cleared
+    // An accumulating input is emptied BY DESIGN once its widget has taken
+    // the file into its own list — re-attaching there just uploads a
+    // second copy (see isAccumulatingFileInput), so those are left out.
+    const checkable = _resumeFileFields.filter(({ el }) => !isAccumulatingFileInput(el));
+    const stillAttached = checkable.filter(({ el }) => el.isConnected && el.files && el.files.length > 0).length;
+    if (stillAttached >= Math.min(previouslyAttached, checkable.length)) return 0; // nothing was cleared
 
     const built = await buildActiveResumeFile();
     if (!built) return 0;
     const { file, fileName: _fileName, ext, mime } = built;
 
     let reattached = 0;
-    for (const { el } of _resumeFileFields) {
+    for (const { el } of checkable) {
       if (!el.isConnected) continue;
       if (el.files && el.files.length > 0) continue; // still has its file — untouched
       if (!fileAcceptsType(el, ext, mime)) continue;
@@ -6660,6 +6732,7 @@
     // Workday's apply-flow selects need a human-like open → wait for the
     // newly rendered list → pick → confirm sequence of their own.
     if (isWorkdaySelectTrigger(input)) return await fillWorkdaySelect(input, questionText);
+    if (isWorkdayPromptInput(input)) return await fillWorkdayPrompt(input, questionText);
 
     // Some location-autocomplete fields (Google-Places-backed, common on
     // ATS wizards — confirmed on Dice) explicitly accept a raw ZIP/postal
@@ -6975,6 +7048,31 @@
   }
 
   /**
+   * Strict version of findOptionByText for a known answer: exact or
+   * punctuation-insensitive only — never containment, so a long answer
+   * ("Bachelor of Science in Computer Science") can't latch onto a short
+   * option that merely appears inside it ("Science").
+   * @param {Array<{text: string}>} options
+   * @param {string} answer
+   */
+  function findExactOptionByText(options, answer) {
+    const norm = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const target = norm(answer);
+    if (!target) return null;
+    return options.find(o => norm(o.text) === target) || null;
+  }
+
+  /**
+   * The matcher question for a field whose answer is already known from
+   * the resume, so the matcher maps it onto the site's own wording.
+   * @param {string} label
+   * @param {string} [hint]
+   */
+  function withAnswerHint(label, hint) {
+    return hint ? `${label} (the candidate's answer: "${hint}")` : label;
+  }
+
+  /**
    * Did choosing `opt` actually register on this Workday select? Re-finds
    * the trigger by id (React may have replaced the node) and checks that
    * its value now holds the option's data-value — or, if the option has
@@ -6999,9 +7097,14 @@
    * through the listbox until the option is the active one, then Enter.
    * @param {HTMLElement} trigger
    * @param {string} questionText
+   * @param {{answerHint?: string}} [opts] - the answer already known for
+   *   this field (e.g. one resume entry's degree, "B.S. in Computer
+   *   Science"): matched exactly first, otherwise handed to the matcher
+   *   alongside the label so it can map it onto the site's wording
+   *   ("Bachelor's Degree").
    * @returns {Promise<boolean>}
    */
-  async function fillWorkdaySelect(trigger, questionText) {
+  async function fillWorkdaySelect(trigger, questionText, opts = {}) {
     const label = getWorkdayFieldLabel(trigger) || questionText;
     const options = await openListboxAndCaptureNewOptions(trigger);
     if (options.length === 0) {
@@ -7010,16 +7113,18 @@
       return false;
     }
 
-    let choice;
-    try {
-      choice = await sendMessage({
-        type: 'MATCH_DROPDOWN',
-        questionText: label,
-        options: options.map(o => o.text),
-        resumeId: _activeResumeId
-      });
-    } catch (e) {
-      console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: MATCH_DROPDOWN threw for "%s":', label, e && e.message);
+    let choice = opts.answerHint ? (findExactOptionByText(options, opts.answerHint) || {}).text : null;
+    if (!choice) {
+      try {
+        choice = await sendMessage({
+          type: 'MATCH_DROPDOWN',
+          questionText: withAnswerHint(label, opts.answerHint),
+          options: options.map(o => o.text),
+          resumeId: _activeResumeId
+        });
+      } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: MATCH_DROPDOWN threw for "%s":', label, e && e.message);
+      }
     }
     const opt = choice && choice !== 'SKIP' && choice !== 'NEEDS_USER_INPUT' ? findOptionByText(options, choice) : null;
     if (!opt) {
@@ -7064,6 +7169,502 @@
 
     console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: "%s" → "%s" did not register after click, native click and keyboard', label, opt.text);
     return false;
+  }
+
+  // ── Workday "prompt" selects (single-select, possibly nested) ──────────
+  // A second Workday select widget, confirmed on bcbsla.wd1.myworkdayjobs.com
+  // ("How Did You Hear About Us?", "Country Phone Code"):
+  //   div[data-automation-id="formField-source"] <label>question</label>
+  //     div[data-automation-id="multiSelectContainer"][id=<widget id>]
+  //       input[data-uxi-widget-type="selectinput"] placeholder="Search"
+  //       [data-automation-id="promptAriaInstruction"] "0 items selected"
+  //       (once chosen) [data-automation-id="selectedItem"] pill
+  // Clicking it appends a popup under <body>:
+  //   [data-automation-id="responsiveMonikerPrompt"][data-associated-widget=<widget id>]
+  //     [role="listbox"] (ReactVirtualized — only ~8 rows rendered at a time;
+  //       each row carries aria-setsize/aria-posinset)
+  //       [role="option"][data-automation-id="menuItem"]
+  //         [data-automation-id="promptLeafNode"][data-uxi-multiselectlistitem-hassidecharm]
+  //           [data-automation-id="promptOption"][data-automation-label="Job Board"]
+  // Lists can be NESTED: a row with a side chevron (hassidecharm="true") is a
+  // category — clicking it swaps the popup's list for its children (with a
+  // [data-automation-id="backButton"] and a promptTitle header), e.g.
+  // "Job Board" → "Job Board - Glassdoor", …, "Job Board - Linkedin". Only a
+  // leaf row (radio button, no chevron) actually selects a value.
+
+  const WORKDAY_PROMPT_INPUT_SELECTOR = '[data-automation-id^="formField-"] input[data-uxi-widget-type="selectinput"]';
+
+  /** @param {Element} el @returns {boolean} */
+  function isWorkdayPromptInput(el) {
+    return !!(el && el.matches && el.matches(WORKDAY_PROMPT_INPUT_SELECTOR));
+  }
+
+  /**
+   * Has this prompt already got a value (a selected-item pill)?
+   * @param {HTMLInputElement} input
+   * @returns {boolean}
+   */
+  function workdayPromptHasSelection(input) {
+    const scope = input.closest('[data-automation-id="multiSelectContainer"]') || input.closest('[data-automation-id^="formField-"]');
+    return !!(scope && scope.querySelector('[data-automation-id="selectedItem"]'));
+  }
+
+  /**
+   * The open popup belonging to this prompt, if any.
+   * @param {HTMLInputElement} input
+   * @returns {HTMLElement|null}
+   */
+  function findWorkdayPromptPopup(input) {
+    const container = input.closest('[data-automation-id="multiSelectContainer"]');
+    if (!container || !container.id) return null;
+    for (const popup of document.querySelectorAll('[data-automation-id="responsiveMonikerPrompt"]')) {
+      if (popup.getAttribute('data-associated-widget') === container.id) return popup;
+    }
+    return null;
+  }
+
+  /** @param {Element} row */
+  function workdayPromptRowText(row) {
+    const opt = row.querySelector('[data-automation-id="promptOption"]');
+    return ((opt && opt.getAttribute('data-automation-label')) || (row.innerText || row.textContent || '')).replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * Reads every option of the popup's CURRENT list. The list is
+   * virtualized, so when fewer rows are rendered than aria-setsize says
+   * exist, it scrolls through the list collecting rows as they render, then
+   * scrolls back to the top.
+   * @param {HTMLElement} popup
+   * @returns {Promise<{title: string, signature: string, options: Array<{text: string, id: string, pos: number, isBranch: boolean, el: HTMLElement}>}>}
+   */
+  async function readWorkdayPromptLevel(popup) {
+    const titleEl = popup.querySelector('[data-automation-id="promptTitle"]');
+    const title = titleEl ? (titleEl.textContent || '').trim() : '';
+    const list = popup.querySelector('[role="listbox"]');
+    const byId = new Map();
+    const collect = () => {
+      popup.querySelectorAll('[role="option"][data-automation-id="menuItem"]').forEach(row => {
+        const text = workdayPromptRowText(row);
+        if (!text) return;
+        const key = row.id || text;
+        if (byId.has(key)) return;
+        byId.set(key, {
+          text,
+          id: row.id,
+          pos: parseInt(row.getAttribute('aria-posinset') || '0', 10),
+          isBranch: !!row.querySelector('[data-uxi-multiselectlistitem-hassidecharm="true"]'),
+          el: row,
+        });
+      });
+    };
+    collect();
+    const first = popup.querySelector('[role="option"][data-automation-id="menuItem"]');
+    const setSize = first ? parseInt(first.getAttribute('aria-setsize') || '0', 10) : 0;
+    if (list && setSize > byId.size) {
+      for (let i = 0; i < 40 && byId.size < setSize; i++) {
+        const before = byId.size;
+        list.scrollTop += Math.max(list.clientHeight - 32, 32);
+        list.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await sleep(120);
+        collect();
+        if (byId.size === before && list.scrollTop + list.clientHeight >= list.scrollHeight) break;
+      }
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await sleep(120);
+    }
+    const options = Array.from(byId.values()).sort((a, b) => a.pos - b.pos);
+    return { title, signature: title + '|' + options.map(o => o.text).join('|'), options };
+  }
+
+  /**
+   * Waits for this prompt's popup to show a list different from
+   * `previousSignature` (the list before the click) and for it to stop
+   * changing. Returns null if nothing new shows up in time.
+   * @param {HTMLInputElement} input
+   * @param {string} previousSignature
+   * @param {number} [maxWaitMs=6000]
+   */
+  async function waitForWorkdayPromptLevel(input, previousSignature, maxWaitMs = 6000) {
+    const start = Date.now();
+    let last = '';
+    let stable = 0;
+    while (Date.now() - start < maxWaitMs) {
+      await sleep(200);
+      const popup = findWorkdayPromptPopup(input);
+      if (!popup) { stable = 0; continue; }
+      const rows = popup.querySelectorAll('[role="option"][data-automation-id="menuItem"]');
+      if (rows.length === 0) { stable = 0; continue; }
+      const titleEl = popup.querySelector('[data-automation-id="promptTitle"]');
+      const quickSig = (titleEl ? titleEl.textContent.trim() : '') + '|' + Array.from(rows, workdayPromptRowText).join('|');
+      if (quickSig === last) stable++; else { stable = 0; last = quickSig; }
+      if (stable >= 1) {
+        const level = await readWorkdayPromptLevel(popup);
+        if (level.options.length && level.signature !== previousSignature) return { popup, ...level };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Brings an option row back into the rendered window of the virtualized
+   * list (it may have been unmounted while scrolling) and clicks it.
+   * @param {HTMLElement} popup
+   * @param {{id: string, pos: number, el: HTMLElement}} opt
+   */
+  async function clickWorkdayPromptOption(popup, opt) {
+    let row = (opt.id && document.getElementById(opt.id)) || (opt.el.isConnected ? opt.el : null);
+    if (!row) {
+      const list = popup.querySelector('[role="listbox"]');
+      if (list) {
+        list.scrollTop = Math.max(0, (opt.pos - 1) * 32);
+        list.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await sleep(200);
+      }
+      row = opt.id && document.getElementById(opt.id);
+    }
+    if (!row) return false;
+    try { row.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+    clickElement(row.querySelector('[data-automation-id="promptOption"]') || row);
+    return true;
+  }
+
+  /**
+   * Fills a Workday prompt the way a person does: open it, read the list
+   * that appears, pick the best entry (saved Q&A/profile first, AI
+   * fallback); if that entry is a category, wait for its sub-list to
+   * replace the list and pick again, until a leaf is chosen — then confirm
+   * the selected-item pill appeared. If a sub-list has nothing suitable, it
+   * goes back up and tries another category (at most twice).
+   * @param {HTMLInputElement} input
+   * @param {string} questionText
+   * @returns {Promise<boolean>}
+   */
+  async function fillWorkdayPrompt(input, questionText, opts = {}) {
+    const label = getWorkdayFieldLabel(input) || questionText;
+    if (workdayPromptHasSelection(input)) return true;
+
+    const close = () => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      document.body.click();
+    };
+
+    try { input.scrollIntoView({ block: 'center' }); } catch (_) {}
+    input.focus();
+    let level = null;
+    if (opts.searchText) {
+      // Search-style prompts ("Field of Study": "returns the first 100
+      // results alphabetically") — type the term and press Enter, as a
+      // person would, instead of paging through the whole list.
+      fillInput(input, opts.searchText);
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      level = await waitForWorkdayPromptLevel(input, '', 4000);
+    }
+    if (!level) {
+      clickElement(input);
+      level = await waitForWorkdayPromptLevel(input, '', 3000);
+    }
+    if (!level) {
+      const icon = input.closest('[data-automation-id="multiSelectContainer"]')?.querySelector('[data-automation-id="promptIcon"]');
+      clickElement(icon || input);
+      level = await waitForWorkdayPromptLevel(input, '', 4000);
+    }
+    if (!level) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdayPrompt: no options appeared after opening "%s"', label);
+      close();
+      return false;
+    }
+
+    const tried = new Set();
+    let backtracks = 0;
+    for (let hop = 0; hop < 8 && level; hop++) {
+      const candidates = level.options.filter(o => !tried.has(level.signature + '\u0000' + o.text));
+      const hasBranches = candidates.some(o => o.isBranch);
+      let choice = opts.answerHint ? (findExactOptionByText(candidates, opts.answerHint) || {}).text : null;
+      if (!choice && candidates.length) {
+        try {
+          choice = await sendMessage({
+            type: 'MATCH_DROPDOWN',
+            questionText: withAnswerHint(hasBranches
+              ? `${label} (these are categories — choose the one your answer belongs under)`
+              : label, opts.answerHint),
+            options: candidates.map(o => o.text),
+            resumeId: _activeResumeId
+          });
+        } catch (e) {
+          console.warn('[JobMatch AI][Auto-Bid] fillWorkdayPrompt: MATCH_DROPDOWN threw for "%s":', label, e && e.message);
+        }
+      }
+      const opt = choice && choice !== 'SKIP' && choice !== 'NEEDS_USER_INPUT' ? findOptionByText(candidates, choice) : null;
+
+      if (!opt) {
+        const back = level.popup.querySelector('[data-automation-id="backButton"]');
+        if (level.title && back && backtracks < 2) {
+          // Nothing fits in this sub-list — back up and try another category.
+          backtracks++;
+          const deadEnd = level.signature;
+          clickElement(back);
+          level = await waitForWorkdayPromptLevel(input, deadEnd);
+          continue;
+        }
+        console.warn('[JobMatch AI][Auto-Bid] fillWorkdayPrompt: no option for "%s" (choice=%o, options=%o)', label, choice, candidates.map(o => o.text));
+        close();
+        return false;
+      }
+
+      tried.add(level.signature + '\u0000' + opt.text);
+      if (!(await clickWorkdayPromptOption(level.popup, opt))) {
+        console.warn('[JobMatch AI][Auto-Bid] fillWorkdayPrompt: could not bring "%s" into view', opt.text);
+        close();
+        return false;
+      }
+
+      if (opt.isBranch) {
+        level = await waitForWorkdayPromptLevel(input, level.signature);
+        continue;
+      }
+
+      // Leaf: wait for the selected-item pill.
+      for (let i = 0; i < 15; i++) {
+        await sleep(200);
+        if (workdayPromptHasSelection(input)) return true;
+      }
+      // Fallback: the leaf's own radio button, then Enter on the row.
+      const row = (opt.id && document.getElementById(opt.id)) || opt.el;
+      const radio = row && row.isConnected && row.querySelector('input[type="radio"]');
+      if (radio) {
+        clickElement(radio);
+        await sleep(500);
+        if (workdayPromptHasSelection(input)) return true;
+      }
+      if (row && row.isConnected) {
+        row.focus();
+        row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        await sleep(500);
+        if (workdayPromptHasSelection(input)) return true;
+      }
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdayPrompt: "%s" → "%s" did not register', label, opt.text);
+      close();
+      return false;
+    }
+    close();
+    return false;
+  }
+
+  // ── Workday "My Experience" step: Work Experience / Education ──────────
+  // Confirmed on bcbsla.wd1.myworkdayjobs.com. Each section is
+  //   [role="group"][aria-labelledby="Work-Experience-section" | "Education-section"]
+  // holding one panel per entry,
+  //   [role="group"][aria-labelledby="Work-Experience-1-panel"] (h5 "Work Experience 1")
+  //     [data-fkit-id="workExperience-14--jobTitle"] … (fields)
+  // and a trailing button[data-automation-id="add-button"] — "Add" while the
+  // section is empty, "Add Another" after. A panel's fields only appear a
+  // moment after that click. Generic AutoFill can't do this (it never clicks
+  // "Add", and it put the answer "No" into Location), so this fills one
+  // panel per resume entry itself and marks each panel data-jm-managed so
+  // the generic Q&A/AI passes leave it alone (see lib/fieldFilter.js).
+
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  const MAX_WORKDAY_SECTION_ENTRIES = 10;
+
+  /**
+   * Parses a resume's free-text date range ("Jan 2020 - Present",
+   * "03/2019 – 05/2021", "2016 to 2020", "2021-04 - 2023-01").
+   * @param {string} text
+   * @returns {{start: {month: number|null, year: number}|null, end: {month: number|null, year: number}|null, current: boolean}}
+   */
+  function parseResumeDateRange(text) {
+    const str = String(text || '');
+    const tokens = [];
+    const re = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s+(\d{4})\b|\b(\d{1,2})\s*\/\s*(\d{4})\b|\b(\d{4})\s*[-/.]\s*(\d{1,2})\b(?!\s*\/)|\b((?:19|20)\d{2})\b/gi;
+    let m;
+    while ((m = re.exec(str)) && tokens.length < 2) {
+      if (m[1]) tokens.push({ month: MONTHS.indexOf(m[1].slice(0, 3).toLowerCase()) + 1, year: +m[2] });
+      else if (m[3]) tokens.push({ month: +m[3] >= 1 && +m[3] <= 12 ? +m[3] : null, year: +m[4] });
+      else if (m[5]) tokens.push({ month: +m[6] >= 1 && +m[6] <= 12 ? +m[6] : null, year: +m[5] });
+      else tokens.push({ month: null, year: +m[7] });
+    }
+    const current = /\b(present|current(?:ly)?|now|today|ongoing)\b/i.test(str);
+    return { start: tokens[0] || null, end: current ? null : (tokens[1] || null), current };
+  }
+
+  /**
+   * Types digits into one of Workday's date spinbuttons (MM or YYYY) the
+   * way a person would — key by key — and falls back to setting the value
+   * directly if the keystrokes didn't register.
+   * @param {HTMLInputElement} input
+   * @param {string} digits
+   */
+  async function typeIntoWorkdaySpinbutton(input, digits) {
+    clickElement(input);
+    input.focus();
+    for (const ch of digits) {
+      const code = 48 + Number(ch);
+      const init = { key: ch, code: 'Digit' + ch, keyCode: code, which: code, charCode: code, bubbles: true, cancelable: true };
+      input.dispatchEvent(new KeyboardEvent('keydown', init));
+      input.dispatchEvent(new KeyboardEvent('keypress', init));
+      input.dispatchEvent(new KeyboardEvent('keyup', init));
+      await sleep(40);
+    }
+    const now = input.getAttribute('aria-valuenow') || input.value || '';
+    if (Number(now) !== Number(digits)) fillInput(input, digits);
+  }
+
+  /**
+   * Fills a Workday date field (month/year spinbuttons, or year only).
+   * @param {Element|null} field - the formField-… wrapper
+   * @param {{month: number|null, year: number}|null} date
+   */
+  async function fillWorkdayDateField(field, date) {
+    if (!field || !date || !date.year) return;
+    const month = field.querySelector('input[data-automation-id="dateSectionMonth-input"]');
+    const year = field.querySelector('input[data-automation-id="dateSectionYear-input"]');
+    if (month) await typeIntoWorkdaySpinbutton(month, String(date.month || 1).padStart(2, '0'));
+    if (year) await typeIntoWorkdaySpinbutton(year, String(date.year));
+  }
+
+  /** The formField-<key> wrapper inside a panel. */
+  function workdayPanelField(panel, key) {
+    return panel.querySelector(`[data-automation-id="formField-${key}"]`);
+  }
+
+  /** Fills a plain text input/textarea field of a panel if it's still empty. */
+  function fillWorkdayPanelText(panel, key, value) {
+    const field = workdayPanelField(panel, key);
+    const el = field && field.querySelector('textarea, input:not([type="checkbox"]):not([type="radio"]):not([data-uxi-widget-type])');
+    if (!el || !value || (el.value || '').trim()) return false;
+    return fillInput(el, String(value));
+  }
+
+  /**
+   * Fills one "Work Experience N" panel from one resume entry.
+   * @param {HTMLElement} panel
+   * @param {{title?: string, company?: string, location?: string, dates?: string, description?: string}} exp
+   */
+  async function fillWorkdayExperiencePanel(panel, exp) {
+    fillWorkdayPanelText(panel, 'jobTitle', exp.title);
+    fillWorkdayPanelText(panel, 'companyName', exp.company);
+    // No location on record for this job → "Remote" rather than a guess.
+    fillWorkdayPanelText(panel, 'location', (exp.location || '').trim() || 'Remote');
+
+    const range = parseResumeDateRange(exp.dates);
+    const current = workdayPanelField(panel, 'currentlyWorkHere');
+    const box = current && current.querySelector('input[type="checkbox"]');
+    if (box && box.checked !== range.current) {
+      clickElement(box);
+      await sleep(300);
+      if (box.checked !== range.current) box.click();
+      await waitForDomSettled(2000, 200);
+    }
+    await fillWorkdayDateField(workdayPanelField(panel, 'startDate'), range.start);
+    if (!range.current) await fillWorkdayDateField(workdayPanelField(panel, 'endDate'), range.end);
+
+    fillWorkdayPanelText(panel, 'roleDescription', (exp.description || '').slice(0, 4000));
+  }
+
+  /**
+   * Fills one "Education N" panel from one resume entry. School is a text
+   * box on some tenants and a search prompt on others; Degree is a button
+   * select; Field of Study is a search prompt.
+   * @param {HTMLElement} panel
+   * @param {{school?: string, degree?: string, dates?: string, details?: string}} edu
+   */
+  async function fillWorkdayEducationPanel(panel, edu) {
+    const schoolField = workdayPanelField(panel, 'schoolName') || workdayPanelField(panel, 'school');
+    const schoolPrompt = schoolField && schoolField.querySelector('input[data-uxi-widget-type="selectinput"]');
+    if (schoolPrompt && edu.school) await fillWorkdayPrompt(schoolPrompt, 'School or University', { searchText: edu.school, answerHint: edu.school });
+    else if (schoolField) fillWorkdayPanelText(panel, schoolField.getAttribute('data-automation-id').replace('formField-', ''), edu.school);
+
+    const degreeBtn = workdayPanelField(panel, 'degree')?.querySelector('button[aria-haspopup="listbox"]');
+    if (degreeBtn && edu.degree && !(degreeBtn.getAttribute('value') || '').trim()) {
+      await fillWorkdaySelect(degreeBtn, 'Degree', { answerHint: edu.degree });
+    }
+
+    // "B.S. in Computer Science" / "Bachelor of Science, Computer Science"
+    const study = ((edu.degree || '').match(/\b(?:in|of)\s+([A-Z][^,;()]+)$/) || (edu.degree || '').match(/,\s*([^,;()]+)$/) || [])[1];
+    const studyPrompt = workdayPanelField(panel, 'fieldOfStudy')?.querySelector('input[data-uxi-widget-type="selectinput"]');
+    if (studyPrompt && study) await fillWorkdayPrompt(studyPrompt, 'Field of Study', { searchText: study.trim(), answerHint: study.trim() });
+
+    const gpa = ((edu.details || '').match(/\bGPA\b[^0-9]{0,10}(\d(?:\.\d{1,2})?)/i) || [])[1];
+    fillWorkdayPanelText(panel, 'gradeAverage', gpa);
+
+    const range = parseResumeDateRange(edu.dates);
+    await fillWorkdayDateField(workdayPanelField(panel, 'firstYearAttended') || workdayPanelField(panel, 'startDate'), range.start);
+    await fillWorkdayDateField(workdayPanelField(panel, 'lastYearAttended') || workdayPanelField(panel, 'endDate'), range.end);
+  }
+
+  /**
+   * Adds and fills one panel per entry in a Work Experience / Education
+   * section: clicks "Add" / "Add Another", waits for the new panel's
+   * fields to appear, fills it, and marks it managed. Panels the page
+   * already has (e.g. pre-filled by Workday's own resume parse) are reused
+   * in order and only their empty fields are filled.
+   * @param {string} sectionHeadingId - "Work-Experience-section" | "Education-section"
+   * @param {Array<Object>} entries
+   * @param {(panel: HTMLElement, entry: Object) => Promise<void>} fillPanel
+   * @returns {Promise<number>} panels filled
+   */
+  async function fillWorkdayRepeatableSection(sectionHeadingId, entries, fillPanel) {
+    const findSection = () => document.querySelector(`[role="group"][aria-labelledby="${sectionHeadingId}"]`);
+    const panelsOf = (section) => Array.from(section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]'));
+    let filled = 0;
+    for (let i = 0; i < Math.min(entries.length, MAX_WORKDAY_SECTION_ENTRIES); i++) {
+      let section = findSection();
+      if (!section) break;
+      let panels = panelsOf(section);
+      if (panels.length <= i) {
+        const addButtons = section.querySelectorAll('button[data-automation-id="add-button"]');
+        const add = addButtons[addButtons.length - 1];
+        if (!add) break;
+        const before = panels.length;
+        clickElement(add);
+        const start = Date.now();
+        while (Date.now() - start < 6000) {
+          await sleep(200);
+          section = findSection();
+          panels = section ? panelsOf(section) : [];
+          if (panels.length > before && panels[panels.length - 1].querySelector('[data-automation-id^="formField-"]')) break;
+        }
+        if (panels.length <= i) {
+          console.warn('[JobMatch AI][Auto-Bid] %s: clicking "%s" added no panel', sectionHeadingId, (add.textContent || '').trim());
+          break;
+        }
+        await waitForDomSettled(3000, 300);
+        panels = panelsOf(findSection());
+      }
+      const panel = panels[i];
+      panel.setAttribute('data-jm-managed', 'workday-my-experience');
+      try {
+        await fillPanel(panel, entries[i]);
+        filled++;
+      } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] %s: filling entry %d threw:', sectionHeadingId, i + 1, e && e.message);
+      }
+    }
+    return filled;
+  }
+
+  /**
+   * Workday "My Experience" step: one Work Experience / Education panel per
+   * entry on the active resume. No-op anywhere else.
+   * @returns {Promise<{experience: number, education: number}|null>}
+   */
+  async function fillWorkdayMyExperienceStep() {
+    if (!isWorkdayHost() || !document.querySelector('[data-automation-id="applyFlowMyExpPage"]')) return null;
+    let profile = {};
+    try { profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {}; } catch (_) {}
+    const experience = (Array.isArray(profile.experience) ? profile.experience : []).filter(e => e && (e.title || e.company));
+    const education = (Array.isArray(profile.education) ? profile.education : []).filter(e => e && (e.school || e.degree));
+    const result = { experience: 0, education: 0 };
+    if (experience.length) {
+      setStatus(`Adding ${experience.length} work experience entr${experience.length === 1 ? 'y' : 'ies'}...`, 'info');
+      result.experience = await fillWorkdayRepeatableSection('Work-Experience-section', experience, fillWorkdayExperiencePanel);
+    }
+    if (education.length) {
+      setStatus(`Adding ${education.length} education entr${education.length === 1 ? 'y' : 'ies'}...`, 'info');
+      result.education = await fillWorkdayRepeatableSection('Education-section', education, fillWorkdayEducationPanel);
+    }
+    return result;
   }
 
   /**
@@ -7444,6 +8045,10 @@
     }
 
     // React-compatible value setter
+    // Workday collects the country code in its own selector and rejects a
+    // phone number that repeats it — see lib/phoneFormat.js.
+    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustPhoneValueForField(input, value);
+
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
     )?.set;
@@ -7802,10 +8407,15 @@
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         try {
-          const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
-          ['dragenter', 'dragover', 'drop'].forEach(type => {
-            dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
-          });
+          // Not on an accumulating input: its widget already took the file
+          // from 'change', and a drop bubbling into the same widget adds it
+          // a second time — see isAccumulatingFileInput.
+          if (!isAccumulatingFileInput(el)) {
+            const dropTarget = el.closest('[class*="dropzone"], [class*="drop-zone"], [class*="drag"], [class*="upload"]') || el;
+            ['dragenter', 'dragover', 'drop'].forEach(type => {
+              dropTarget.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+            });
+          }
         } catch (_) { /* best-effort only */ }
 
         showAutofillBadge(el);
@@ -8456,6 +9066,208 @@
     return null;
   }
 
+  // ── Workday "Create Account/Sign In" step ─────────────────────────────
+  // Some Workday tenants (confirmed on bcbsla.wd1.myworkdayjobs.com) put a
+  // per-tenant candidate account step FIRST in the apply flow, before
+  // "Autofill with Resume":
+  //   [data-automation-id="signInContent"]
+  //     h3#authViewTitle "Create Account" | "Sign In"
+  //     input[data-automation-id="email"|"password"|"verifyPassword"]
+  //     div[data-automation-id="click_filter"][role="button"]  ← the visible,
+  //       clickable overlay over the real (aria-hidden) submit button
+  //     button[data-automation-id="signInLink"] ("Already have an account?")
+  // Nothing else in AutoFill can get past it — there's no "Next" button —
+  // so Auto-Bid stalled on step 1. Accounts are per tenant (hostname), so
+  // the generated password is saved per hostname in chrome.storage.local
+  // ("workdayAccounts") BEFORE submitting, and reused to sign in the next
+  // time the same tenant asks.
+
+  const WORKDAY_ACCOUNTS_KEY = 'workdayAccounts';
+
+  /** @returns {boolean} */
+  function isWorkdayHost() {
+    return /\.myworkdayjobs\.com$/i.test(location.hostname);
+  }
+
+  /**
+   * The visible Workday Create Account / Sign In form, if this step is one.
+   * @returns {{root: HTMLElement, mode: 'create'|'signin', email: HTMLInputElement|null, password: HTMLInputElement, verify: HTMLInputElement|null}|null}
+   */
+  function getWorkdayAuthForm() {
+    const root = document.querySelector('[data-automation-id="signInContent"]');
+    if (!root || root.offsetParent === null) return null;
+    const password = root.querySelector('input[data-automation-id="password"]');
+    if (!password) return null;
+    const verify = root.querySelector('input[data-automation-id="verifyPassword"]');
+    return {
+      root,
+      mode: verify ? 'create' : 'signin',
+      email: root.querySelector('input[data-automation-id="email"]'),
+      password,
+      verify,
+    };
+  }
+
+  /**
+   * A random 16-character password meeting Workday's listed rules (lower,
+   * upper, numeric and special characters, 8+ long). Ambiguous characters
+   * (0/O, 1/l/I) are left out so it can be read back and typed if needed.
+   * @returns {string}
+   */
+  function generateWorkdayPassword() {
+    const sets = ['abcdefghijkmnpqrstuvwxyz', 'ABCDEFGHJKLMNPQRSTUVWXYZ', '23456789', '!@#$%^&*'];
+    const all = sets.join('');
+    const rnd = (n) => {
+      const buf = new Uint32Array(1);
+      crypto.getRandomValues(buf);
+      return buf[0] % n;
+    };
+    const chars = sets.map(set => set[rnd(set.length)]);
+    while (chars.length < 16) chars.push(all[rnd(all.length)]);
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = rnd(i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join('');
+  }
+
+  /** @returns {Promise<Object>} hostname → { email, password, created, updatedAt } */
+  async function getWorkdayAccounts() {
+    try {
+      return (await chrome.storage.local.get(WORKDAY_ACCOUNTS_KEY))[WORKDAY_ACCOUNTS_KEY] || {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  async function saveWorkdayAccount(host, record) {
+    const accounts = await getWorkdayAccounts();
+    accounts[host] = { ...(accounts[host] || {}), ...record, updatedAt: Date.now() };
+    await chrome.storage.local.set({ [WORKDAY_ACCOUNTS_KEY]: accounts });
+  }
+
+  /**
+   * First visible error Workday shows on the auth step, if any.
+   * @param {HTMLElement} root
+   * @returns {string}
+   */
+  function getWorkdayAuthError(root) {
+    for (const el of root.querySelectorAll('[data-automation-id="errorMessage"], [data-automation-id="inputAlert"], [role="alert"]')) {
+      if (el.offsetParent === null) continue;
+      const text = (el.textContent || '').trim();
+      if (text) return text;
+    }
+    return '';
+  }
+
+  /**
+   * Handles Workday's Create Account / Sign In step, if the current step is
+   * one: signs in with this tenant's saved account, or creates one with a
+   * freshly generated password (saved first). Only Auto-Bid's automated
+   * run clicks the submit control; a manual AutoFill click just fills the
+   * fields and leaves the click to the user. Never tries to get past a
+   * CAPTCHA or an email-verification gate — it reports them and stops.
+   * @param {boolean} [triedSignInFallback=false] - internal: already switched
+   *   from Create Account to Sign In once after an "account exists" error.
+   * @returns {Promise<null|'advanced'|'stop'>} null when this isn't an
+   *   account step; 'advanced' once the flow has moved past it; 'stop' when
+   *   the user has to take over.
+   */
+  async function handleWorkdayAccountStep(triedSignInFallback = false) {
+    if (!isWorkdayHost()) return null;
+    let form = getWorkdayAuthForm();
+    if (!form) return null;
+
+    const host = location.hostname;
+    const saved = (await getWorkdayAccounts())[host] || null;
+    let profile = {};
+    try { profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {}; } catch (_) {}
+    const email = (saved && saved.email) || (form.email && form.email.value.trim()) || profile.email || '';
+    if (!email) {
+      setStatus('Workday account step: no email address in your profile — sign in manually, then run AutoFill again.', 'error');
+      return 'stop';
+    }
+
+    // An account this extension already created on this tenant → sign in.
+    if (form.mode === 'create' && saved && saved.created && saved.password) {
+      const signInLink = document.querySelector('[data-automation-id="signInLink"]');
+      if (signInLink) {
+        clickElement(signInLink);
+        await waitForDomSettled();
+        form = getWorkdayAuthForm();
+        if (!form) return 'stop';
+      }
+    }
+
+    let password;
+    if (form.mode === 'signin') {
+      if (!saved || !saved.password) {
+        setStatus(`Workday sign-in needed on ${host}, and no password is saved for it — sign in manually, then run AutoFill again.`, 'error');
+        return 'stop';
+      }
+      password = saved.password;
+    } else {
+      // Reuse a password generated on an earlier, unconfirmed attempt so a
+      // retry can't leave the saved one out of sync with the real account.
+      password = (saved && saved.password && !saved.created) ? saved.password : generateWorkdayPassword();
+      await saveWorkdayAccount(host, { email, password, created: false });
+    }
+
+    if (form.email && form.email.value.trim().toLowerCase() !== email.toLowerCase()) fillInput(form.email, email);
+    fillInput(form.password, password);
+    if (form.verify) fillInput(form.verify, password);
+    // Some tenants add a required "I agree" checkbox to Create Account.
+    const agree = form.root.querySelector('input[type="checkbox"][data-automation-id="createAccountCheckbox"]');
+    if (agree && !agree.checked) clickElement(agree);
+
+    if (!_autoBidAutofillRun) {
+      setStatus(form.mode === 'create'
+        ? `Filled Create Account for ${host} (generated password saved in the extension) — click Create Account to continue.`
+        : `Filled Sign In for ${host} with its saved password — click Sign In to continue.`, 'info');
+      return 'stop';
+    }
+
+    const submit = form.root.querySelector('[data-automation-id="click_filter"]')
+      || form.root.querySelector('[data-automation-id="createAccountSubmitButton"], [data-automation-id="signInSubmitButton"], button[type="submit"]');
+    if (!submit) {
+      setStatus('Workday account step: could not find the submit button — continue manually.', 'error');
+      return 'stop';
+    }
+    await autoBidClick(submit);
+
+    const start = Date.now();
+    let reclicked = false;
+    while (Date.now() - start < 15000) {
+      await sleep(500);
+      const current = getWorkdayAuthForm();
+      if (!current) {
+        if (form.mode === 'create') await saveWorkdayAccount(host, { created: true });
+        setStatus(form.mode === 'create'
+          ? `Created a Workday account on ${host} — password saved in the extension.`
+          : `Signed in to ${host}.`, 'success');
+        return 'advanced';
+      }
+      const error = getWorkdayAuthError(current.root);
+      if (error) {
+        if (form.mode === 'create' && !triedSignInFallback && /already|exists|in use|registered/i.test(error)) {
+          // Most likely our own earlier attempt created it before its
+          // confirmation could be saved — mark it and sign in instead.
+          await saveWorkdayAccount(host, { created: true });
+          return handleWorkdayAccountStep(true);
+        }
+        setStatus(`Workday ${form.mode === 'create' ? 'Create Account' : 'Sign In'} failed: ${error}`, 'error');
+        return 'stop';
+      }
+      // A synthetic click on the overlay didn't register — one real-ish retry.
+      if (!reclicked && Date.now() - start > 2500) {
+        reclicked = true;
+        clickElement(submit);
+      }
+    }
+    setStatus(`Workday ${form.mode === 'create' ? 'Create Account' : 'Sign In'} did not complete — check the page (CAPTCHA or email verification?) and continue manually.`, 'error');
+    return 'stop';
+  }
+
   /**
    * Workday's "Start Your Application" dialog — shown after an initial
    * Apply click on a myworkdayjobs.com posting, confirmed live on
@@ -8484,16 +9296,48 @@
    * (analysis, active resume id, and an active tailored resume slot)
    * survives this click's navigation the same way it does everywhere
    * else — see autoBidClick's own doc comment.
+   *
+   * With `waitMs`, waits up to that long for the dialog to appear first.
+   * Needed on Workday (confirmed on bcbsla.wd1.myworkdayjobs.com): the
+   * dialog only renders a moment AFTER the Apply click — once Workday has
+   * fetched what it needs and animated it in — and the Apply click doesn't
+   * always change the URL, so the SPA URL-change hook that runs
+   * checkPendingAutoBidAutofill() may never fire for it. A single instant
+   * check therefore missed it and Auto-Bid stalled on the open dialog.
+   * Stops waiting early once the page is already an apply-flow step (a
+   * real form — no dialog is coming).
+   *
+   * Both autoClickApplyThenAutofillIfNeeded() (right after its own Apply
+   * click) and checkPendingAutoBidAutofill() (after the URL change, when
+   * there is one) can be waiting at the same time; whichever sees the
+   * link first clicks it, and the other treats the click as done.
    * @async
+   * @param {number} [waitMs=0]
    * @returns {Promise<boolean>} true if the dialog was found and clicked (a navigation is now in flight).
    */
-  async function clickWorkdayAutofillWithResumeIfPresent() {
-    const link = findWorkdayAutofillWithResumeLink();
+  async function clickWorkdayAutofillWithResumeIfPresent(waitMs = 0) {
+    const start = Date.now();
+    let link = findWorkdayAutofillWithResumeLink();
+    while (!link && Date.now() - start < waitMs) {
+      if (Date.now() - _workdayDialogClickedAt < 5000) return true;
+      if (document.querySelector('[data-automation-id="applyFlowPage"]')) return false;
+      await sleep(250);
+      link = findWorkdayAutofillWithResumeLink();
+    }
     if (!link) return false;
+    if (Date.now() - _workdayDialogClickedAt < 5000) return true;
     if ((link.getAttribute('target') || '').toLowerCase() === '_blank') return false;
+    _workdayDialogClickedAt = Date.now();
     await autoBidClick(link);
     return true;
   }
+
+  // When clickWorkdayAutofillWithResumeIfPresent() last clicked the dialog's
+  // link — lets its two concurrent callers avoid clicking it twice.
+  let _workdayDialogClickedAt = 0;
+
+  /** Max wait for Workday's "Start Your Application" dialog after Apply. */
+  const WORKDAY_DIALOG_WAIT_MS = 10000;
 
   /**
    * If the current page has a strong match but no application form yet —
@@ -8615,6 +9459,9 @@
       // checkPendingAutoBidAutofill) would otherwise have no way to know
       // which job/resume/tailoring it was even in the middle of.
       await autoBidClick(finalApplyEl);
+      // Workday's Apply opens its "Start Your Application" dialog in place —
+      // wait for it here rather than relying on a URL change to resume.
+      if (isWorkdayHost()) await clickWorkdayAutofillWithResumeIfPresent(WORKDAY_DIALOG_WAIT_MS);
     } finally {
       _autoBidAutofillRun = false;
     }
@@ -8856,7 +9703,7 @@
       // SAME restored pending-autofill payload (including the tailored
       // resume slot) across this click's own navigation, same as
       // everywhere else in this file.
-      if (await clickWorkdayAutofillWithResumeIfPresent()) return;
+      if (await clickWorkdayAutofillWithResumeIfPresent(isWorkdayHost() ? WORKDAY_DIALOG_WAIT_MS : 0)) return;
       await waitForFormFieldsReady();
       // This continuation is always part of Auto-Bid's automated flow —
       // see _autoBidAutofillRun's doc comment.
