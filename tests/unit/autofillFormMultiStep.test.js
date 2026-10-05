@@ -84,6 +84,7 @@ function buildAutofillForm({
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     function hasVisibleValidationErrors() { return nextClickCount >= errorAfterClicks; }
     async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
+    function watchForManualStepAdvance() { calls.push({ type: 'watchForManualStepAdvance' }); }
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}
     function detectFormFields() { calls.push({ type: 'detectFormFields' }); return []; }
@@ -194,6 +195,9 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(1);
     expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(1);
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
+    // ...and hands over to the watcher that resumes once the user fixes it
+    // and moves on to the next step themselves.
+    expect(calls.filter(c => c.type === 'watchForManualStepAdvance').length).toBe(1);
   });
 
   it('keeps advancing through steps that succeed, and only stops once one actually fails', async () => {

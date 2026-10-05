@@ -67,6 +67,7 @@ function buildHarness({ storedActive, pendingResumeId }) {
     async function waitForDomSettled() {}
     // Workday's "Start Your Application" dialog hop — returns right away.
     const isWorkdayHost = () => false;
+    function stopManualStepWatch() {}
     const WORKDAY_DIALOG_WAIT_MS = 0;
     async function clickWorkdayAutofillWithResumeIfPresent() { return true; }
     async function waitForFormFieldsReady() {}

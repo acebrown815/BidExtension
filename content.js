@@ -1600,6 +1600,7 @@
         <div class="jm-actions">
           <button class="jm-btn jm-btn-primary" id="jmAnalyze">Analyze Job</button>
           <button class="jm-btn jm-btn-secondary" id="jmAutofill">AutoFill Application</button>
+          <button class="jm-btn jm-btn-primary" id="jmResumeAutoBid" title="Run Auto-Bid from this page: click Apply if needed, fill each step and move on to the next">&#9654; Resume Auto Mode</button>
           <button class="jm-btn jm-btn-success" id="jmSaveJob" style="display:none">Save Job</button>
           <button class="jm-btn jm-btn-applied" id="jmMarkApplied" style="display:none">Mark as Applied</button>
           <button class="jm-btn jm-btn-outline" id="jmCoverLetterBtn" style="display:none">&#9993; Cover Letter</button>
@@ -1733,6 +1734,10 @@
       analyzeJob(forceRefresh);
     });
     panel.querySelector('#jmAutofill').addEventListener('click', autofillForm);
+    panel.querySelector('#jmResumeAutoBid').addEventListener('click', resumeAutoBidFromPanel);
+    // Keep "Resume Auto Mode" disabled for as long as ANY automated run is
+    // going — see updateResumeAutoBidButton().
+    setInterval(updateResumeAutoBidButton, 500);
     panel.querySelector('#jmDownloadResume').addEventListener('click', downloadActiveResumeFile);
     panel.querySelector('#jmAutofillWarningClose').addEventListener('click', () => {
       shadowRoot.getElementById('jmAutofillWarning').style.display = 'none';
@@ -4504,6 +4509,172 @@
   }
 
   /**
+   * A cheap fingerprint of which wizard step is on screen: the URL plus
+   * Workday's active progress-bar step label when there is one ("current
+   * step 4 of 8 … Application Questions"); otherwise the URL, the visible
+   * step headings, and the ids/names of the visible form fields. Typing
+   * into a field doesn't change it; moving to another step does.
+   * @returns {string}
+   */
+  function getFormStepSignature() {
+    const parts = [location.pathname + location.search + location.hash];
+    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"]');
+    if (activeStep) return parts.concat((activeStep.textContent || '').trim()).join('|');
+    document.querySelectorAll('h1, h2, h3').forEach(h => {
+      if (h.offsetParent !== null) parts.push((h.textContent || '').trim().slice(0, 80));
+    });
+    const fields = [];
+    document.querySelectorAll('input:not([type="hidden"]), select, textarea, button[aria-haspopup="listbox"]').forEach(el => {
+      if (el.offsetParent !== null && (el.id || el.name)) fields.push(el.id || el.name);
+    });
+    return parts.concat(fields.sort()).join('|');
+  }
+
+  // The active watchForManualStepAdvance() poll, if any — one per tab.
+  let _manualStepWatchTimer = null;
+  // A "Resume Auto Mode" click is running (see resumeAutoBidFromPanel).
+  let _resumeAutoBidInFlight = false;
+  const MANUAL_STEP_WATCH_INTERVAL_MS = 1500;
+  const MANUAL_STEP_WATCH_MAX_MS = 30 * 60 * 1000;
+
+  const RESUME_AUTO_BID_LABEL = '&#9654; Resume Auto Mode';
+  let _resumeAutoBidButtonBusy = null;
+
+  /**
+   * Is an automated Auto-Bid run in progress in this tab? A run started
+   * from the button continues through other paths (an Apply click's
+   * URL-change hop → checkPendingAutoBidAutofill, a full page load), so
+   * this reads every flag those paths set rather than just the button's.
+   * @returns {boolean}
+   */
+  function isAutoBidRunInProgress() {
+    return _resumeAutoBidInFlight || _autoBidAutofillRun || _autoBidContinuationActive;
+  }
+
+  /**
+   * Disables "Resume Auto Mode" (spinner + "Auto Mode running…") while a run
+   * is in progress and re-enables it afterwards. Polled every 500ms from
+   * the panel setup — only touches the DOM when the state changes.
+   */
+  function updateResumeAutoBidButton() {
+    const busy = isAutoBidRunInProgress();
+    if (busy === _resumeAutoBidButtonBusy) return;
+    const button = shadowRoot && shadowRoot.getElementById('jmResumeAutoBid');
+    if (!button) return;
+    _resumeAutoBidButtonBusy = busy;
+    button.disabled = busy;
+    button.innerHTML = busy ? '<span class="jm-spinner"></span> Auto Mode running...' : RESUME_AUTO_BID_LABEL;
+  }
+
+  /** Stops a running watchForManualStepAdvance() poll. */
+  function stopManualStepWatch() {
+    if (_manualStepWatchTimer) clearInterval(_manualStepWatchTimer);
+    _manualStepWatchTimer = null;
+  }
+
+  /**
+   * The panel's always-visible "Resume Auto Mode" button: runs Auto-Bid's
+   * automated flow from wherever the page is right now — on a job posting
+   * it clicks Apply (and Workday's "Autofill with Resume" dialog); on a
+   * form step it handles a Workday account step, fills the step, clicks
+   * Next, and keeps going step after step. Lets the user start Auto Mode
+   * by hand, or pick it back up after filling in a field it got stuck on.
+   * Same entry point the automated flow itself uses after a strong match
+   * (autoClickApplyThenAutofillIfNeeded), minus the analysis/score gate —
+   * the click IS the decision to apply.
+   *
+   * Does nothing while an automated run is already in progress. Otherwise
+   * claims any stashed Auto-Bid state first, so watchForManualStepAdvance()
+   * or a URL-change hop can't start a second run alongside this one.
+   * @async
+   */
+  async function resumeAutoBidFromPanel() {
+    if (isAutoBidRunInProgress()) {
+      setStatus('Auto Mode is already running on this page.', 'info');
+      return;
+    }
+    stopManualStepWatch();
+    try { await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' }); } catch (_) {}
+    setStatus('Auto Mode: continuing from this page...', 'info');
+    // Its own flag, not _autoBidContinuationActive: an Apply click below can
+    // start checkPendingAutoBidAutofill() (URL-change hop), which owns that
+    // one — clearing it here could cut that run's guard short. The resume
+    // stays pinned via lockAutoBidResumeSelection() inside the call below.
+    _resumeAutoBidInFlight = true;
+    updateResumeAutoBidButton(); // disable immediately, not on the next poll
+    try {
+      await autoClickApplyThenAutofillIfNeeded();
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] resumeAutoBidFromPanel threw:', e && e.message);
+      setStatus('Auto Mode stopped: ' + (e && e.message), 'error');
+    } finally {
+      _resumeAutoBidInFlight = false;
+      updateResumeAutoBidButton();
+    }
+  }
+
+  /**
+   * Auto-Bid stopped on a wizard step it couldn't complete (a validation
+   * error after clicking Next). The user fixes the field and clicks
+   * Next/Continue themselves — this waits for that, then picks the
+   * automated run back up on the step they landed on (fill it, click
+   * Next, and so on).
+   *
+   * Many wizards (Workday among them) change step WITHOUT changing the
+   * URL, so neither the SPA URL-change hook nor a fresh page load ever
+   * resumed Auto-Bid — it just stayed stopped after the user's own click.
+   * This polls getFormStepSignature() instead and resumes once it differs
+   * from the stuck step and no validation error is showing.
+   *
+   * Resumes through checkPendingAutoBidAutofill(), the same path a page
+   * hop uses: the Auto-Bid state (analysis, pinned resume, tailored
+   * resume) is re-stashed here first, and GET_AND_CLEAR_PENDING_AUTOFILL
+   * hands it out exactly once — so if the user's Next DID change the URL
+   * or load a new page, whichever path gets there first resumes and the
+   * other finds nothing to do. Gives up after 30 minutes or when the user
+   * moves on to a different job.
+   * @async
+   */
+  async function watchForManualStepAdvance() {
+    stopManualStepWatch();
+    const stuckSignature = getFormStepSignature();
+    const gen = _analyzeGen;
+    try {
+      await sendMessage({
+        type: 'SET_PENDING_AUTOFILL',
+        analysis: currentAnalysis,
+        activeResumeId: _activeResumeId,
+        tailoredResumeSlot: _tailoredSlotActive ? _tailoredResumeSlot : null,
+      });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] watchForManualStepAdvance: SET_PENDING_AUTOFILL failed:', e && e.message);
+      return;
+    }
+    const startedAt = Date.now();
+    let checking = false;
+    _manualStepWatchTimer = setInterval(async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        if (_analyzeGen !== gen || Date.now() - startedAt > MANUAL_STEP_WATCH_MAX_MS) {
+          stopManualStepWatch(); // a different job, or abandoned
+          return;
+        }
+        // Another automated run (e.g. the URL-change path) is already going.
+        if (_autoBidAutofillRun || _autoBidContinuationActive || _resumeAutoBidInFlight) return;
+        if (getFormStepSignature() === stuckSignature || hasVisibleValidationErrors()) return;
+        await waitForDomSettled();
+        if (getFormStepSignature() === stuckSignature) return;
+        stopManualStepWatch();
+        console.info('[JobMatch AI][Auto-Bid] step advanced manually — resuming Auto-Bid');
+        await checkPendingAutoBidAutofill();
+      } finally {
+        checking = false;
+      }
+    }, MANUAL_STEP_WATCH_INTERVAL_MS);
+  }
+
+  /**
    * Initiates the autofill pipeline: detects fields, asks AI for answers,
    * then immediately fills the form.
    * @async
@@ -4533,6 +4704,7 @@
       // this loop click "Next" straight into the same validation error on
       // every single one of its MAX_AUTOFILL_STEPS iterations — not a true
       // infinite loop, but indistinguishable from one in practice.
+      let stoppedOnStepErrors = false;
       for (let step = 1; step <= MAX_AUTOFILL_STEPS; step++) {
         // Workday tenants that start the apply flow with a Create Account /
         // Sign In step — see handleWorkdayAccountStep().
@@ -4563,9 +4735,16 @@
         await waitForFormFieldsReady();
         if (hasVisibleValidationErrors()) {
           setStatus('A required field could not be filled automatically — please complete it and continue manually.', 'error');
+          // Auto-Bid: once the user fixes it and moves on, carry on from
+          // the next step — see watchForManualStepAdvance().
+          stoppedOnStepErrors = true;
           break;
         }
         btn.innerHTML = '<span class="jm-spinner"></span> Scanning form...';
+      }
+      if (stoppedOnStepErrors && _autoBidAutofillRun) {
+        watchForManualStepAdvance(); // fire-and-forget — outlives this run
+        setStatus('A required field could not be filled automatically — complete it, then click Next/Continue on the page or "Resume Auto Mode" here; Auto-Bid will carry on.', 'error');
       }
     } catch (err) {
       console.error('[JobMatch AI] AutoFill error:', err);
@@ -9626,6 +9805,9 @@
     }
     const { pending, analysis, activeResumeId, tailoredResumeSlot } = result || {};
     if (!pending) return;
+    // This path is resuming Auto-Bid now — a watchForManualStepAdvance()
+    // poll waiting for the same thing is no longer needed.
+    stopManualStepWatch();
     // Restore the previous page's analysis/resume selection. Whether the
     // Apply click caused a real navigation (a fresh content-script
     // instance with none of this state — confirmed on CATS) or a
