@@ -42,13 +42,12 @@ the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
 11. **SPA navigation** — on LinkedIn, click another job posting in the list.
     Panel resets. New job's title/company/location render. Click Analyze.
     No "wrong job's analysis" flash.
-12. **Saved jobs** — bookmark a job. Open Profile → Saved tab. Job appears.
-13. **Resume slot switch** — switch from Resume 1 to Resume 2 in the panel.
+12. **Resume slot switch** — switch from Resume 1 to Resume 2 in the panel.
     Click Analyze again. Score updates with the new resume's profile.
-14. **Cross-site** — visit a non-job page (e.g. github.com). Open DevTools
+13. **Cross-site** — visit a non-job page (e.g. github.com). Open DevTools
     console. Confirm no `[JobMatch AI]` logs leak. Confirm panel doesn't
     auto-open or auto-fill anything.
-15. **Multi-step apply flow (Ashby)** — open an Ashby job posting
+14. **Multi-step apply flow (Ashby)** — open an Ashby job posting
     (`jobs.ashbyhq.com/<company>/<id>`), click **Analyze Job**, let it
     finish. Click through to the application step
     (`.../<id>/application`). Panel resets ("New job detected") — expected.
@@ -61,7 +60,7 @@ the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
     URL without visiting the posting URL first in that tab — Analyze
     should show "Could not find a job description" (no tab cache to fall
     back to yet) rather than silently analyzing the form.
-16. **Concurrent multi-tab resume isolation** — requires two saved resumes
+15. **Concurrent multi-tab resume isolation** — requires two saved resumes
     that clearly score differently against two different jobs (e.g. a
     "Backend" resume and a "Data" resume). Open Job A (best match: Resume 1)
     in one tab and Job B (best match: Resume 2) in another. Click **Analyze

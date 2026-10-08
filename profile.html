@@ -464,72 +464,6 @@
       vertical-align: middle;
     }
 
-    /* Saved jobs table */
-    .saved-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-
-    .saved-table th {
-      text-align: left;
-      padding: 10px 8px;
-      border-bottom: 2px solid var(--jm-border);
-      color: var(--jm-text-secondary);
-      font-weight: 600;
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-    }
-
-    .saved-table td {
-      padding: 10px 8px;
-      border-bottom: 1px solid var(--jm-border);
-      color: var(--jm-text);
-      vertical-align: middle;
-    }
-
-    .saved-table tr:hover td {
-      background: var(--jm-card-bg);
-    }
-
-    .saved-table a {
-      color: var(--jm-primary);
-      text-decoration: none;
-    }
-
-    .saved-table a:hover {
-      text-decoration: underline;
-    }
-
-    .score-badge {
-      display: inline-block;
-      padding: 2px 10px;
-      border-radius: 12px;
-      font-weight: 600;
-      font-size: 12px;
-      min-width: 36px;
-      text-align: center;
-    }
-
-    .score-badge-green { background: #d1fae5; color: #059669; }
-    .score-badge-amber { background: #fef3c7; color: #92400e; }
-    .score-badge-red { background: #fee2e2; color: #dc2626; }
-    .score-badge-gray { background: #f1f5f9; color: #64748b; font-weight: 500; }
-
-    .saved-empty {
-      text-align: center;
-      color: var(--jm-text-muted);
-      padding: 40px 20px;
-      font-size: 14px;
-    }
-
-    .saved-count {
-      font-size: 13px;
-      color: var(--jm-text-secondary);
-      margin-bottom: 16px;
-    }
-
     /* Resume list switcher */
     .slot-btns { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .profile-slot-btn-wrap { display: inline-flex; align-items: center; gap: 2px; }
@@ -653,7 +587,6 @@
   <div class="tabs">
     <div class="tab active" data-tab="profile">Profile</div>
     <div class="tab" data-tab="qa">Q&A Answers</div>
-    <div class="tab" data-tab="saved">Saved Jobs</div>
     <div class="tab" data-tab="stats">Stats</div>
     <div class="tab" data-tab="autobid">Auto-Bid</div>
     <div class="tab" data-tab="settings">Settings</div>
@@ -812,15 +745,6 @@
         <div id="statsContent">
           <p style="color:#94a3b8;text-align:center;padding:30px 0;">Click the Stats tab to load your stats.</p>
         </div>
-      </div>
-    </div>
-
-    <!-- ─── Saved Jobs Tab ───────────────────────────────── -->
-    <div class="tab-content" id="tab-saved">
-      <div class="card">
-        <h2>Saved Jobs</h2>
-        <div class="saved-count" id="savedCount"></div>
-        <div id="savedJobsList"></div>
       </div>
     </div>
 

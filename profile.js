@@ -210,7 +210,7 @@ function showResumeLoaded(fileName) {
  * handler below and handleHash() (URL-fragment deep-linking) so clicking a
  * tab and navigating straight to its #hash always do exactly the same
  * thing. Silently does nothing for an unknown tab name.
- * @param {string} tabName - 'profile' | 'qa' | 'saved' | 'stats' | 'autobid' | 'settings'.
+ * @param {string} tabName - 'profile' | 'qa' | 'stats' | 'autobid' | 'settings'.
  */
 function activateTab(tabName) {
   const tabBtn = document.querySelector('[data-tab="' + tabName + '"]');
@@ -221,7 +221,6 @@ function activateTab(tabName) {
   tabBtn.classList.add('active');
   panel.classList.add('active');
   // Refresh data-heavy tabs every time they become visible
-  if (tabName === 'saved') loadSavedJobs();
   if (tabName === 'stats') renderStats();
   if (tabName === 'profile') renderAtsKeywordsByResume();
 }
@@ -1950,8 +1949,7 @@ function migrateQAList(stored) {
  *   5. GET_SHEETS_SYNC_SETTINGS → Google Sheets Sync form
  *   6. GET_AUTOBID_SETTINGS    → Auto-Bid tab's own settings
  *
- * After the parallel fetches, also fires loadSavedJobs() and loadResumes()
- * sequentially (they can start immediately but do not block the UI).
+ * After the parallel fetches, also loads the resumes (loadResumes()).
  */
 async function init() {
   try {
@@ -2014,8 +2012,6 @@ async function init() {
     // Update visibility of the "Clear saved keys" link
     await updateClearKeysVisibility();
 
-    // Pre-load saved jobs so the Saved tab is ready before the user clicks it
-    loadSavedJobs();
     // Load multi-resume state (resumes, activeResumeId) from local storage
     await loadResumes();
     // Profile tab is active by default — render its ATS-keywords summary now
@@ -2049,112 +2045,6 @@ function escapeHTML(str) {
  */
 function escapeAttr(str) {
   return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-// ─── Saved jobs ─────────────────────────────────────────────────────────────
-// Jobs the user bookmarked with the side panel's "Save Job" button. Applied
-// jobs are tracked separately (background.js appliedJobs storage, synced to
-// Google Sheets when enabled) — this tab is purely for postings saved for
-// later review, so the user can jump back to the listing.
-
-/**
- * Fetches the saved-jobs list from the background and passes it to renderSavedJobs.
- * Errors are silently swallowed — the section simply stays empty.
- */
-async function loadSavedJobs() {
-  try {
-    const jobs = await sendMessage({ type: 'GET_SAVED_JOBS' });
-    renderSavedJobs(jobs || []);
-  } catch (err) {
-    // Silently fail — the saved jobs section will show the empty state
-  }
-}
-
-/**
- * Renders the saved-jobs list as an HTML table.
- * Shows an empty-state message when the list is empty.
- * Each row has a Delete button that immediately removes the job from storage
- * and refreshes the table.
- *
- * Score badges are coloured by threshold:
- *   >= 70 → green (strong match)
- *   45-69 → amber (good match)
- *   <  45 → red   (weak match)
- *
- * @param {Array<{id: string, title: string, company: string, location: string,
- *                salary: string, date: string, url: string, score: number}>} jobs
- */
-function renderSavedJobs(jobs) {
-  const container = document.getElementById('savedJobsList');
-  const countEl   = document.getElementById('savedCount');
-
-  if (!jobs.length) {
-    container.innerHTML = '<div class="saved-empty">No saved jobs yet. Use the side panel on a job posting to save jobs for later.</div>';
-    countEl.textContent = '';
-    return;
-  }
-
-  // Pluralise "job" / "jobs" based on count
-  countEl.textContent = jobs.length + ' job' + (jobs.length === 1 ? '' : 's') + ' saved';
-
-  let html = `<table class="saved-table">
-    <thead>
-      <tr>
-        <th>Score</th>
-        <th>Title</th>
-        <th>Company</th>
-        <th>Location</th>
-        <th>Salary</th>
-        <th>Date</th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody>`;
-
-  for (const job of jobs) {
-    // Jobs saved via "Save Job" before running Analyze have no score yet
-    // (score is null, not 0 — quick-saves never coerce to a numeric score,
-    // see handleSaveJob in background.js) — show a neutral "Not analyzed"
-    // badge instead of a misleading red "0", which would read as a bad
-    // match rather than simply un-scored.
-    const hasScore = typeof job.score === 'number';
-    // Colour-code the score badge based on the match quality thresholds
-    const scoreClass = hasScore ? (job.score >= 70 ? 'green' : job.score >= 45 ? 'amber' : 'red') : 'gray';
-    const scoreLabel = hasScore ? job.score : 'Not analyzed';
-    const title    = escapeHTML(job.title    || 'Unknown');
-    const company  = escapeHTML(job.company  || '');
-    const location = escapeHTML(job.location || '-');
-    const salary   = escapeHTML(job.salary   || '-');
-    const date     = escapeHTML(job.date     || '');
-    const url      = escapeAttr(job.url      || '#');
-
-    html += `<tr>
-      <td><span class="score-badge score-badge-${scoreClass}">${scoreLabel}</span></td>
-      <td><a href="${url}" target="_blank" rel="noopener">${title}</a></td>
-      <td>${company}</td>
-      <td>${location}</td>
-      <td>${salary}</td>
-      <td>${date}</td>
-      <td><button class="btn btn-danger btn-sm delete-saved" data-id="${escapeAttr(job.id)}">Delete</button></td>
-    </tr>`;
-  }
-
-  html += '</tbody></table>';
-  container.innerHTML = html;
-
-  // Wire delete buttons after the HTML is in the DOM
-  container.querySelectorAll('.delete-saved').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      try {
-        await sendMessage({ type: 'DELETE_JOB', jobId: btn.dataset.id });
-        showToast('Job removed.');
-        // Reload the full list so the deleted row is gone and the count is correct
-        loadSavedJobs();
-      } catch (err) {
-        showToast('Error: ' + err.message);
-      }
-    });
-  });
 }
 
 // ─── Resume management ─────────────────────────────────────────────────────────
@@ -2621,7 +2511,7 @@ async function renderStats() {
  */
 function handleHash() {
   const hash      = window.location.hash.replace('#', '');
-  const validTabs = ['profile', 'qa', 'saved', 'stats', 'settings'];
+  const validTabs = ['profile', 'qa', 'stats', 'settings'];
   if (validTabs.includes(hash)) {
     activateTab(hash);
   }

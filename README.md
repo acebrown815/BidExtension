@@ -193,12 +193,6 @@ The Stats tab gives you a live overview of your search: total jobs analyzed, tot
 
 ---
 
-### Saved Jobs
-
-Bookmark any job from the panel — including before you've run Analyze. The **Saved Jobs** tab lists every bookmarked job in a table with score badge (or a neutral "Not analyzed" badge for quick-saves with no score yet), title linked back to the posting, company, location, salary, date, and a Delete button.
-
----
-
 ### Draggable Floating Button
 
 The **★ button** that opens the panel can be dragged anywhere on the screen. Its position is saved and restored across page navigations — it stays where you put it.
@@ -340,7 +334,7 @@ BidExtension/
 ├── aiService.js                # AI provider abstraction (OpenAI only; retry logic)
 ├── deterministicMatcher.js    # Rule-based dropdown matching (no AI)
 ├── directFill.js               # Low-level field filling helpers
-├── profile.html / profile.js  # Profile, Q&A, Saved Jobs, Stats, Settings
+├── profile.html / profile.js  # Profile, Q&A, Stats, Auto-Bid, Settings
 ├── styles.css                  # Content script base styles
 ├── lib/                        # Shared helpers, each as a classic script (content
 │   │                           #   scripts / profile.html) + an .mjs mirror (tests):
@@ -375,7 +369,8 @@ Compared to [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), this 
 - **Removed AutoFill's review/approve gate** — upstream showed a "Review before fill" panel with a checkbox per proposed answer and an explicit "Apply Selected" click before anything was written; this fork writes AI-proposed answers straight into the form and only shows a "Review before submitting" warning afterward. Fields are still marked with an "AI" badge so you can see what was touched.
 - **Added local, zero-AI resume-to-job matching** — auto-selects the best-matching saved resume for the current posting by *weighted* ATS-keyword overlap (`lib/resumeRanker.js`, `lib/resumeKeywords.js`): keywords repeated in the JD count for more, keywords found in a detected Requirements/Qualifications section count double that again, keywords that are a programming language/database/cloud platform/AI-ML term (a curated list — see `HIGH_VALUE_CATEGORY_TERMS`) count double yet again, and resume keywords backed by more than one place (skills + a project, say — or additional mentions found in `profile.summary`/`profile.experience[].description` prose, recency-weighted by how far back that role is — see `RECENCY_WEIGHT_DECAY_PER_ROLE`) outscore a bare skill-list mention. A small seniority-alignment nudge (`detectSeniorityTier`/`seniorityAlignmentMultiplier`) additionally compares the posting's title against the resume's most recent role title. Shows an "ATS Keywords by Resume" breakdown on the Profile tab, and marks up to 3 other top-scoring resumes with a ★ on the switcher pills (skipped for the active pill).
 - **Added Google Sheets Sync** — optionally pushes every "Mark as Applied" to a Google Sheet via a self-deployed Apps Script webhook (`docs/sheets-sync/`).
-- **Removed the in-panel Applied Jobs table** — applied jobs are still tracked (for the Stats count and Sheets sync) but no longer have a dedicated browsable tab; the **Applied Jobs** tab was replaced by a **Saved Jobs** tab with a fuller table (score, title, company, location, salary, date, delete).
+- **Removed the in-panel Applied Jobs table** — applied jobs are still tracked (for the Stats count and Sheets sync) but no longer have a dedicated browsable tab.
+- **Removed Saved Jobs** — the panel's Save Job button and Saved tab, and the Profile page's Saved Jobs tab.
 - **Added Backup & Restore** and **Q&A Export/Import** — full-setup and Q&A-only JSON export/import from the Settings and Q&A tabs, respectively.
 - **Renamed** the "AI Settings" tab to **Settings** (it now also hosts Google Sheets Sync and Backup & Restore).
 - **Added automatic resume file upload to AutoFill** — attaches the active resume's file (as `Resume_<CandidateName>.<ext>`) to résumé/CV upload widgets, no AI call, plus a manual **"⬇ Resume file"** download button next to the Local Match badge to check the exact file first (see Smart Auto-Fill above). Not yet verified against real ATS forms — test before relying on it.

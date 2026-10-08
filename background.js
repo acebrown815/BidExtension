@@ -23,7 +23,7 @@
  *    intentionally kept thin: prompt construction lives in aiService.js and
  *    deterministic logic lives in deterministicMatcher.js.
  *
- * 3. Saved-jobs & applied-jobs CRUD — persist job records to chrome.storage.local
+ * 3. Applied-jobs tracking — persist job records to chrome.storage.local
  *    with deduplication, capping, and timestamping.
  *
  * 4. Message router (handleMessage) — a single async switch that maps every
@@ -213,22 +213,6 @@ async function getQAList() {
   const result = await chrome.storage.local.get('qaList');
   return result.qaList || [];
 }
-
-/**
- * Retrieves the list of jobs the user has bookmarked / saved for later.
- *
- * Saved jobs are capped at 100 entries (enforced in handleSaveJob).  Each entry
- * contains metadata such as title, company, score, and the full analysis object
- * returned by handleAnalyzeJob.
- *
- * @async
- * @returns {Promise<Array<Object>>} The stored savedJobs array, or [] if absent.
- */
-async function getSavedJobs() {
-  const result = await chrome.storage.local.get('savedJobs');
-  return result.savedJobs || [];
-}
-
 
 // ─── AI operation handlers ───────────────────────────────────────────────────
 //
@@ -448,72 +432,10 @@ async function handleMatchDropdown(questionText, options, resumeId) {
   return null;
 }
 
-/**
- * Saves a job posting to the user's saved-jobs list in local storage.
- *
- * A unique numeric ID is generated from Date.now() to guarantee uniqueness
- * within the session.  New jobs are prepended (unshift) so the list is
- * chronologically descending.  The list is hard-capped at 100 entries by
- * truncating the array in place after insertion.
- *
- * @async
- * @param {Object} jobData - Raw job data from the content script / popup.
- * @param {string} [jobData.title]    - Job title.
- * @param {string} [jobData.company]  - Company name.
- * @param {string} [jobData.location] - Job location.
- * @param {string} [jobData.salary]   - Salary range or description.
- * @param {number} [jobData.score]    - Match score (0–100).
- * @param {string} [jobData.url]      - URL of the job posting.
- * @param {Object} [jobData.analysis] - Full analysis object from handleAnalyzeJob.
- * @returns {Promise<Object>} The normalised job record that was persisted.
- */
-async function handleSaveJob(jobData) {
-  const jobs = await getSavedJobs();
-  const job = {
-    id: Date.now().toString(), // String ID derived from epoch ms — unique enough for local storage
-    title: jobData.title || 'Unknown Position',
-    company: jobData.company || 'Unknown Company',
-    location: jobData.location || '',
-    salary: jobData.salary || '',
-    // Preserve `null` distinctly from `0` — a quick-save made before running
-    // Analyze has no score at all yet, which is different from an analyzed
-    // job that actually scored 0. `jobData.score || 0` would have collapsed
-    // both to 0, making an un-analyzed save look like a confirmed bad match.
-    score: typeof jobData.score === 'number' ? jobData.score : null,
-    url: jobData.url || '',
-    date: new Date().toISOString().split('T')[0], // Store date only (YYYY-MM-DD), not time
-    analysis: jobData.analysis || null             // Full analysis blob; may be null for quick-saves
-  };
-  // Prepend so the UI shows the most recently saved job at the top
-  jobs.unshift(job);
-  // Keep max 100 jobs — truncate the array in place to avoid unnecessary copies
-  if (jobs.length > 100) jobs.length = 100;
-  // Persist the updated array back to storage
-  await chrome.storage.local.set({ savedJobs: jobs });
-  return job;
-}
-
-/**
- * Removes a saved job from the saved-jobs list by its ID.
- *
- * @async
- * @param {string} jobId - The `id` field of the job record to remove.
- * @returns {Promise<{success: true}>} Confirmation object.
- */
-async function handleDeleteJob(jobId) {
-  const jobs = await getSavedJobs();
-  // Filter creates a new array without the target job; then persist
-  const filtered = jobs.filter(j => j.id !== jobId);
-  await chrome.storage.local.set({ savedJobs: filtered });
-  return { success: true };
-}
-
-
 // ─── Applied jobs helpers ────────────────────────────────────────────────────
 //
-// Applied jobs are a separate list from saved jobs.  They represent postings the
-// user has actually submitted an application for.  The list is capped at 500
-// entries (higher than saved jobs) and deduplicated by URL.
+// Applied jobs represent postings the user has actually submitted an
+// application for.  The list is capped at 500 entries and deduplicated by URL.
 
 /**
  * Retrieves the list of jobs the user has marked as applied from local storage.
@@ -547,7 +469,7 @@ async function getAppliedJobs() {
  * New entries are prepended and the list is capped at 500 to bound storage use.
  *
  * @async
- * @param {Object} jobData - Job metadata (same shape as handleSaveJob, minus analysis).
+ * @param {Object} jobData - Job metadata: title, company, location, salary, score, url, resumeName.
  * @returns {Promise<Object>} The job record — check `.sheetsSynced` to know
  *   whether this call actually confirmed a Sheets sync.
  */
@@ -640,13 +562,13 @@ async function getSheetsSyncSettings() {
 // Storage keys considered part of the user's portable JobMatch AI setup —
 // everything the Profile tab's "Export All Data" / "Import All Data"
 // buttons need to move a whole setup (profile, resumes, Q&A answers,
-// saved/applied jobs, AI + Sheets settings) to another browser or computer
+// applied jobs, AI + Sheets settings) to another browser or computer
 // in one file. Deliberately excludes purely-derived caches (`aiModels`,
 // `jm_analysisCache`) — those regenerate on their own and would only bloat
 // the export or go stale after a move.
 const BACKUP_KEYS = [
   'profile', 'resumes', 'activeResumeId', 'rawResumeBase64', 'resumeFileType',
-  'qaList', 'aiSettings', 'sheetsSync', 'savedJobs', 'appliedJobs',
+  'qaList', 'aiSettings', 'sheetsSync', 'appliedJobs',
   'jm_theme', 'tailoredResumeCounter', 'jm_jobNotes',
 ];
 
@@ -1610,13 +1532,7 @@ const handlers = {
   'IMPORT_ALL_DATA': (msg) => importAllData(msg.payload),
 
   // ── Job management ─────────────────────────────────────────────────────
-  // CRUD operations for saved / applied job lists plus AI-assisted writing.
-
-  'SAVE_JOB': (msg) => handleSaveJob(msg.jobData),
-
-  'DELETE_JOB': (msg) => handleDeleteJob(msg.jobId),
-
-  'GET_SAVED_JOBS': (msg) => getSavedJobs(),
+  // Applied-job tracking plus AI-assisted writing.
 
   'GENERATE_COVER_LETTER': (msg) => handleGenerateCoverLetter(msg.jobDescription, msg.analysis, msg.jobMeta, msg.resumeId),
   'BUILD_COVER_LETTER_FILE': (msg) => handleBuildCoverLetterFile(msg),
@@ -1945,7 +1861,6 @@ chrome.runtime.onInstalled.addListener((details) => {
       resumes: [],            // Unlimited named resume profiles (multi-resume feature)
       activeResumeId: null,   // id of the currently active resume in `resumes`, or null if none yet
       qaList: [],        // Custom Q&A pairs for autofill (empty on fresh install)
-      savedJobs: [],     // Bookmarked job postings
       appliedJobs: [],   // Jobs the user has submitted applications for
       // Optional Google Sheets sync for applied jobs — off until the user
       // deploys their own Apps Script web app and fills this in.

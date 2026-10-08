@@ -58,7 +58,7 @@ function buildHarness({ lastUrl, currentAnalysis = { title: 'Existing analysis' 
   const fakeEl = () => ({ style: {}, textContent: '', innerHTML: '', get onclick() { return this._onclick; }, set onclick(v) { this._onclick = v; } });
   ['jmAnalyze', 'jmAutofill', 'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
     'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice', 'jmAutofillWarning', 'jmCoverLetterSection',
-    'jmBulletSection', 'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn',
+    'jmBulletSection', 'jmJobInfo', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn',
   ].forEach(id => { els[id] = fakeEl(); });
   els.jmMarkApplied.style.display = 'flex'; // as if a completed analysis already revealed it
 

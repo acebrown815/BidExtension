@@ -1483,28 +1483,6 @@
         color: var(--jm-text);
       }
 
-      /* Saved jobs tab */
-      .jm-saved-list { display: flex; flex-direction: column; gap: 8px; }
-      .jm-saved-card {
-        background: var(--jm-card-bg); border-radius: 8px; padding: 12px;
-        position: relative; border: 1px solid var(--jm-border);
-        transition: border-color 0.15s;
-      }
-      .jm-saved-card:hover { border-color: var(--jm-primary); }
-      .jm-saved-title { font-weight: 600; font-size: 13px; color: var(--jm-text); text-decoration: none; display: block; margin-bottom: 4px; }
-      .jm-saved-title:hover { color: var(--jm-primary); }
-      .jm-saved-company { font-size: 12px; color: var(--jm-text-secondary); }
-      .jm-saved-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 11px; color: var(--jm-text-muted); }
-      .jm-saved-score { padding: 2px 8px; border-radius: 4px; color: #fff; font-weight: 600; font-size: 11px; }
-      .jm-saved-delete {
-        position: absolute; top: 8px; right: 8px;
-        background: none; border: none; cursor: pointer;
-        color: var(--jm-text-muted); font-size: 16px; line-height: 1;
-        transition: color 0.15s;
-      }
-      .jm-saved-delete:hover { color: #ef4444; }
-      .jm-saved-empty { text-align: center; color: var(--jm-text-muted); font-size: 13px; padding: 32px 16px; }
-
       /* Tab content visibility */
       .jm-tab-content { display: none; }
       .jm-tab-content.active { display: block; }
@@ -1539,17 +1517,9 @@
       <div class="jm-nav">
         <button class="jm-nav-btn" data-nav="profile">Profile</button>
         <button class="jm-nav-btn" data-nav="qa">Q&A</button>
-        <button class="jm-nav-btn" data-nav="saved">Saved</button>
         <button class="jm-nav-btn" data-nav="settings">Settings</button>
       </div>
       <div class="jm-body">
-        <!-- Saved Jobs tab -->
-        <div class="jm-tab-content" id="jmSavedTab">
-          <div class="jm-saved-list" id="jmSavedList">
-            <div class="jm-saved-empty" id="jmSavedEmpty">No saved jobs yet. Click 'Save Job' on any job posting to bookmark it.</div>
-          </div>
-        </div>
-
         <!-- Main content (default) -->
         <div class="jm-tab-content active" id="jmMainTab">
         <div class="jm-status" id="jmStatus"></div>
@@ -1607,7 +1577,6 @@
           <button class="jm-btn jm-btn-primary" id="jmAnalyze">Analyze Job</button>
           <button class="jm-btn jm-btn-secondary" id="jmAutofill">AutoFill Application</button>
           <button class="jm-btn jm-btn-primary" id="jmResumeAutoBid" title="Run Auto-Bid from this page: click Apply if needed, fill each step and move on to the next">&#9654; Resume Auto Mode</button>
-          <button class="jm-btn jm-btn-success" id="jmSaveJob" style="display:none">Save Job</button>
           <button class="jm-btn jm-btn-applied" id="jmMarkApplied" style="display:none">Mark as Applied</button>
           <button class="jm-btn jm-btn-outline" id="jmCoverLetterBtn" style="display:none">&#9993; Cover Letter</button>
           <button class="jm-btn jm-btn-outline" id="jmRewriteBulletsBtn" style="display:none">&#9997; Improve Resume Bullets</button>
@@ -1748,7 +1717,6 @@
     panel.querySelector('#jmAutofillWarningClose').addEventListener('click', () => {
       shadowRoot.getElementById('jmAutofillWarning').style.display = 'none';
     });
-    panel.querySelector('#jmSaveJob').addEventListener('click', saveJob);
 
     panel.querySelector('#jmMarkApplied').addEventListener('click', () => markApplied());
     panel.querySelector('#jmCoverLetterBtn').addEventListener('click', generateCoverLetter);
@@ -1843,187 +1811,15 @@
     // Theme toggle button
     panel.querySelector('#jmThemeToggle').addEventListener('click', cycleTheme);
 
-    // Nav buttons → open profile page at the right tab, or switch to Saved tab
+    // Nav buttons → open the profile page at the right tab
     panel.querySelectorAll('.jm-nav-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        const tab = btn.dataset.nav;
-        if (tab === 'saved') {
-          // Switch to Saved tab within the panel
-          activateSavedTab();
-        } else {
-          // Deactivate Saved tab highlight if switching away
-          deactivateSavedTab();
-          // Fire-and-forget: route through sendMessage wrapper so an
-          // invalidated extension context surfaces a clean error instead of
-          // crashing the click handler.
-          sendMessage({ type: 'OPEN_PROFILE_TAB', hash: tab }).catch(() => {});
-        }
+        // Fire-and-forget: route through sendMessage wrapper so an
+        // invalidated extension context surfaces a clean error instead of
+        // crashing the click handler.
+        sendMessage({ type: 'OPEN_PROFILE_TAB', hash: btn.dataset.nav }).catch(() => {});
       });
     });
-  }
-
-  // ─── Saved Jobs tab ──────────────────────────────────────────
-
-  /**
-   * Activates the Saved tab: highlights the nav button, shows the saved
-   * tab content, hides the main tab content, and fetches saved jobs.
-   */
-  function activateSavedTab() {
-    if (!shadowRoot) return;
-    // Highlight the Saved nav button
-    shadowRoot.querySelectorAll('.jm-nav-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.nav === 'saved');
-    });
-    // Show saved tab, hide main tab
-    const savedTab = shadowRoot.getElementById('jmSavedTab');
-    const mainTab = shadowRoot.getElementById('jmMainTab');
-    if (savedTab) savedTab.classList.add('active');
-    if (mainTab) mainTab.classList.remove('active');
-    // Fetch and render saved jobs each time the tab is activated
-    loadSavedJobs();
-  }
-
-  /**
-   * Deactivates the Saved tab: removes nav highlight, hides saved tab,
-   * and restores the main tab content.
-   */
-  function deactivateSavedTab() {
-    if (!shadowRoot) return;
-    shadowRoot.querySelectorAll('.jm-nav-btn').forEach(btn => {
-      btn.classList.remove('active');
-    });
-    const savedTab = shadowRoot.getElementById('jmSavedTab');
-    const mainTab = shadowRoot.getElementById('jmMainTab');
-    if (savedTab) savedTab.classList.remove('active');
-    if (mainTab) mainTab.classList.add('active');
-  }
-
-  /**
-   * Fetches saved jobs from background.js and renders them in the Saved tab.
-   * @async
-   */
-  async function loadSavedJobs() {
-    if (!shadowRoot) return;
-    const list = shadowRoot.getElementById('jmSavedList');
-    const emptyMsg = shadowRoot.getElementById('jmSavedEmpty');
-    if (!list) return;
-
-    try {
-      const jobs = await sendMessage({ type: 'GET_SAVED_JOBS' });
-      // Clear previous cards (keep the empty message element)
-      list.querySelectorAll('.jm-saved-card').forEach(c => c.remove());
-
-      if (!jobs || jobs.length === 0) {
-        if (emptyMsg) emptyMsg.style.display = 'block';
-        return;
-      }
-
-      if (emptyMsg) emptyMsg.style.display = 'none';
-
-      jobs.forEach(job => {
-        const card = document.createElement('div');
-        card.className = 'jm-saved-card';
-        card.dataset.jobId = job.id;
-
-        // Title link
-        const title = document.createElement('a');
-        title.className = 'jm-saved-title';
-        title.textContent = job.title || 'Unknown Position';
-        title.href = job.url || '#';
-        title.target = '_blank';
-        title.rel = 'noopener';
-
-        // Company
-        const company = document.createElement('div');
-        company.className = 'jm-saved-company';
-        company.textContent = job.company || 'Unknown Company';
-
-        // Meta row (score + date)
-        const meta = document.createElement('div');
-        meta.className = 'jm-saved-meta';
-
-        if (job.score != null && job.score !== 0) {
-          const score = document.createElement('span');
-          score.className = 'jm-saved-score';
-          score.textContent = job.score + '%';
-          if (job.score >= 70) score.style.background = '#059669';
-          else if (job.score >= 45) score.style.background = '#d97706';
-          else score.style.background = '#dc2626';
-          meta.appendChild(score);
-        }
-
-        if (job.date) {
-          const date = document.createElement('span');
-          date.textContent = 'Saved ' + job.date;
-          meta.appendChild(date);
-        }
-
-        // Delete button
-        const del = document.createElement('button');
-        del.className = 'jm-saved-delete';
-        del.innerHTML = '&#10005;';
-        del.title = 'Remove saved job';
-        del.addEventListener('click', () => deleteSavedJob(job.id, card));
-
-        card.appendChild(title);
-        card.appendChild(company);
-        card.appendChild(meta);
-        card.appendChild(del);
-        list.appendChild(card);
-      });
-    } catch (e) {
-      // Silently fail — user can retry by switching tabs
-    }
-  }
-
-  /**
-   * Deletes a saved job by ID (optimistic UI removal).
-   * @async
-   * @param {string} jobId - The saved job's ID.
-   * @param {HTMLElement} cardEl - The card DOM element to remove.
-   */
-  async function deleteSavedJob(jobId, cardEl) {
-    // Optimistic removal from DOM
-    cardEl.remove();
-
-    // Show empty state if no cards remain
-    if (shadowRoot) {
-      const list = shadowRoot.getElementById('jmSavedList');
-      const emptyMsg = shadowRoot.getElementById('jmSavedEmpty');
-      if (list && list.querySelectorAll('.jm-saved-card').length === 0 && emptyMsg) {
-        emptyMsg.style.display = 'block';
-      }
-    }
-
-    try {
-      await sendMessage({ type: 'DELETE_JOB', jobId: jobId });
-    } catch (e) {
-      // If delete fails, reload the list to restore correct state
-      loadSavedJobs();
-    }
-  }
-
-  /**
-   * Checks if the current page URL is already saved and updates
-   * the Save Job button to show "Saved" state if so.
-   * @async
-   */
-  async function checkIfSaved() {
-    try {
-      const jobs = await sendMessage({ type: 'GET_SAVED_JOBS' });
-      const btn = shadowRoot.getElementById('jmSaveJob');
-      if (!btn) return;
-      const here = normalizeUrl(window.location.href);
-      if (jobs && jobs.some(j => normalizeUrl(j.url) === here)) {
-        btn.textContent = 'Saved';
-        btn.disabled = true;
-        btn.style.opacity = '0.7';
-      } else {
-        btn.textContent = 'Save Job';
-        btn.disabled = false;
-        btn.style.opacity = '1';
-      }
-    } catch (e) { /* ignore */ }
   }
 
   // ─── Toggle button (always visible) ────────────────────────────
@@ -2328,8 +2124,6 @@
     currentAnalysis = { ...cached.analysis, url: rawUrl, resumeName };
     showJobMeta(cached.title, cached.company, cached.location, cached.salary, cached.jobId, cached.language);
     renderAnalysis(cached.response);
-    // jmSaveJob is already visible (showJobMeta reveals it as soon as the
-    // panel opens, before Analyze) — no need to show it again here.
     // checkIfApplied() (run at panel-open / SPA-nav time) has already set
     // this button's text to "Applied" or "Mark as Applied" as appropriate —
     // just reveal it, don't gate on its text.
@@ -2503,10 +2297,6 @@
       if (analyzeBtn) analyzeBtn.textContent = 'Analyze Job';
 
       // Hide all result sections so the panel is clean for the new resume.
-      // jmSaveJob is deliberately NOT in this list: bookmarking a job no
-      // longer depends on having an analysis (or on which resume is
-      // active), so switching resumes shouldn't hide — or otherwise
-      // disturb — the Save Job button.
       ['jmScoreSection','jmMatchingSection','jmMissingSection','jmRecsSection',
        'jmInsightsSection','jmKeywordsSection','jmCoverLetterSection','jmBulletSection',
        'jmMarkApplied','jmCoverLetterBtn','jmRewriteBulletsBtn'
@@ -2582,12 +2372,9 @@
 
       loadResumeState();
       checkIfApplied();
-      checkIfSaved();
       loadJobNotes();
       previewJobMeta();
       scanResumeMatch();
-      // Ensure we start on the main tab when opening the panel
-      deactivateSavedTab();
     } else {
       panel.classList.remove('open');
       panelRoot.classList.remove('open');
@@ -3609,7 +3396,7 @@
     // entry. It is NOT what gets saved as the job's link: rawPageUrl (the
     // untouched window.location.href, or the sheet's own Link value when
     // this tab was opened by Auto-Bid — see _autoBidOriginalLink) is what's
-    // stored on currentAnalysis.url and flows into Save Job / Mark Applied,
+    // stored on currentAnalysis.url and flows into Mark Applied,
     // so the link the user can click back to still has every param the page
     // needs to actually load (e.g. Greenhouse embeds require `token`/`for`,
     // not just `gh_jid`), and Mark Applied's Google Sheets sync matches back
@@ -3679,8 +3466,8 @@
     if (isStale()) return; // user navigated away while the auto-select ran
 
     // Name of whichever resume ends up active for this analysis (after the
-    // auto-select above) — carried on currentAnalysis so Save Job / Mark
-    // Applied (and from there, the Google Sheets "Resume" column) can record
+    // auto-select above) — carried on currentAnalysis so Mark Applied
+    // (and from there, the Google Sheets "Resume" column) can record
     // which resume was actually used, without the caller having to look it
     // up separately or risk it drifting if the user switches resumes later.
     const activeResumeName = (_resumes.find(r => r.id === _activeResumeId) || {}).name || '';
@@ -3734,7 +3521,7 @@
       // trusting whatever was stored when this entry was cached — a cache
       // entry written before the rawPageUrl fix (or one whose page has since
       // added/changed tracking params) would otherwise resurrect a stale or
-      // truncated link into Save Job / Mark Applied.
+      // truncated link into Mark Applied.
       renderCachedAnalysis(cached, activeResumeName, rawPageUrl);
       setStatus(autoSelectedName
         ? `Showing cached results for "${autoSelectedName}" (${autoSelectedPct}% ATS keyword match).`
@@ -3815,9 +3602,7 @@
       // Show truncation notices if text was trimmed
       shadowRoot.getElementById('jmTruncNotice').style.display = response.jdTruncated ? 'block' : 'none';
 
-      // Show applied, cover letter, bullet rewriter buttons. (jmSaveJob is
-      // already visible — showJobMeta() revealed it as soon as the panel
-      // opened, before Analyze — so it doesn't need to be shown again here.)
+      // Show applied, cover letter, bullet rewriter buttons.
       // checkIfApplied() (run at panel-open / SPA-nav time) has already set
       // jmMarkApplied's text to "Applied" or "Mark as Applied" as
       // appropriate — just reveal it, don't gate on its text.
@@ -4060,12 +3845,6 @@
     shadowRoot.getElementById('jmJobTitle').textContent = title;
     shadowRoot.getElementById('jmJobCompany').textContent = company;
     jobInfo.style.display = 'block';
-    // Reveal "Save Job" as soon as we have enough to identify a posting —
-    // bookmarking doesn't need an AI analysis, so this runs the moment the
-    // panel opens (via previewJobMeta()) rather than waiting for Analyze.
-    // checkIfSaved() (run alongside) independently sets this button's
-    // text/disabled state if the job turns out to already be saved.
-    shadowRoot.getElementById('jmSaveJob').style.display = 'flex';
     if (location) {
       shadowRoot.getElementById('jmJobLocationText').textContent = location;
       shadowRoot.getElementById('jmJobLocation').style.display = 'inline-flex';
@@ -4182,62 +3961,6 @@
     if (score >= 70) return 'score-green';
     if (score >= 45) return 'score-amber';
     return 'score-red';
-  }
-
-  // ─── Save job ─────────────────────────────────────────────────
-
-  /**
-   * Saves the current job to the user's saved-jobs list via background.js.
-   *
-   * Works with or without a completed analysis: if the user has already run
-   * Analyze, the full analysis (score, matching/missing skills, etc.) is
-   * saved alongside the bookmark. Otherwise — bookmarking is meant to work
-   * without spending an AI call — this falls back to the same page-scraping
-   * extractors previewJobMeta() uses, so a quick-save costs nothing but a
-   * DOM read. Quick-saved jobs get `score: null` (not 0), which the Saved
-   * Jobs tab renders as "Not analyzed" rather than a misleading red 0.
-   * @async
-   */
-  async function saveJob() {
-    let jobData;
-    if (currentAnalysis) {
-      jobData = {
-        title: currentAnalysis.title,
-        company: currentAnalysis.company,
-        location: currentAnalysis.location || '',
-        salary: currentAnalysis.salary || '',
-        score: currentAnalysis.matchScore,
-        url: currentAnalysis.url,
-        analysis: currentAnalysis
-      };
-    } else {
-      const title = extractJobTitle();
-      const company = extractCompany();
-      if (!title && !company) return; // nothing on this page worth bookmarking
-      jobData = {
-        title: title || 'Unknown Position',
-        company: company || 'Unknown Company',
-        location: extractLocation() || '',
-        salary: extractSalary() || '',
-        score: null,
-        url: window.location.href,
-        analysis: null
-      };
-    }
-    try {
-      await sendMessage({ type: 'SAVE_JOB', jobData });
-      // Update button to "Saved" state
-      const saveBtn = shadowRoot.getElementById('jmSaveJob');
-      if (saveBtn) {
-        saveBtn.textContent = 'Saved';
-        saveBtn.disabled = true;
-        saveBtn.style.opacity = '0.7';
-      }
-      setStatus('Job saved to tracker!', 'success');
-      setTimeout(clearStatus, 2000);
-    } catch (err) {
-      setStatus('Error saving: ' + err.message, 'error');
-    }
   }
 
   // ─── Mark as Applied ─────────────────────────────────────────
@@ -11307,7 +11030,7 @@
           'jmScoreSection', 'jmMatchingSection', 'jmMissingSection', 'jmRecsSection',
           'jmInsightsSection', 'jmKeywordsSection', 'jmTruncNotice',
           'jmAutofillWarning', 'jmCoverLetterSection', 'jmBulletSection',
-          'jmJobInfo', 'jmSaveJob', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn',
+          'jmJobInfo', 'jmMarkApplied', 'jmCoverLetterBtn', 'jmRewriteBulletsBtn',
           // A genuinely new job/posting hasn't had anything attached yet —
           // don't leave the PREVIOUS job's "Attached to this form" line
           // visible and looking like it applies to this one.
@@ -11320,11 +11043,10 @@
         loadResumeState();
         previewJobMeta();
         scanResumeMatch(); // re-scan the new job's JD for resume match
-        // Re-check Applied/Saved status for the NEW job immediately, rather
+        // Re-check Applied status for the NEW job immediately, rather
         // than leaving the buttons' stale text/class from the previous job
         // sitting there (merely hidden) until the panel is next toggled.
         checkIfApplied();
-        checkIfSaved();
         setStatus('New job detected — click Analyze Job.', 'info');
         setTimeout(clearStatus, 3000);
       }
