@@ -53,6 +53,18 @@ describe('hasVisibleValidationErrors', () => {
     expect(hasVisibleValidationErrors()).toBe(true);
   });
 
+  it('ignores an EMPTY role="alert" live region (Greenhouse keeps these on the page)', () => {
+    // Live: Greenhouse's "Submit application" was never auto-clicked — an
+    // empty screen-reader alert region counted as "the form shows an error".
+    document.body.innerHTML = `
+      <form id="application-form" class="application--form">
+        <input id="first_name" aria-invalid="false" aria-required="true" value="Randolph">
+        <div role="alert" aria-live="assertive"></div>
+        <div class="application--submit"><button type="submit">Submit application</button></div>
+      </form>`;
+    expect(hasVisibleValidationErrors()).toBe(false);
+  });
+
   it('returns false on a clean step with no errors', () => {
     document.body.innerHTML = `
       <form>

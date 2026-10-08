@@ -19,6 +19,9 @@ beforeAll(() => {
   const end = src.indexOf('  /**\n   * True while AutoFill is running', start);
   if (start === -1 || end === -1) throw new Error('content.js source anchors moved — update this test\'s extraction markers');
   SECTION = src.slice(start, end);
+  const g0 = src.indexOf('  function getCheckboxGroups() {');
+  const g1 = src.indexOf('  /**\n   * Detects all fillable form fields', g0);
+  SECTION += src.slice(g0, g1); // real checkbox-group helper
 });
 
 const ORIGINAL_LINK = 'https://bcbsla.wd1.myworkdayjobs.com/external/job/Remote-LA/Senior-Software-Engineer--Remote---Louisiana-_R11452';

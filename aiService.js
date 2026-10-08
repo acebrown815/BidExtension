@@ -749,6 +749,13 @@ RULES:
 2) TEXT/TEXTAREA: Use qa_hint if available. Otherwise, if a SAVED Q&A ANSWERS section appears below, search it
    for a matching question and use its answer. Otherwise generate from the resume profile. Keep answers
    professional. If insufficient data → NEEDS_USER_INPUT.
+   - EXCEPTION for a field with "required": true that asks about the candidate's experience with a specific
+     tool, technology, product or kind of work (e.g. "Have you specifically used AgentCore? If so, in what
+     project?") which the profile does NOT show: do NOT return NEEDS_USER_INPUT (that blocks the application).
+     Write 1-2 honest sentences that say so plainly and point to the closest related experience the profile
+     DOES show (e.g. "I haven't used AgentCore specifically, but I have built LLM agent workflows with
+     LangChain and AWS Bedrock at Acme."). NEVER claim experience, projects or employers the profile does
+     not support.
    - LinkedIn URL, GitHub URL, and portfolio/website URL are DIFFERENT fields with different values.
      NEVER substitute one for another (e.g. never put the LinkedIn URL into a GitHub field, or vice versa)
      even if only one of them is present in the profile. If the specific one asked for is missing → NEEDS_USER_INPUT.
@@ -761,6 +768,11 @@ RULES:
      with a sentence or description (e.g. "Work samples available upon request") — the form rejects it.
 
 3) CHECKBOX: Return "Yes" to check, "No" to uncheck.
+   CHECKBOX_GROUP ("Select all that apply" — field_type "checkbox_group"): return "selected_options": an array of
+   EVERY option from available_options (copied exactly) that the profile/saved Q&A genuinely supports. If the field
+   is required and none of the substantive options apply, pick the option that honestly says so (e.g. "Haven't
+   built agentic systems yet", "None of the above") rather than leaving it empty. NEVER pick an option the profile
+   does not support.
 
 4) VALIDATION: selected_option MUST exist in available_options exactly. If not → NEEDS_USER_INPUT.
 
@@ -771,6 +783,7 @@ OUTPUT FORMAT (JSON only, no markdown, no explanation):
   ]
 }
 - Dropdown/radio → selected_option only
+- Checkbox group → selected_options (array) only
 - Text/textarea → generated_text only
 
 USER PROFILE:

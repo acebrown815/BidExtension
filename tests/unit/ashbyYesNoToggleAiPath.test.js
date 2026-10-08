@@ -34,7 +34,7 @@ function sliceBetween(src, startMarker, endMarker) {
 
 beforeAll(() => {
   const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
-  const pass3b = sliceBetween(src, '// ── 3b. Yes/No button toggles', '// ── 4. Standalone checkboxes ──');
+  const pass3b = sliceBetween(src, '// ── 3b. Yes/No button toggles', '// ── 4a. Checkbox GROUPS');
   const fillFn = sliceBetween(src, 'function fillYesNoToggle(ref, value) {', '\n  function fillCheckboxFromRef');
 
   runDetection = new Function( // eslint-disable-line no-new-func

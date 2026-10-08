@@ -4514,7 +4514,16 @@
     const label = (el) => (typeof getWorkdayFieldLabel === 'function' && getWorkdayFieldLabel(el)) || getFieldLabel(el) || el.id || el.name || '(unlabelled)';
     const isRequired = (el) => el.required || el.getAttribute('aria-required') === 'true';
     const radioGroups = new Map();
+    // Checkbox groups ("Select all that apply"): required means AT LEAST ONE
+    // box ticked — not every box (each box carries `required` on Greenhouse).
+    const groupedBoxes = new Set();
+    for (const group of getCheckboxGroups()) {
+      group.boxes.forEach(b => groupedBoxes.add(b));
+      if (!group.required || !group.boxes.some(b => b.offsetParent !== null)) continue;
+      if (!group.boxes.some(b => b.checked)) missing.push(group.question);
+    }
     document.querySelectorAll('input, textarea, select').forEach(el => {
+      if (groupedBoxes.has(el)) return;
       if (el.offsetParent === null || el.disabled || !isFieldEligible(el)) return;
       const type = (el.type || '').toLowerCase();
       if (['hidden', 'submit', 'button', 'file', 'image', 'reset'].includes(type)) return;
@@ -4688,20 +4697,24 @@
     const score = getEffectiveMatchScore();
     if (!currentAnalysis || score === null) {
       setStatus('Form filled. Not submitting automatically — this job has no match score yet (run Analyze first).', 'info');
+      console.info('[JobMatch AI][Auto-Bid] not submitting: no match score for this job');
       return false;
     }
     if (score <= MIN_SCORE_TO_APPLY) {
       setStatus(`Form filled. Not submitting automatically — match score ${score}% is not above ${MIN_SCORE_TO_APPLY}%.`, 'info');
+      console.info('[JobMatch AI][Auto-Bid] not submitting: score %d is not above %d', score, MIN_SCORE_TO_APPLY);
       return false;
     }
     const jobKey = normalizeUrl(currentAnalysis.url || window.location.href);
     if (_autoSubmittedJobKey === jobKey) return false;
     if (hasVisibleValidationErrors()) {
       setStatus('Not submitting — the form is showing an error. Fix it, then click "Resume Auto Mode".', 'error');
+      console.info('[JobMatch AI][Auto-Bid] not submitting: page shows an error —', Array.from(document.querySelectorAll('[aria-invalid="true"], [role="alert"]')).filter(e => e.offsetParent !== null).map(e => e.id || e.getAttribute('name') || (e.textContent || '').trim().slice(0, 80)));
       return false;
     }
     const missing = findUnfilledRequiredFields();
     if (missing.length) {
+      console.info('[JobMatch AI][Auto-Bid] not submitting: required fields look empty —', missing);
       setStatus(`Not submitting — ${missing.length} required field${missing.length === 1 ? ' is' : 's are'} still empty: ${missing.slice(0, 3).join('; ')}${missing.length > 3 ? '…' : ''}. Fill ${missing.length === 1 ? 'it' : 'them'}, then click "Resume Auto Mode".`, 'error');
       return false;
     }
@@ -4784,7 +4797,12 @@
    */
   function hasVisibleValidationErrors() {
     for (const el of document.querySelectorAll('[aria-invalid="true"], [role="alert"]')) {
-      if (el.offsetParent !== null) return true;
+      if (el.offsetParent === null) continue;
+      // An EMPTY alert region is just a screen-reader live region waiting
+      // for an announcement (Greenhouse/react-select keep these on the
+      // page) — not an error. Counting it blocked Auto-Bid's submit.
+      if (el.getAttribute('role') === 'alert' && el.getAttribute('aria-invalid') !== 'true' && !(el.textContent || '').trim()) continue;
+      return true;
     }
     return false;
   }
@@ -5004,6 +5022,7 @@
           // form allow — see autoSubmitApplicationIfReady().
           const submitBtn = findFinalSubmitButton();
           if (submitBtn) await autoSubmitApplicationIfReady(submitBtn);
+          else console.info('[JobMatch AI][Auto-Bid] no Next and no final submit button found on this step — stopping');
           break;
         }
         btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
@@ -5409,6 +5428,34 @@
   }
 
   /**
+   * Checkboxes that form ONE question: two or more sharing a `name`. The
+   * question is the enclosing <fieldset>'s <legend> (else the box's own
+   * `description` attribute, as Greenhouse adds, else its label); required
+   * if any box or the fieldset says so.
+   * @returns {Array<{name: string, boxes: HTMLInputElement[], question: string, required: boolean}>}
+   */
+  function getCheckboxGroups() {
+    const byName = new Map();
+    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      if (!cb.name) return;
+      if (!byName.has(cb.name)) byName.set(cb.name, []);
+      byName.get(cb.name).push(cb);
+    });
+    const groups = [];
+    for (const [name, boxes] of byName) {
+      if (boxes.length < 2) continue;
+      const fieldset = boxes[0].closest('fieldset');
+      const legend = fieldset && fieldset.querySelector('legend');
+      const question = ((legend && legend.textContent) || boxes[0].getAttribute('description') || getFieldLabel(boxes[0]) || name)
+        .replace(/\s+/g, ' ').replace(/\s*\*\s*$/, '').trim();
+      const required = boxes.some(b => b.required || b.getAttribute('aria-required') === 'true')
+        || !!(fieldset && fieldset.getAttribute('aria-required') === 'true');
+      groups.push({ name, boxes, question, required });
+    }
+    return groups;
+  }
+
+  /**
    * Detects all fillable form fields on the current page.
    * Populates the module-level _fieldMap and returns a serialisable questions array.
    * @returns {Array<Object>} Array of field descriptors to send to the AI.
@@ -5579,7 +5626,7 @@
           question_id: qid,
           question_text: qText,
           field_type: 'dropdown',
-          required: input.required,
+          required: (input.required || input.getAttribute('aria-required') === 'true'),
           available_options: optTexts // may be empty — will be read during fill
         });
         _fieldMap[qid] = { el: input, type: 'custom_dropdown', optionTexts: optTexts, questionText: qText };
@@ -5602,7 +5649,7 @@
                 question_id: selQid,
                 question_text: label || input.placeholder || '',
                 field_type: 'dropdown',
-                required: input.required || hiddenSelect.required,
+                required: (input.required || input.getAttribute('aria-required') === 'true') || hiddenSelect.required,
                 available_options: optTexts
               });
               // Store BOTH the hidden select and the visible input
@@ -5627,7 +5674,7 @@
         question_id: qid,
         question_text: label || input.placeholder || input.name || '',
         field_type: fieldType,
-        required: input.required
+        required: (input.required || input.getAttribute('aria-required') === 'true')
       });
       _fieldMap[qid] = { el: input, type: fieldType };
       qIndex++;
@@ -5778,6 +5825,32 @@
       _fieldMap[qid] = { type: 'yesno_toggle', yesBtn, noBtn, decoyName: decoy && decoy.name, questionText: label };
       qIndex++;
     });
+
+    // ── 4a. Checkbox GROUPS — one multi-select question ──
+    // Several checkboxes sharing a name are the options of ONE question
+    // (Greenhouse "Select all that apply": <fieldset><legend>question</legend>
+    // and each <input type="checkbox" name="question_…[]" required> with its
+    // own option <label>). Sent as 8 separate yes/no "questions" labelled only
+    // by their option text, the AI couldn't answer them sensibly — and the
+    // submit check wanted every one of them ticked.
+    for (const group of getCheckboxGroups()) {
+      group.boxes.forEach(b => seen.add(b.id || b.name));
+      const visible = group.boxes.filter(b => b.offsetParent !== null);
+      if (!visible.length || !isFieldEligible(visible[0])) continue;
+      if (visible.some(b => shouldKeepExistingAnswer(b))) continue; // already answered
+      const options = visible.map(b => ({ el: b, text: ((getFieldLabel(b) || getRadioLabel(b) || b.value || '') + '').replace(/\s+/g, ' ').trim() }))
+        .filter(o => o.text);
+      if (!options.length) continue;
+      questions.push({
+        question_id: group.name,
+        question_text: group.question,
+        field_type: 'checkbox_group',
+        required: group.required,
+        available_options: options.map(o => o.text)
+      });
+      _fieldMap[group.name] = { type: 'checkbox_group', options, questionText: group.question, required: group.required };
+      qIndex++;
+    }
 
     // ── 4. Standalone checkboxes ──
     document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -6912,7 +6985,10 @@
       // matter how correctly the matcher itself worked.
       const isNativeDropdownField = !!(ref && ref.type === 'dropdown');
 
-      if ((!val || val === 'NEEDS_USER_INPUT') && !isCustomDropdownField && !isNativeDropdownField) {
+      // A checkbox group's answer arrives as selected_options (an array) with
+      // no selected_option/generated_text — don't drop it as "empty" here.
+      const hasMultiAnswer = Array.isArray(ans.selected_options) && ans.selected_options.length > 0;
+      if ((!val || val === 'NEEDS_USER_INPUT') && !hasMultiAnswer && !isCustomDropdownField && !isNativeDropdownField) {
         skipped.push(qid);
         continue;
       }
@@ -6933,6 +7009,17 @@
             showAutofillBadge(lastRadio);
             filled++;
             await sleep(CHOICE_CLICK_PACE_MS);
+          } else {
+            skipped.push(qid);
+          }
+        } else if (ref.type === 'checkbox_group') {
+          const chosen = fillCheckboxGroupFromRef(ref, ans);
+          if (chosen.length) {
+            for (const box of chosen) {
+              if (!box.checked) { clickNatively(box); await sleep(CHOICE_CLICK_PACE_MS); }
+            }
+            showAutofillBadge(chosen[chosen.length - 1]);
+            filled++;
           } else {
             skipped.push(qid);
           }
@@ -6984,6 +7071,31 @@
       } else if (ref.type === 'custom_dropdown') {
         customDropdowns.push({ qid, ref, val: '' });
       }
+    }
+
+    // A REQUIRED checkbox group the bulk answer left with nothing ticked
+    // (omitted, NEEDS_USER_INPUT, or no option matched) would block the
+    // submit — ask the dropdown matcher (saved Q&A first, then AI) for the
+    // single best option and tick it.
+    for (const [qid, ref] of Object.entries(_fieldMap)) {
+      if (ref.type !== 'checkbox_group' || !ref.required) continue;
+      if (ref.options.some(o => o.el.checked)) continue;
+      try {
+        const pick = await sendMessage({
+          type: 'MATCH_DROPDOWN',
+          questionText: ref.questionText,
+          options: ref.options.map(o => o.text),
+          resumeId: _activeResumeId
+        });
+        const opt = pick && pick !== 'SKIP' && pick !== 'NEEDS_USER_INPUT' ? findOptionByText(ref.options, pick) : null;
+        if (!opt) continue;
+        clickNatively(opt.el);
+        await sleep(CHOICE_CLICK_PACE_MS);
+        showAutofillBadge(opt.el);
+        filled++;
+        const i = skipped.indexOf(qid);
+        if (i !== -1) skipped.splice(i, 1);
+      } catch (_) { /* left for the user — the submit check will name it */ }
     }
 
     // Phase 2: native <select> dropdowns, all matched concurrently.
@@ -8643,6 +8755,30 @@
     return btn;
   }
 
+  /**
+   * The boxes of a checkbox group the AI's answer picks: `selected_options`
+   * (an array) or `selected_option` (one option, or several joined with
+   * ";" / "|" / newlines). Matched against each option's own label —
+   * punctuation-insensitive, exact first, then "the answer contains this
+   * option". Doesn't click anything (the caller paces the clicks).
+   * @param {{options: Array<{el: HTMLInputElement, text: string}>}} ref
+   * @param {Object} ans - one AI answer object
+   * @returns {HTMLInputElement[]}
+   */
+  function fillCheckboxGroupFromRef(ref, ans) {
+    const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    let picks = Array.isArray(ans.selected_options) ? ans.selected_options : [];
+    if (!picks.length && ans.selected_option && ans.selected_option !== 'NEEDS_USER_INPUT') {
+      picks = String(ans.selected_option).split(/\s*(?:;|\||\n)\s*/);
+    }
+    picks = picks.map(norm).filter(Boolean);
+    if (!picks.length) return [];
+    return ref.options.filter(o => {
+      const opt = norm(o.text);
+      return opt && picks.some(p => p === opt || p.includes(opt));
+    }).map(o => o.el);
+  }
+
   function fillCheckboxFromRef(cb, value) {
     const shouldCheck = /^(yes|true|1|checked|agree|accept)$/i.test(String(value).trim());
     if (cb.checked !== shouldCheck) {
@@ -10108,8 +10244,19 @@
       if (await clickWorkdayAutofillWithResumeIfPresent()) return;
       // Fields actually detected in THIS frame are the one fully reliable
       // signal — if we have them, just fill them.
-      const hasTopFrameFields = detectFormFields().length > 0;
-      if (hasTopFrameFields) {
+      // The form is here if there's something left to fill — OR if the
+      // application's final submit button is visible. Since detection skips
+      // fields that already hold an answer, a fully-filled form (after
+      // "Resume Auto Mode", or a second pass) reports no fields at all; on
+      // Greenhouse's job-boards pages (description + form on one page, an
+      // "Apply" button at the top that only scrolls down) that sent this to
+      // the Apply click below instead — and "Submit application" was never
+      // reached.
+      const topFrameFields = detectFormFields();
+      const submitBtnHere = findFinalSubmitButton();
+      console.info('[JobMatch AI][Auto-Bid] on this page: %d field(s) to fill, final submit button: %s',
+        topFrameFields.length, submitBtnHere ? JSON.stringify((submitBtnHere.innerText || submitBtnHere.value || '').trim()) : 'none');
+      if (topFrameFields.length > 0 || submitBtnHere) {
         await autofillForm();
         return;
       }

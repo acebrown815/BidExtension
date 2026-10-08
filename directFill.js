@@ -536,6 +536,10 @@
       if (cb.parentElement && cb.parentElement.querySelector('button[aria-pressed]')) continue;
       if (!isFieldEligible(cb)) continue; // C3b
       if (shouldKeepExistingAnswer(cb)) continue; // already ticked — never untick the user's choice
+      // One option of a multi-select group (several boxes sharing a name) —
+      // its label is an OPTION ("LangGraph"), not a yes/no question; the AI
+      // pass answers the whole group (content.js getCheckboxGroups).
+      if (cb.name && document.getElementsByName(cb.name).length > 1) continue;
       const label = getElementLabel(cb);
       if (!label) continue;
 
