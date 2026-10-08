@@ -50,6 +50,11 @@
   // the autofill pipeline so prompt-injection or buggy label extraction
   // can't trick us into writing into them.
   const isFieldEligible = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.isFieldEligible) || (() => true);
+  // Re-runs (Resume Auto Mode, a later Auto-Bid pass, another AutoFill
+  // click) only fill empty fields and fields the page flags as wrong — never
+  // what the user already typed/picked. See lib/fieldFilter.js.
+  const shouldKeepExistingAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.shouldKeepExistingAnswer) || (() => false);
+  const fieldShowsError = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.fieldShowsError) || (() => false);
 
   // Local (no-AI) resume-vs-JD ATS-keyword ranker. Lets the panel highlight
   // which of the user's saved resumes is the strongest ATS-keyword match
@@ -1744,7 +1749,7 @@
     });
     panel.querySelector('#jmSaveJob').addEventListener('click', saveJob);
 
-    panel.querySelector('#jmMarkApplied').addEventListener('click', markApplied);
+    panel.querySelector('#jmMarkApplied').addEventListener('click', () => markApplied());
     panel.querySelector('#jmCoverLetterBtn').addEventListener('click', generateCoverLetter);
     panel.querySelector('#jmRewriteBulletsBtn').addEventListener('click', rewriteBullets);
     panel.querySelector('#jmTailoredResumeBtn').addEventListener('click', generateTailoredResume);
@@ -4272,17 +4277,24 @@
    * is left as "Mark as Applied" (re-enabled) so the user can click it again
    * once they've fixed their Sheets Sync settings — background.js reuses the
    * same local record and retries the sync rather than creating a duplicate.
+   *
+   * Auto-Bid's auto-submit (see autoSubmitApplicationIfReady) calls this
+   * right before clicking Submit, passing the score that actually applies
+   * (a tailored resume's own re-score when that's the one attached).
    * @async
+   * @param {{score?: number, resumeName?: string}} [opts]
+   * @returns {Promise<Object|null>} MARK_APPLIED's result, or null if not recorded.
    */
-  async function markApplied() {
-    if (!currentAnalysis) return;
+  async function markApplied(opts = {}) {
+    if (!currentAnalysis) return null;
+    const score = typeof opts.score === 'number' ? opts.score : currentAnalysis.matchScore;
     // Belt-and-suspenders: updateMarkAppliedGating() disables the button for
     // low scores, but guard the action itself too in case it's ever invoked
     // some other way (e.g. TRIGGER_APPLIED-style messaging in the future).
-    if (typeof currentAnalysis.matchScore === 'number' && currentAnalysis.matchScore <= MIN_SCORE_TO_APPLY) {
-      setStatus(`Match score is ${currentAnalysis.matchScore}% — needs to be above ${MIN_SCORE_TO_APPLY}% to mark as applied.`, 'error');
+    if (typeof score === 'number' && score <= MIN_SCORE_TO_APPLY) {
+      setStatus(`Match score is ${score}% — needs to be above ${MIN_SCORE_TO_APPLY}% to mark as applied.`, 'error');
       setTimeout(clearStatus, 4000);
-      return;
+      return null;
     }
     const btn = shadowRoot.getElementById('jmMarkApplied');
     btn.disabled = true;
@@ -4294,9 +4306,9 @@
           company: currentAnalysis.company,
           location: currentAnalysis.location || '',
           salary: currentAnalysis.salary || '',
-          score: currentAnalysis.matchScore || 0,
+          score: score || 0,
           url: currentAnalysis.url,
-          resume: currentAnalysis.resumeName || ''
+          resume: opts.resumeName || currentAnalysis.resumeName || ''
         }
       });
       if (result && result.sheetsSynced === true) {
@@ -4315,9 +4327,11 @@
         setStatus('Not synced to Google Sheets yet — ' + reason, 'error');
         setTimeout(clearStatus, 4000);
       }
+      return result || null;
     } catch (err) {
       setStatus('Error: ' + err.message, 'error');
       btn.disabled = false;
+      return null;
     }
   }
 
@@ -4463,6 +4477,267 @@
       if (nextRe.test(text)) return el;
     }
     return null;
+  }
+
+  /**
+   * The application's FINAL submit control on the current step — the one
+   * findNextStepButton() deliberately never matches. Exact, short labels
+   * only ("Submit", "Submit Application", "Submit my application", "Send
+   * Application", "Finish", "Complete Application") — never a bare
+   * "Apply" (a posting's CTA) or anything ambiguous like "Submit and
+   * Continue". Workday's Review step uses its usual footer button
+   * (data-automation-id="pageFooterNextButton") reading "Submit".
+   * @returns {HTMLElement|null}
+   */
+  function findFinalSubmitButton() {
+    const submitRe = /^\s*(submit(\s+(my|your))?(\s+application)?|send(\s+(my|your))?\s+application|finish(\s+application)?|complete(\s+(my|your))?\s+application)\s*$/i;
+    const decorationRe = /[←-⇿➔➠➡▶▸»›]+/g;
+    for (const el of document.querySelectorAll('button, input[type="submit"], [role="button"]')) {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true' || el.offsetParent === null) continue;
+      const text = (el.value || el.innerText || el.textContent || '').replace(decorationRe, '').trim();
+      if (text && text.length <= 40 && submitRe.test(text)) return el;
+    }
+    return null;
+  }
+
+  /**
+   * Visible required fields on the current step that are still empty — the
+   * "is the form actually complete?" check before auto-submitting. Covers
+   * text inputs/textareas/selects (required / aria-required), required
+   * radio groups and checkboxes, Workday's button selects ("… Required"
+   * aria-label, empty value) and Workday prompts (no selected-item pill).
+   * @returns {string[]} labels (or ids) of the empty required fields
+   */
+  function findUnfilledRequiredFields() {
+    const missing = [];
+    const label = (el) => (typeof getWorkdayFieldLabel === 'function' && getWorkdayFieldLabel(el)) || getFieldLabel(el) || el.id || el.name || '(unlabelled)';
+    const isRequired = (el) => el.required || el.getAttribute('aria-required') === 'true';
+    const radioGroups = new Map();
+    document.querySelectorAll('input, textarea, select').forEach(el => {
+      if (el.offsetParent === null || el.disabled || !isFieldEligible(el)) return;
+      const type = (el.type || '').toLowerCase();
+      if (['hidden', 'submit', 'button', 'file', 'image', 'reset'].includes(type)) return;
+      if (type === 'radio') {
+        if (!el.name) return;
+        const group = radioGroups.get(el.name) || { required: false, checked: false, el };
+        group.required = group.required || isRequired(el) || !!el.closest('[aria-required="true"]');
+        group.checked = group.checked || el.checked;
+        radioGroups.set(el.name, group);
+        return;
+      }
+      if (!isRequired(el)) return;
+      if (type === 'checkbox') { if (!el.checked) missing.push(label(el)); return; }
+      if (el.getAttribute('data-uxi-widget-type') === 'selectinput') {
+        if (!workdayPromptHasSelection(el)) missing.push(label(el));
+        return;
+      }
+      if (!(el.value || '').trim()) missing.push(label(el));
+    });
+    radioGroups.forEach(g => { if (g.required && !g.checked) missing.push(label(g.el)); });
+    document.querySelectorAll(WORKDAY_SELECT_TRIGGER_SELECTOR).forEach(btn => {
+      if (btn.offsetParent === null) return;
+      const required = /\brequired\b/i.test(btn.getAttribute('aria-label') || '') || btn.getAttribute('aria-required') === 'true';
+      if (required && !(btn.getAttribute('value') || '').trim()) missing.push(label(btn));
+    });
+    return missing;
+  }
+
+  /**
+   * The score the application is judged by: a tailored resume's own
+   * re-score when that's the one attached, else the analysis' match score.
+   * @returns {number|null}
+   */
+  function getEffectiveMatchScore() {
+    if (_tailoredSlotActive && _tailoredResumeSlot && typeof _tailoredResumeSlot.newScore === 'number') return _tailoredResumeSlot.newScore;
+    return currentAnalysis && typeof currentAnalysis.matchScore === 'number' ? currentAnalysis.matchScore : null;
+  }
+
+  /**
+   * Re-commits a value a field already shows: clear → value, each with an
+   * 'input' event, wrapped in focus events — a React-controlled input
+   * ignores an 'input' event for a value its tracker already has, so going
+   * through '' guarantees the change is seen.
+   * @param {HTMLInputElement|HTMLTextAreaElement} el
+   * @param {string} value
+   */
+  function recommitFieldValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    const set = (v) => { if (setter) setter.call(el, v); else el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+    dispatchFocusEvents(el, 'in');
+    set('');
+    set(value);
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    dispatchFocusEvents(el, 'out');
+  }
+
+  /**
+   * Re-picks the answer a choice field already SHOWS, so the form records
+   * it: clicks a different option, then the shown one again (re-clicking an
+   * already-selected radio/toggle alone does nothing). Used only for fields
+   * the form just reported as missing, where the on-screen choice never
+   * reached its state (see CHOICE_CLICK_PACE_MS).
+   * @param {string} labelText - the field's question, as the error names it
+   * @returns {Promise<boolean>} true if a choice was re-picked
+   */
+  async function reselectChoiceFieldByLabel(labelText) {
+    const label = Array.from(document.querySelectorAll('label, legend'))
+      .find(l => (l.textContent || '').replace(/\s+/g, ' ').trim() === labelText);
+    const entry = label && (label.closest('[data-field-path]') || label.closest('fieldset') || label.parentElement);
+    if (!entry) return false;
+
+    const pressed = entry.querySelector('button[aria-pressed="true"]');
+    if (pressed) {
+      const option = pressed.getAttribute('data-option') || pressed.textContent.trim();
+      const other = Array.from(entry.querySelectorAll('button[aria-pressed]')).find(b => b !== pressed);
+      if (!other) return false;
+      clickNatively(other);
+      await sleep(CHOICE_CLICK_PACE_MS);
+      const again = Array.from(entry.querySelectorAll('button[aria-pressed]'))
+        .find(b => (b.getAttribute('data-option') || b.textContent.trim()) === option);
+      if (again) clickNatively(again);
+      await sleep(CHOICE_CLICK_PACE_MS);
+      return true;
+    }
+
+    const checked = Array.from(entry.querySelectorAll('input[type="radio"]')).find(r => r.checked);
+    if (checked) {
+      const other = Array.from(entry.querySelectorAll('input[type="radio"]')).find(r => r !== checked && r.name === checked.name);
+      if (!other) return false;
+      const id = checked.id;
+      clickNatively(other);
+      await sleep(CHOICE_CLICK_PACE_MS);
+      clickNatively((id && document.getElementById(id)) || checked);
+      await sleep(CHOICE_CLICK_PACE_MS);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * After a rejected submit, finds the fields the form's error summary
+   * names ("Missing entry for required field: LinkedIn Profile" — Ashby's
+   * role="alert" list, each name a link to its field) and re-commits the
+   * value each one visibly holds. Locates a field by its <label> text, or
+   * by clicking the error's own link (which focuses the field) — what the
+   * user did by hand to make the next submit go through.
+   * @returns {Promise<number>} how many fields were re-committed
+   */
+  async function recommitFieldsNamedInErrors() {
+    const summary = Array.from(document.querySelectorAll('[role="alert"]'))
+      .find(a => a.offsetParent !== null && /missing|required/i.test(a.textContent || ''));
+    if (!summary) return 0;
+    let count = 0;
+    for (const link of summary.querySelectorAll('button, a')) {
+      const name = (link.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!name) continue;
+      // A choice field (Yes/No toggle, radio group) whose answer shows on
+      // screen but never reached the form's state: pick it again.
+      if (await reselectChoiceFieldByLabel(name)) { count++; continue; }
+      let field = null;
+      for (const label of document.querySelectorAll('label[for]')) {
+        if ((label.textContent || '').replace(/\s+/g, ' ').trim() === name) { field = document.getElementById(label.htmlFor); break; }
+      }
+      if (!field) {
+        clickElement(link);
+        await sleep(300);
+        field = document.activeElement;
+      }
+      if (!field || field === document.body) continue;
+      const isText = /^(INPUT|TEXTAREA)$/.test(field.tagName) && !/^(radio|checkbox|button|submit|file)$/i.test(field.type || '');
+      if (isText) {
+        if (!(field.value || '').trim()) continue;
+        recommitFieldValue(field, field.value);
+        await sleep(FIELD_FILL_PACE_MS);
+      } else {
+        // A toggle / radio group / checkbox: its answer is already chosen
+        // on screen — only the focus-in → focus-out the form commits on is
+        // missing (what clicking the error's link and moving on did by hand).
+        dispatchFocusEvents(field, 'in');
+        dispatchFocusEvents(field, 'out');
+      }
+      count++;
+    }
+    return count;
+  }
+
+  // Normalized job URL this content-script instance already auto-submitted
+  // — never submit the same application twice.
+  let _autoSubmittedJobKey = null;
+
+  /**
+   * Auto-Bid's last step: on the step holding the application's final
+   * Submit button, submits it — but only when the match score is above
+   * MIN_SCORE_TO_APPLY, no validation error is showing, and no required
+   * field is left empty. Marks the job as Applied FIRST (so the user's
+   * Google Sheet gets its row, keyed by the sheet's original job link —
+   * currentAnalysis.url), and does not submit if Sheets sync is set up but
+   * that update failed. Only ever called from an Auto-Bid run (the
+   * automated flow or "Resume Auto Mode"); a plain AutoFill click never
+   * submits.
+   * @param {HTMLElement} submitBtn
+   * @returns {Promise<boolean>} true if Submit was clicked
+   */
+  async function autoSubmitApplicationIfReady(submitBtn) {
+    const score = getEffectiveMatchScore();
+    if (!currentAnalysis || score === null) {
+      setStatus('Form filled. Not submitting automatically — this job has no match score yet (run Analyze first).', 'info');
+      return false;
+    }
+    if (score <= MIN_SCORE_TO_APPLY) {
+      setStatus(`Form filled. Not submitting automatically — match score ${score}% is not above ${MIN_SCORE_TO_APPLY}%.`, 'info');
+      return false;
+    }
+    const jobKey = normalizeUrl(currentAnalysis.url || window.location.href);
+    if (_autoSubmittedJobKey === jobKey) return false;
+    if (hasVisibleValidationErrors()) {
+      setStatus('Not submitting — the form is showing an error. Fix it, then click "Resume Auto Mode".', 'error');
+      return false;
+    }
+    const missing = findUnfilledRequiredFields();
+    if (missing.length) {
+      setStatus(`Not submitting — ${missing.length} required field${missing.length === 1 ? ' is' : 's are'} still empty: ${missing.slice(0, 3).join('; ')}${missing.length > 3 ? '…' : ''}. Fill ${missing.length === 1 ? 'it' : 'them'}, then click "Resume Auto Mode".`, 'error');
+      return false;
+    }
+
+    setStatus('Marking as applied before submitting...', 'info');
+    const resumeName = _tailoredSlotActive && _tailoredResumeSlot ? _tailoredResumeSlot.name : undefined;
+    const applied = await markApplied({ score, resumeName });
+    if (!applied) {
+      setStatus('Not submitting — could not mark this job as applied.', 'error');
+      return false;
+    }
+    if (applied.sheetsSyncConfigured && applied.sheetsSynced !== true) {
+      setStatus(`Not submitting — the Google Sheet was not updated (${applied.sheetsSyncError || 'sync failed'}). Fix Sheets sync, then click "Resume Auto Mode".`, 'error');
+      return false;
+    }
+
+    // The application is done after this click: drop any stashed Auto-Bid
+    // state so a confirmation page doesn't start another AutoFill run.
+    stopManualStepWatch();
+    try { await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' }); } catch (_) {}
+    _autoSubmittedJobKey = jobKey;
+    console.info('[JobMatch AI][Auto-Bid] submitting application (score %d)', score);
+    // Native click, same as the Next/Continue clicks that advanced every
+    // earlier step (autoBidClick) — deliberately NOT autoBidClick itself,
+    // which would re-stash the state cleared just above.
+    submitBtn.click();
+    await waitForDomSettled();
+    // "Missing entry for required field: X" for a field that visibly holds
+    // our value means the form never registered it (see fillInput's focus
+    // events) — re-commit those values, the way clicking into each field
+    // fixes it by hand, and submit once more.
+    if (hasVisibleValidationErrors() && (await recommitFieldsNamedInErrors()) > 0) {
+      console.info('[JobMatch AI][Auto-Bid] re-committed fields the form reported missing — submitting again');
+      (findFinalSubmitButton() || submitBtn).click();
+      await waitForDomSettled();
+    }
+    if (hasVisibleValidationErrors()) {
+      setStatus('Submitted, but the site reported an error — please check the page.', 'error');
+    } else {
+      setStatus(`Marked as applied and submitted (match ${score}%).`, 'success');
+    }
+    return true;
   }
 
   /**
@@ -4718,7 +4993,13 @@
         await fillCurrentAutofillStep();
         if (!_autoBidAutofillRun) break;
         const nextBtn = findNextStepButton();
-        if (!nextBtn) break;
+        if (!nextBtn) {
+          // Last step: Auto-Bid submits it itself when the score and the
+          // form allow — see autoSubmitApplicationIfReady().
+          const submitBtn = findFinalSubmitButton();
+          if (submitBtn) await autoSubmitApplicationIfReady(submitBtn);
+          break;
+        }
         btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
         // Most wizard steps route via pushState (handleSpaUrlChanged's
         // _autoBidAutofillRun guard covers that case), but nothing here
@@ -4730,10 +5011,18 @@
         // see its own doc comment for the real, live-confirmed bug this
         // fixes: a tailored resume surviving one hop only to be silently
         // lost on a later one, on a platform with several wizard steps.
+        const stepBeforeNext = getFormStepSignature();
         await autoBidClick(nextBtn);
         await waitForDomSettled();
         await waitForFormFieldsReady();
-        if (hasVisibleValidationErrors()) {
+        // Stuck if the page flags an error — OR if it simply didn't move on:
+        // some sites report a failed Next only as a toast message (no
+        // aria-invalid / role="alert" on the page), and treating that as
+        // "advanced" re-filled the SAME step and clicked Next again, over
+        // and over up to MAX_AUTOFILL_STEPS.
+        const stepDidNotAdvance = getFormStepSignature() === stepBeforeNext;
+        if (hasVisibleValidationErrors() || stepDidNotAdvance) {
+          if (stepDidNotAdvance) console.info('[JobMatch AI][Auto-Bid] Next did not move to another step — stopping instead of re-filling it');
           setStatus('A required field could not be filled automatically — please complete it and continue manually.', 'error');
           // Auto-Bid: once the user fixes it and moves on, carry on from
           // the next step — see watchForManualStepAdvance().
@@ -5188,6 +5477,7 @@
       const qid = sel.id || sel.name;
       if (!qid || seen.has(qid)) return;
       if (!isFieldEligible(sel)) return;
+      if (shouldKeepExistingAnswer(sel)) return;
       const label = getFieldLabel(sel) || getFieldLabel(trigger);
       if (!label && !sel.id && !sel.name) return;
 
@@ -5213,6 +5503,7 @@
       // C3b: skip CSRF/tracking/honeypot fields entirely — never send them
       // to the AI, never offer them to the user as autofill candidates.
       if (!isFieldEligible(sel)) return;
+      if (shouldKeepExistingAnswer(sel)) return;
       const label = getFieldLabel(sel);
       if (!label && !sel.id && !sel.name) return;
 
@@ -5238,6 +5529,7 @@
       if (input.offsetParent === null) return;
       // C3b: skip CSRF/tracking/honeypot fields.
       if (!isFieldEligible(input)) return;
+      if (!isWorkdayPromptInput(input) && shouldKeepExistingAnswer(input)) return;
       // Workday single-selects pair their <button aria-haspopup="listbox">
       // with an unnamed sibling <input type="text"> that holds the chosen
       // option's id and doubles as the listbox's typeahead. It resolves to
@@ -5253,7 +5545,7 @@
         const promptQid = input.id;
         if (!promptQid || seen.has(promptQid)) return;
         seen.add(promptQid);
-        if (workdayPromptHasSelection(input)) return; // already answered (e.g. Country Phone Code)
+        if (workdayPromptHasSelection(input) && !fieldShowsError(input)) return; // already answered (e.g. Country Phone Code)
         const promptLabel = getWorkdayFieldLabel(input) || getFieldLabel(input) || '';
         questions.push({
           question_id: promptQid,
@@ -5364,10 +5656,10 @@
         const qid = trigger.id;
         if (!qid || seen.has(qid)) return;
         const isWorkdaySelect = isWorkdaySelectTrigger(trigger);
-        // Workday keeps the chosen option's id in the button's value
-        // attribute ('' while it still reads "Select One") — leave an
-        // already-answered select (e.g. a pre-filled Country) alone.
-        if (isWorkdaySelect && (trigger.getAttribute('value') || '').trim()) return;
+        // Already answered (Workday keeps the chosen option's id in the
+        // button's value attribute — '' while it reads "Select One"; other
+        // triggers show the chosen text) — leave it alone unless flagged.
+        if (shouldKeepExistingAnswer(trigger)) return;
         // A Radix select whose hidden native <select> already has a
         // name/id and options was registered by pass 1 — don't ask twice.
         const nativeSel = trigger.parentElement && trigger.parentElement.querySelector('select');
@@ -5398,6 +5690,7 @@
       if (!groupName) return;
       // C3b: skip groups whose name looks like CSRF/tracking/etc.
       if (!isFieldEligible(radio)) return;
+      if (shouldKeepExistingAnswer(radio)) return; // group already answered
       if (!radioGroups[groupName]) {
         radioGroups[groupName] = {
           question_id: groupName,
@@ -5485,6 +5778,7 @@
       if (cb.offsetParent === null) return;
       // C3b: skip honeypot / token-shaped checkboxes.
       if (!isFieldEligible(cb)) return;
+      if (shouldKeepExistingAnswer(cb)) return; // already ticked
       const label = getFieldLabel(cb) || getRadioLabel(cb);
       if (!label) return;
       const qid = cb.id || cb.name || ('cb_' + qIndex);
@@ -6264,6 +6558,19 @@
     }
 
     // 5. placeholder
+    // The question label of the field's own entry wrapper ([data-field-path]
+    // — Ashby), when the input itself has no id for the label's `for` to
+    // point at. Confirmed on Ashby's Location autocomplete: it resolved to
+    // its placeholder "Start typing...", so fillCustomDropdown's
+    // city/location handling (which types the city and picks a suggestion)
+    // never ran and the field stayed empty.
+    const entry = input.closest('[data-field-path]');
+    const entryLabel = entry && entry.querySelector('label');
+    if (entryLabel && !entryLabel.contains(input)) {
+      const text = labelTextWithoutBadges(entryLabel);
+      if (text) return text;
+    }
+
     if (input.placeholder) return input.placeholder;
 
     // 6. name attribute (humanized)
@@ -6537,6 +6844,18 @@
    * @param {Array<Object>} answers - AI-provided answers, one per question_id.
    * @returns {Promise<{filled: number, skipped: string[]}>}
    */
+  // Pause after each click-based answer (radio, checkbox, Yes/No toggle)
+  // so the page commits one before the next. Confirmed on Ashby: toggles
+  // and radios clicked back-to-back in one burst all LOOKED answered, but
+  // Submit reported one or two of them "Missing entry" — a different one on
+  // each run, the signature of updates overwriting each other.
+  const CHOICE_CLICK_PACE_MS = 250;
+  // Same for text fields: Ashby commits each one on blur from the state as
+  // it was before — text fills back-to-back lost "Phone" / "LinkedIn
+  // Profile" (showing their values, reported missing) once the choice
+  // clicks were paced and the collisions moved to the text fields.
+  const FIELD_FILL_PACE_MS = 200;
+
   async function fillFormFromAnswers(answers) {
     // Handle array format (new) or flat object (legacy)
     if (!Array.isArray(answers)) {
@@ -6607,6 +6926,7 @@
             const lastRadio = ref.radios[ref.radios.length - 1]?.el || ref.radios[0]?.el;
             showAutofillBadge(lastRadio);
             filled++;
+            await sleep(CHOICE_CLICK_PACE_MS);
           } else {
             skipped.push(qid);
           }
@@ -6614,17 +6934,20 @@
           fillCheckboxFromRef(ref.el, val);
           showAutofillBadge(ref.el);
           filled++;
+          await sleep(CHOICE_CLICK_PACE_MS);
         } else if (ref.type === 'yesno_toggle') {
           const btn = fillYesNoToggle(ref, val);
           if (btn) {
             showAutofillBadge(btn);
             filled++;
+            await sleep(CHOICE_CLICK_PACE_MS);
           } else {
             skipped.push(qid);
           }
         } else if (fillInput(ref.el, val)) {
           showAutofillBadge(ref.el);
           filled++;
+          await sleep(FIELD_FILL_PACE_MS);
         } else {
           skipped.push(qid);
         }
@@ -6710,6 +7033,7 @@
 
     // Phase 3: custom ARIA dropdowns — sequential, since opening one on a
     // real page can close another that's still mid-fill.
+    const failedDropdowns = [];
     for (const { qid, ref, val } of customDropdowns) {
       try {
         if (await fillCustomDropdown(ref.el, ref.questionText || val)) {
@@ -6721,11 +7045,38 @@
           // matched); this covers every other "just returned false" case
           // so a silent skip is never completely untraceable.
           console.warn('[JobMatch AI][Auto-Bid] custom dropdown not filled for qid="%s" (%s)', qid, ref.questionText || val || '(no question text)');
-          skipped.push(qid);
+          failedDropdowns.push({ qid, ref, val });
         }
       } catch (e) {
         console.warn('[JobMatch AI][Auto-Bid] custom dropdown threw for qid="%s" (%s):', qid, ref.questionText || val || '(no question text)', e && e.message);
-        skipped.push(qid);
+        failedDropdowns.push({ qid, ref, val });
+      }
+    }
+
+    // Phase 3b: one more try for each dropdown that failed, once the page
+    // has settled. Confirmed live on Workday ("Phone Device Type"): the
+    // first attempt can lose its opening click to the PREVIOUS dropdown's
+    // popup still closing (Workday popups close on any outside click), so
+    // no options ever appeared — while a second AutoFill run filled the
+    // same field fine. Skips any that got a value in the meantime.
+    if (failedDropdowns.length) {
+      await waitForDomSettled(3000, 300);
+      for (const { qid, ref, val } of failedDropdowns) {
+        let el = ref.el;
+        if (!el.isConnected && el.id) el = document.getElementById(el.id) || el;
+        if (!el.isConnected) { skipped.push(qid); continue; }
+        if (shouldKeepExistingAnswer(el) || (isWorkdayPromptInput(el) && workdayPromptHasSelection(el))) continue;
+        try {
+          if (await fillCustomDropdown(el, ref.questionText || val)) {
+            console.info('[JobMatch AI][Auto-Bid] custom dropdown filled on retry for qid="%s"', qid);
+            showAutofillBadge(el);
+            filled++;
+          } else {
+            skipped.push(qid);
+          }
+        } catch (_) {
+          skipped.push(qid);
+        }
       }
     }
 
@@ -6750,6 +7101,7 @@
         if (!qid || handledQids.has(qid)) return false;
         if (el.offsetParent === null) return false;
         if (!isFieldEligible(el)) return false;
+        if (shouldKeepExistingAnswer(el)) return false;
         return isCustomDropdown(el);
       });
       if (revealed.length === 0) break;
@@ -6863,17 +7215,117 @@
    * @returns {{text: string, el: HTMLElement}}
    */
   function findBestLocationMatch(suggestions, fullLocation) {
-    const parts = (fullLocation || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
-    if (parts.length < 2) return suggestions[0]; // no state/country to disambiguate with
-    const allParts = suggestions.find(s => {
+    // "Summerfield, FL 34491" → ["summerfield", "fl"] (ZIP codes dropped).
+    const parts = (fullLocation || '').toLowerCase().split(',')
+      .map(p => p.replace(/\b\d{5}(?:-\d{4})?\b/g, '').trim())
+      .filter(Boolean);
+    const city = parts[0] || '';
+    const startsWithCity = (text) => text.startsWith(city + ',') || text.startsWith(city + ' ') || text === city;
+    if (parts.length < 2) {
+      // No state/country to disambiguate with — still prefer the city itself
+      // over a different place the search also returned ("Summit, …" for
+      // "Summerfield").
+      return suggestions.find(s => startsWithCity(s.text.toLowerCase())) || suggestions[0];
+    }
+    // A state/country part may be written either way on either side:
+    // "FL" / "Florida" (Ashby's suggestions spell states out), "CO" / "Colorado".
+    const spellings = (p) => [p, US_STATE_NAMES[p], Object.keys(US_STATE_NAMES).find(k => US_STATE_NAMES[k] === p)].filter(Boolean);
+    const hasWord = (text, w) => {
+      const i = text.indexOf(w);
+      if (i === -1) return false;
+      const before = i === 0 ? '' : text[i - 1];
+      const after = text[i + w.length] || '';
+      return !/[a-z]/.test(before) && !/[a-z]/.test(after);
+    };
+    // State outweighs country ("Denver Metro Area, CO" beats "Denver, PA,
+    // USA" for "Denver, CO, USA"): earlier parts count for more.
+    const regionMatches = (text) => parts.slice(1).reduce((sum, p, i) =>
+      sum + (spellings(p).some(w => hasWord(text, w)) ? parts.length - 1 - i : 0), 0);
+    // Best region match wins; the city breaks ties. With no region match at
+    // all, keep the first suggestion (the search's own pick).
+    let best = suggestions[0];
+    let bestScore = 0;
+    for (const s of suggestions) {
       const text = s.text.toLowerCase();
-      return parts.every(p => text.includes(p));
-    });
-    if (allParts) return allParts;
-    // At least match the second part (state/province) to avoid picking a
-    // same-named city in the wrong state when a full match isn't found.
-    const statePart = suggestions.find(s => s.text.toLowerCase().includes(parts[1]));
-    return statePart || suggestions[0];
+      const regions = regionMatches(text);
+      if (!regions) continue;
+      const score = regions * 10 + (startsWithCity(text) ? 2 : (text.includes(city) ? 1 : 0));
+      if (score > bestScore) { best = s; bestScore = score; }
+    }
+    return best;
+  }
+
+  const US_STATE_NAMES = {
+    al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california', co: 'colorado',
+    ct: 'connecticut', de: 'delaware', fl: 'florida', ga: 'georgia', hi: 'hawaii', id: 'idaho',
+    il: 'illinois', in: 'indiana', ia: 'iowa', ks: 'kansas', ky: 'kentucky', la: 'louisiana',
+    me: 'maine', md: 'maryland', ma: 'massachusetts', mi: 'michigan', mn: 'minnesota',
+    ms: 'mississippi', mo: 'missouri', mt: 'montana', ne: 'nebraska', nv: 'nevada',
+    nh: 'new hampshire', nj: 'new jersey', nm: 'new mexico', ny: 'new york', nc: 'north carolina',
+    nd: 'north dakota', oh: 'ohio', ok: 'oklahoma', or: 'oregon', pa: 'pennsylvania',
+    ri: 'rhode island', sc: 'south carolina', sd: 'south dakota', tn: 'tennessee', tx: 'texas',
+    ut: 'utah', vt: 'vermont', va: 'virginia', wa: 'washington', wv: 'west virginia',
+    wi: 'wisconsin', wy: 'wyoming', dc: 'district of columbia', usa: 'united states', us: 'united states',
+  };
+
+  /**
+   * Types into a search-as-you-type field (place autocomplete) the way a
+   * person does: focus it and type — WITHOUT leaving it. fillInput() ends
+   * with blur/focusout to commit plain text fields, but on an autocomplete
+   * leaving the field before a suggestion is picked closes the suggestion
+   * list and (Ashby) clears what was typed — so Location stayed empty.
+   * @param {HTMLInputElement} input
+   * @param {string} text
+   */
+  function typeIntoAutocomplete(input, text) {
+    try { input.focus(); } catch (_) {}
+    // Real focus fires focus/focusin itself; only simulate them when it
+    // didn't take (e.g. a background tab).
+    if (document.activeElement !== input) dispatchFocusEvents(input, 'in');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(input, text); else input.value = text;
+    const last = text.slice(-1);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: last, bubbles: true }));
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keyup', { key: last, bubbles: true }));
+  }
+
+  /**
+   * Waits for suggestion options that were NOT on the page before
+   * (`before`, a snapshot taken right before typing) — wherever they're
+   * added: place autocompletes render their results in a portal under
+   * <body> (Ashby: [data-floating-ui-portal] → [role="listbox"] →
+   * [role="option"]), with no aria-controls tying them to the input, and
+   * only after their lookup returns. Resolves once the new list has stopped
+   * changing (results often arrive in batches), or with whatever is there
+   * (possibly nothing) after maxWaitMs.
+   * @param {Set<Element>} before
+   * @param {number} [maxWaitMs=8000]
+   * @returns {Promise<Array<{text: string, el: HTMLElement}>>}
+   */
+  async function waitForNewSuggestionOptions(before, maxWaitMs = 8000) {
+    const collect = () => {
+      const out = [];
+      document.querySelectorAll('[role="option"]').forEach(el => {
+        if (before.has(el) || el.getAttribute('aria-disabled') === 'true') return;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+        const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) out.push({ el, text });
+      });
+      return out;
+    };
+    const start = Date.now();
+    let last = '';
+    let stable = 0;
+    while (Date.now() - start < maxWaitMs) {
+      await sleep(250);
+      const opts = collect();
+      const sig = opts.map(o => o.text).join('|');
+      if (opts.length && sig === last) { if (++stable >= 2) return opts; } else stable = 0;
+      last = sig;
+    }
+    return collect();
   }
 
   /**
@@ -6929,12 +7381,16 @@
         const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
         const zip = findSavedZipCodeAnswer(qaList);
         if (zip) {
-          fillInput(input, zip);
-          const suggestions = await waitForVisibleOptions(input);
+          const before = new Set(document.querySelectorAll('[role="option"]'));
+          typeIntoAutocomplete(input, zip);
+          let suggestions = await waitForNewSuggestionOptions(before);
+          if (!suggestions.length) suggestions = await waitForVisibleOptions(input, 1000);
           if (suggestions.length > 0) {
             // The first suggestion is Google Places' own best match for
             // what was just typed — exactly what a human would click first.
             clickElement(suggestions[0].el);
+            await sleep(200);
+            if (input.isConnected) dispatchFocusEvents(input, 'out');
             return true;
           }
           // No suggestion ever rendered — the typed zip is still in the
@@ -6965,13 +7421,21 @@
         const fullLocation = savedLocation || profile.location || '';
         const city = fullLocation.split(',')[0].trim();
         if (city) {
-          fillInput(input, city);
-          const suggestions = await waitForVisibleOptions(input);
+          // Snapshot first, so only the suggestions THIS typing produces are
+          // considered — see waitForNewSuggestionOptions.
+          const before = new Set(document.querySelectorAll('[role="option"]'));
+          typeIntoAutocomplete(input, city);
+          let suggestions = await waitForNewSuggestionOptions(before);
+          if (!suggestions.length) suggestions = await waitForVisibleOptions(input, 1000);
           if (suggestions.length > 0) {
             // Prefer a suggestion matching the FULL saved location (city +
             // state/country) over always trusting the first result — see
             // findBestLocationMatch's own doc comment for why.
             clickElement(findBestLocationMatch(suggestions, fullLocation).el);
+            // Leave the field like a person would — forms like Ashby only
+            // commit the chosen place on focus change.
+            await sleep(200);
+            if (input.isConnected) dispatchFocusEvents(input, 'out');
             return true;
           }
           // No suggestion ever rendered — the typed city is still in the
@@ -7139,6 +7603,27 @@
   }
 
   /**
+   * Closes any OTHER open Workday popup (a button select's listbox popper or
+   * a prompt's list) before a dropdown is opened. Workday popups close on
+   * any outside click, so with one still open (or mid-close) the next
+   * dropdown's opening click is spent closing it and no options appear.
+   * @param {Element} [keep] - a popup to leave open (the one being used)
+   */
+  async function closeOpenWorkdayPopups(keep) {
+    const openPopups = () => Array.from(document.querySelectorAll('[data-behavior-click-outside-close], [data-automation-id="responsiveMonikerPrompt"]'))
+      .filter(p => p.offsetParent !== null && !(keep && (p === keep || p.contains(keep) || keep.contains(p))));
+    if (!openPopups().length) return;
+    const escape = { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true };
+    (document.activeElement || document.body).dispatchEvent(new KeyboardEvent('keydown', escape));
+    for (let i = 0; i < 5 && openPopups().length; i++) await sleep(200);
+    if (openPopups().length) {
+      document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      document.body.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      for (let i = 0; i < 5 && openPopups().length; i++) await sleep(200);
+    }
+  }
+
+  /**
    * Opens a dropdown the way a person would and returns only the options
    * THAT click produced. Snapshots every [role="option"] already in the
    * page first, clicks the trigger, then polls: the listbox the trigger
@@ -7285,7 +7770,15 @@
    */
   async function fillWorkdaySelect(trigger, questionText, opts = {}) {
     const label = getWorkdayFieldLabel(trigger) || questionText;
-    const options = await openListboxAndCaptureNewOptions(trigger);
+    if (trigger.getAttribute('aria-expanded') !== 'true') await closeOpenWorkdayPopups();
+    let options = await openListboxAndCaptureNewOptions(trigger);
+    if (options.length === 0) {
+      // The opening click can be lost (another popup closing, a re-render
+      // swapping the button) — clear the way and open once more.
+      await closeOpenWorkdayPopups();
+      if (!trigger.isConnected && trigger.id) trigger = document.getElementById(trigger.id) || trigger;
+      options = await openListboxAndCaptureNewOptions(trigger);
+    }
     if (options.length === 0) {
       console.warn('[JobMatch AI][Auto-Bid] fillWorkdaySelect: no options rendered after opening "%s"', label);
       document.body.click();
@@ -7528,6 +8021,7 @@
       document.body.click();
     };
 
+    await closeOpenWorkdayPopups(findWorkdayPromptPopup(input));
     try { input.scrollIntoView({ block: 'center' }); } catch (_) {}
     input.focus();
     let level = null;
@@ -7698,6 +8192,10 @@
     if (!field || !date || !date.year) return;
     const month = field.querySelector('input[data-automation-id="dateSectionMonth-input"]');
     const year = field.querySelector('input[data-automation-id="dateSectionYear-input"]');
+    // Already entered (by the user or an earlier pass) and not flagged —
+    // never re-type it.
+    const entered = (el) => !el || !!(el.value || '').trim();
+    if (entered(month) && entered(year) && !fieldShowsError(month || year)) return;
     if (month) await typeIntoWorkdaySpinbutton(month, String(date.month || 1).padStart(2, '0'));
     if (year) await typeIntoWorkdaySpinbutton(year, String(date.year));
   }
@@ -7720,7 +8218,7 @@
    * @param {HTMLElement} panel
    * @param {{title?: string, company?: string, location?: string, dates?: string, description?: string}} exp
    */
-  async function fillWorkdayExperiencePanel(panel, exp) {
+  async function fillWorkdayExperiencePanel(panel, exp, isNewPanel = true) {
     fillWorkdayPanelText(panel, 'jobTitle', exp.title);
     fillWorkdayPanelText(panel, 'companyName', exp.company);
     // No location on record for this job → "Remote" rather than a guess.
@@ -7729,7 +8227,9 @@
     const range = parseResumeDateRange(exp.dates);
     const current = workdayPanelField(panel, 'currentlyWorkHere');
     const box = current && current.querySelector('input[type="checkbox"]');
-    if (box && box.checked !== range.current) {
+    // Only on a panel this run just added — on an existing panel the box's
+    // state is the user's (or the site's) choice, ticked or not.
+    if (isNewPanel && box && box.checked !== range.current) {
       clickElement(box);
       await sleep(300);
       if (box.checked !== range.current) box.click();
@@ -7780,12 +8280,13 @@
    * in order and only their empty fields are filled.
    * @param {string} sectionHeadingId - "Work-Experience-section" | "Education-section"
    * @param {Array<Object>} entries
-   * @param {(panel: HTMLElement, entry: Object) => Promise<void>} fillPanel
+   * @param {(panel: HTMLElement, entry: Object, isNewPanel: boolean) => Promise<void>} fillPanel
    * @returns {Promise<number>} panels filled
    */
   async function fillWorkdayRepeatableSection(sectionHeadingId, entries, fillPanel) {
     const findSection = () => document.querySelector(`[role="group"][aria-labelledby="${sectionHeadingId}"]`);
     const panelsOf = (section) => Array.from(section.querySelectorAll('[role="group"][aria-labelledby$="-panel"]'));
+    const addedThisRun = new Set(); // panel indexes this run created with "Add"
     let filled = 0;
     for (let i = 0; i < Math.min(entries.length, MAX_WORKDAY_SECTION_ENTRIES); i++) {
       let section = findSection();
@@ -7810,11 +8311,13 @@
         }
         await waitForDomSettled(3000, 300);
         panels = panelsOf(findSection());
+        addedThisRun.add(i);
       }
       const panel = panels[i];
+      const isNewPanel = !panel.hasAttribute('data-jm-managed') && addedThisRun.has(i);
       panel.setAttribute('data-jm-managed', 'workday-my-experience');
       try {
-        await fillPanel(panel, entries[i]);
+        await fillPanel(panel, entries[i], isNewPanel);
         filled++;
       } catch (e) {
         console.warn('[JobMatch AI][Auto-Bid] %s: filling entry %d threw:', sectionHeadingId, i + 1, e && e.message);
@@ -8177,8 +8680,25 @@
    * @param {HTMLInputElement} el - The checkbox or radio input to click.
    */
   function clickNatively(el) {
+    // A real mouse click also moves focus onto the element and — once the
+    // user goes on to the next field — away again. Some forms only commit a
+    // field's answer on that focus change: confirmed on Ashby, where a
+    // clicked Yes/No toggle and radio group visibly showed the choice, yet
+    // Submit said "Missing entry for required field" for both. React's
+    // onFocus/onBlur listen to the bubbling focusin/focusout. A click can
+    // re-render (and detach) the element, so the "leave" events go to its
+    // still-attached field container in that case.
+    const container = el.closest('[data-field-path], fieldset, [role="radiogroup"], [role="group"]') || el.parentElement;
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
+    el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     el.click();
+    const leaveTarget = el.isConnected ? el : (container && container.isConnected ? container : null);
+    if (leaveTarget) {
+      leaveTarget.dispatchEvent(new FocusEvent('blur', { bubbles: false }));
+      leaveTarget.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    }
   }
 
   /**
@@ -8239,6 +8759,13 @@
       ? nativeTextAreaValueSetter
       : nativeInputValueSetter;
 
+    // Focus → type → leave, like a person. React's onFocus/onBlur listen to
+    // the bubbling focusin/focusout (not focus/blur), and some forms only
+    // commit a field's value to their own state on blur — confirmed on Ashby:
+    // LinkedIn / location / start-date inputs visibly held our values, yet
+    // Submit reported "Missing entry for required field" for each one until
+    // the user clicked into them by hand.
+    dispatchFocusEvents(input, 'in');
     if (setter) {
       setter.call(input, value);
     } else {
@@ -8248,8 +8775,22 @@
     // Dispatch events for frameworks
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    input.dispatchEvent(new Event('blur', { bubbles: true }));
+    dispatchFocusEvents(input, 'out');
     return true;
+  }
+
+  /**
+   * Fires the focus events a real focus change produces: focus + focusin
+   * ('in') or blur + focusout ('out'). Synthetic events (not el.focus())
+   * so they also fire in a background tab, where a real focus change
+   * doesn't happen.
+   * @param {Element} el
+   * @param {'in'|'out'} direction
+   */
+  function dispatchFocusEvents(el, direction) {
+    const [own, bubbling] = direction === 'in' ? ['focus', 'focusin'] : ['blur', 'focusout'];
+    el.dispatchEvent(new FocusEvent(own, { bubbles: false }));
+    el.dispatchEvent(new FocusEvent(bubbling, { bubbles: true }));
   }
 
 

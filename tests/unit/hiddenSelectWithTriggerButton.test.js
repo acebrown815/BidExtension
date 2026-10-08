@@ -32,6 +32,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldFilter.js'; // real shouldKeepExistingAnswer / fieldShowsError for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
@@ -61,7 +62,7 @@ beforeAll(() => {
     const questions = [];
     const _fieldMap = {};
     let qIndex = 0;
-    function isFieldEligible(el) { return stubs.isFieldEligible(el); }
+    function isFieldEligible(el) { return stubs.isFieldEligible(el); } const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el);
     function getFieldLabel(el) { return stubs.getFieldLabel(el); }
     function buildSelectOptions(sel) { return stubs.buildSelectOptions(sel); }
     ${extracted}

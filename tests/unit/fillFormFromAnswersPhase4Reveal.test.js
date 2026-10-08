@@ -24,6 +24,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldFilter.js'; // real shouldKeepExistingAnswer / fieldShowsError for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 const SRC = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
@@ -55,7 +56,7 @@ function buildFillFormFromAnswers({ fieldMap, revealedElsByQid = {}, calls = [] 
     }
     async function fillFormLegacy() { return { filled: 0, skipped: [] }; }
     async function waitForDomSettled() {} // resolves immediately — nothing to actually wait on in this test
-    function isFieldEligible() { return true; }
+    function isFieldEligible() { return true; } const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el);
     function isCustomDropdown(el) { return !!revealedElsByQid[el.id]; }
     function getFieldLabel(el) { return (revealedElsByQid[el.id] || {}).label || ''; }
     function readCustomOptions() { return []; }
@@ -114,7 +115,7 @@ describe('fillFormFromAnswers — Phase 4 sweep for dynamically-revealed dropdow
       }
       async function fillFormLegacy() { return { filled: 0, skipped: [] }; }
       async function waitForDomSettled() {}
-      function isFieldEligible() { return true; }
+      function isFieldEligible() { return true; } const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el);
       function isCustomDropdown(el) { return !!revealedElsByQid[el.id]; }
       function getFieldLabel(el) { return (revealedElsByQid[el.id] || {}).label || ''; }
       function readCustomOptions() { return []; }

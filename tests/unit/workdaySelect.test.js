@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldFilter.js'; // real shouldKeepExistingAnswer / fieldShowsError for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
@@ -90,7 +91,7 @@ describe('detectFormFields — Workday select buttons', () => {
       ${WORKDAY_HELPERS}
       const isRipplingPage = () => false;
       const getFieldLabel = (el) => el.getAttribute('aria-label') || 'fallback label';
-      const isFieldEligible = () => true;
+      const isFieldEligible = () => true; const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el);
       const isCustomDropdown = () => false;
       const readCustomOptions = () => [];
       const buildSelectOptions = () => ({ optMap: {}, optTexts: [] });
@@ -226,6 +227,33 @@ describe('fillWorkdaySelect — open, wait for the generated options, pick, conf
 
     expect(await fillWorkdaySelect(button, '')).toBe(false);
     expect(button.getAttribute('value')).toBe('');
+  });
+
+  it('closes the previous dropdown popup that would swallow the opening click (Phone Device Type, 1st try)', async () => {
+    // Live: the first AutoFill run left "Phone Device Type" empty, a second
+    // run filled it — the previous field's popup was still open, and
+    // Workday spends the next outside click on closing it.
+    load('Mobile');
+    const stale = document.createElement('div');
+    stale.setAttribute('data-behavior-click-outside-close', 'topmost');
+    stale.innerHTML = '<ul role="listbox"><li role="option">Job Board - Linkedin</li></ul>';
+    document.body.appendChild(stale);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') stale.remove(); });
+
+    const button = document.getElementById('primaryQuestionnaire--ae586816d2d01000bfe468cbad940001');
+    // While another popup is open, a click on this button only closes it.
+    button.addEventListener('click', (e) => {
+      if (stale.isConnected) { stale.remove(); e.stopImmediatePropagation(); }
+    }, true);
+    wireWorkdaySelect(button, {
+      optionsHtml: `
+        <li data-value="" role="option" aria-disabled="true" id="select-one"><div>Select One</div></li>
+        <li data-value="c705db17b0571036dfffebec73ba929b" role="option" id="landline"><div>Landline</div></li>
+        <li data-value="c705db17b0571036dfffec0b6cd2929d" role="option" id="mobile"><div>Mobile</div></li>`,
+    });
+
+    expect(await fillWorkdaySelect(button, '')).toBe(true);
+    expect(button.getAttribute('value')).toBe('c705db17b0571036dfffec0b6cd2929d');
   });
 
   it('matches an AI answer written with a hyphen against an en-dash option', async () => {

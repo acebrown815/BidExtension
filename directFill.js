@@ -23,6 +23,15 @@
   // C3b — skip CSRF/tracking/honeypot fields. Fallback no-op if the helper
   // failed to load so we don't break direct-fill silently.
   const isFieldEligible = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.isFieldEligible) || (() => true);
+  // Never overwrite an existing answer unless the page flags it as wrong —
+  // see lib/fieldFilter.js shouldKeepExistingAnswer.
+  const shouldKeepExistingAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.shouldKeepExistingAnswer)
+    || ((el) => {
+      const chosen = (r) => r.checked && !(r.defaultChecked || r.hasAttribute('checked'));
+      if (el.type === 'radio') return el.name ? Array.from(document.getElementsByName(el.name)).some(chosen) : chosen(el);
+      if (el.type === 'checkbox') return chosen(el);
+      return !!(el.value && el.value.trim());
+    });
 
   // ─── Label extraction (tries multiple strategies) ───────────────
 
@@ -141,10 +150,14 @@
   // ─── Event simulation ──────────────────────────────────────────
 
   function fireEvents(el) {
-    el.dispatchEvent(new Event('focus', { bubbles: true }));
+    // focusin/focusout (bubbling) are what React's onFocus/onBlur listen to;
+    // forms that commit a value on blur (Ashby) otherwise ignore the fill.
+    el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
+    el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('blur', { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('blur', { bubbles: false }));
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
   }
 
   function setNativeInputValue(el, value) {
@@ -324,9 +337,40 @@
   //
   // Shared by the Yes/No button-toggle handler (section 5) and the
   // radio/checkbox handlers (sections 3-4) below.
+  // Pause after each click-based answer so the page commits one before the
+  // next — Ashby lost one of several toggles/radios clicked in one burst
+  // (see content.js CHOICE_CLICK_PACE_MS).
+  const CHOICE_PACE_MS = 250;
+  function paceChoiceClick() {
+    return new Promise(r => setTimeout(r, CHOICE_PACE_MS));
+  }
+  // Same for text/select fields — Ashby lost text answers filled
+  // back-to-back once the choice clicks were paced.
+  const FIELD_PACE_MS = 200;
+  function paceFieldFill() {
+    return new Promise(r => setTimeout(r, FIELD_PACE_MS));
+  }
+
   function clickNatively(el) {
+    // A real mouse click also moves focus onto the element and — once the
+    // user goes on to the next field — away again. Some forms only commit a
+    // field's answer on that focus change: confirmed on Ashby, where a
+    // clicked Yes/No toggle and radio group visibly showed the choice, yet
+    // Submit said "Missing entry for required field" for both. React's
+    // onFocus/onBlur listen to the bubbling focusin/focusout. A click can
+    // re-render (and detach) the element, so the "leave" events go to its
+    // still-attached field container in that case.
+    const container = el.closest('[data-field-path], fieldset, [role="radiogroup"], [role="group"]') || el.parentElement;
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
+    el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     el.click();
+    const leaveTarget = el.isConnected ? el : (container && container.isConnected ? container : null);
+    if (leaveTarget) {
+      leaveTarget.dispatchEvent(new FocusEvent('blur', { bubbles: false }));
+      leaveTarget.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    }
   }
 
   // ─── React Select handler ────────────────────────────────────
@@ -389,7 +433,7 @@
 
     for (const input of inputs) {
       if (input.offsetParent === null) continue; // hidden
-      if (input.value && input.value.trim().length > 0) continue; // already has value
+      if (shouldKeepExistingAnswer(input)) continue; // already answered (and not flagged as wrong)
       // Skip inputs that are part of React Select (combobox search inputs)
       if (input.getAttribute('role') === 'combobox') continue;
       if (input.getAttribute('aria-autocomplete')) continue;
@@ -413,6 +457,7 @@
         if (input.type !== 'textarea' && input.tagName !== 'TEXTAREA' && answer.length > 200) continue;
         dbg(`Direct fill: "${label}" (${answer.length} chars)`);
         setNativeInputValue(input, answer);
+        await paceFieldFill();
         filledIds.add(input.id || input.name);
         filledLabels.add(label);
         filled++;
@@ -423,6 +468,7 @@
     const selects = document.querySelectorAll('select');
     for (const sel of selects) {
       if (!isFieldEligible(sel)) continue; // C3b
+      if (shouldKeepExistingAnswer(sel)) continue; // already chosen
       const label = getElementLabel(sel);
       if (!label) continue;
 
@@ -437,6 +483,7 @@
           dbg(`Direct fill <select>: "${label}" matched`);
           sel.value = opt.value;
           fireEvents(sel);
+          await paceFieldFill();
           filledIds.add(sel.id || sel.name);
           filledLabels.add(label);
           filled++;
@@ -450,6 +497,7 @@
       const name = r.name;
       if (!name) return;
       if (!isFieldEligible(r)) return; // C3b
+      if (shouldKeepExistingAnswer(r)) return; // group already answered
       if (!radioGroups[name]) radioGroups[name] = [];
       radioGroups[name].push(r);
     });
@@ -471,7 +519,7 @@
           // Clicking an already-checked radio is a safe no-op (radios can't
           // be deselected by clicking themselves), so only click when it's
           // actually necessary to change state.
-          if (!radio.el.checked) clickNatively(radio.el);
+          if (!radio.el.checked) { clickNatively(radio.el); await paceChoiceClick(); }
           filledLabels.add(label);
           filled++;
         }
@@ -480,23 +528,24 @@
 
     // ── 4. Checkboxes (only for Yes/No type questions, not multi-select) ──
     // Skip checkboxes that look like multi-select options (city names, skills, etc.)
-    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
       // Decoy checkbox for a custom Yes/No button-toggle widget (Ashby-
       // style) — section 5 below owns this field and clicks the real
       // button; setting .checked here wouldn't reach the page's state
       // anyway (see section 5's comment), so don't double-report it filled.
-      if (cb.parentElement && cb.parentElement.querySelector('button[aria-pressed]')) return;
-      if (!isFieldEligible(cb)) return; // C3b
+      if (cb.parentElement && cb.parentElement.querySelector('button[aria-pressed]')) continue;
+      if (!isFieldEligible(cb)) continue; // C3b
+      if (shouldKeepExistingAnswer(cb)) continue; // already ticked — never untick the user's choice
       const label = getElementLabel(cb);
-      if (!label) return;
+      if (!label) continue;
 
       // Skip multi-select checkboxes (city names, office locations, skills)
       // Only fill checkboxes that are clearly Yes/No questions
       const answer = matchQA(label, qaList, profile);
-      if (!answer) return;
+      if (!answer) continue;
 
       // Only fill if the Q&A answer is clearly a yes/no type
-      if (!YES_NO_ANSWER_RE.test(answer)) return;
+      if (!YES_NO_ANSWER_RE.test(answer)) continue;
 
       const shouldCheck = !NEGATIVE_ANSWER_RE.test(answer) && AFFIRMATIVE_ANSWER_RE.test(answer);
       if (cb.checked !== shouldCheck) {
@@ -505,46 +554,48 @@
         // current state differs from the desired one, so one click lands
         // exactly on shouldCheck.
         clickNatively(cb);
+        await paceChoiceClick();
         filledLabels.add(label);
         filled++;
       }
-    });
+    }
 
     // ── 5. Custom Yes/No button-toggle widgets (Ashby-style) ──
     // See the classifyToggleButtons/getToggleGroupLabel/clickNatively
     // helpers above for why this can't be handled by the checkbox branch.
     const processedToggleGroups = new Set();
-    document.querySelectorAll('button[aria-pressed]').forEach(btn => {
+    for (const btn of document.querySelectorAll('button[aria-pressed]')) {
       const group = btn.parentElement;
-      if (!group || processedToggleGroups.has(group)) return;
+      if (!group || processedToggleGroups.has(group)) continue;
       processedToggleGroups.add(group);
 
       const buttons = Array.from(group.children).filter(el => el.tagName === 'BUTTON' && el.hasAttribute('aria-pressed'));
-      if (buttons.length !== 2) return; // only handle unambiguous yes/no pairs
+      if (buttons.length !== 2) continue; // only handle unambiguous yes/no pairs
 
       // Already answered (by the user or an earlier run) — never override.
-      if (buttons.some(b => b.getAttribute('aria-pressed') === 'true')) return;
+      if (buttons.some(b => b.getAttribute('aria-pressed') === 'true')) continue;
 
       const toggle = classifyToggleButtons(buttons);
-      if (!toggle) return; // can't confidently tell yes from no — skip rather than guess
+      if (!toggle) continue; // can't confidently tell yes from no — skip rather than guess
 
       // C3b — probe whatever real form field backs this widget, if any.
       const hiddenInput = group.querySelector('input[type="checkbox"], input[type="radio"], input[type="hidden"]');
-      if (!isFieldEligible(hiddenInput || group)) return;
+      if (!isFieldEligible(hiddenInput || group)) continue;
 
       const label = getToggleGroupLabel(group);
-      if (!label) return;
+      if (!label) continue;
 
       const answer = matchQA(label, qaList, profile);
-      if (!answer || !YES_NO_ANSWER_RE.test(answer)) return;
+      if (!answer || !YES_NO_ANSWER_RE.test(answer)) continue;
 
       const wantsYes = !NEGATIVE_ANSWER_RE.test(answer) && AFFIRMATIVE_ANSWER_RE.test(answer);
       const target = wantsYes ? toggle.yesBtn : toggle.noBtn;
       dbg(`Direct fill yes/no toggle: "${label}" -> ${wantsYes ? 'Yes' : 'No'}`);
       clickNatively(target);
+      await paceChoiceClick();
       filledLabels.add(label);
       filled++;
-    });
+    }
 
     // ── 6. React Select dropdowns ──
     // Find all React Select containers by looking for the input[role="combobox"] inside them

@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldFilter.js'; // real shouldKeepExistingAnswer / fieldShowsError for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
@@ -207,7 +208,7 @@ describe('detectFormFields pass 2 — Workday prompt inputs', () => {
     const run = new Function(` // eslint-disable-line no-new-func
       ${WORKDAY_HELPERS}
       const getFieldLabel = (el) => 'fallback';
-      const isFieldEligible = () => true;
+      const isFieldEligible = () => true; const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el);
       const isCustomDropdown = () => false;
       const readCustomOptions = () => [];
       const buildSelectOptions = () => ({ optMap: {}, optTexts: [] });

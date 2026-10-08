@@ -59,6 +59,8 @@ beforeAll(() => {
         return null;
       }
       function fillInput(input, value) { calls.fillInput = { input, value }; }
+      const sleep = () => Promise.resolve();
+      function dispatchFocusEvents() {}
       function clickElement(el) { calls.clickElement++; calls.clickedText = el.dataset.text || null; }
       async function waitForVisibleOptions() {
         return dropdownOptionTexts.map(text => {
@@ -68,6 +70,11 @@ beforeAll(() => {
         });
       }
       ${extracted}
+      // The zip/location paths type without blurring and wait for NEW
+      // suggestions; route those to this harness's existing stubs (these
+      // later declarations replace the real ones copied above).
+      function typeIntoAutocomplete(el, v) { fillInput(el, v); }
+      async function waitForNewSuggestionOptions() { return waitForVisibleOptions(); }
       return fillCustomDropdown;
       `,
     );

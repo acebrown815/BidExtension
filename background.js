@@ -561,7 +561,7 @@ async function handleMarkApplied(jobData) {
   // Already confirmed synced — nothing new to do, and re-syncing would
   // append a second row for the same application.
   if (existing && existing.sheetsSynced === true) {
-    return { ...existing, duplicate: true };
+    return { ...existing, duplicate: true, sheetsSyncConfigured: true };
   }
 
   const job = existing || {
@@ -607,7 +607,10 @@ async function handleMarkApplied(jobData) {
     if (jobs.length > 500) jobs.length = 500;
   }
   await chrome.storage.local.set({ appliedJobs: jobs });
-  return job;
+  // Not stored — tells the caller whether a failed sync means "Sheets is
+  // set up but the update failed" (Auto-Bid won't submit then) or just
+  // "Sheets sync isn't turned on".
+  return { ...job, sheetsSyncConfigured: !!(sheetsSettings.enabled && sheetsSettings.webAppUrl) };
 }
 
 // ─── Google Sheets Sync ─────────────────────────────────────────────────────

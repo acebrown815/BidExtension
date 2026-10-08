@@ -102,8 +102,10 @@ describe('Direct-fill radio groups use a real click, not property assignment', (
   });
 
   it('relies on native radio-group exclusivity to correct an already-wrong selection', async () => {
-    // Simulate a stale/incorrect prior selection.
+    // Simulate a wrong selection the PAGE made by default (HTML `checked`)
+    // — a user's own pick is never changed (see the test below).
     const nonbinary = document.getElementById('opt-nonbinary');
+    nonbinary.defaultChecked = true;
     nonbinary.checked = true;
 
     const man = document.getElementById('opt-man');
@@ -121,7 +123,7 @@ describe('Direct-fill radio groups use a real click, not property assignment', (
     expect(manClicks.length).toBe(1);
   });
 
-  it('does not click again when the correct option is already selected', async () => {
+  it('leaves a group the user already answered alone (no click, not re-counted)', async () => {
     const man = document.getElementById('opt-man');
     man.checked = true;
     const manClicks = trackClicks(man);
@@ -129,13 +131,20 @@ describe('Direct-fill radio groups use a real click, not property assignment', (
     const qaList = [{ question: 'What is your gender identity?', answer: 'Man' }];
     const result = await window.__jobMatchDirectFill(qaList, {});
 
-    // Still counted as filled/matched...
-    expect(result.filled).toBe(1);
-    // ...but no click was needed, since clicking an already-checked radio
-    // would be a no-op anyway — this just confirms the `!radio.el.checked`
-    // guard actually skips the redundant click.
+    // Already answered — skipped entirely (see lib/fieldFilter.js
+    // shouldKeepExistingAnswer), so nothing is filled or clicked.
+    expect(result.filled).toBe(0);
     expect(manClicks.length).toBe(0);
     expect(man.checked).toBe(true);
+  });
+
+  it('never switches a radio the user picked to a different saved answer', async () => {
+    const woman = document.querySelector('input[type="radio"]:not(#opt-man)');
+    woman.checked = true;
+    const qaList = [{ question: 'What is your gender identity?', answer: 'Man' }];
+    await window.__jobMatchDirectFill(qaList, {});
+    expect(woman.checked).toBe(true);
+    expect(document.getElementById('opt-man').checked).toBe(false);
   });
 });
 
@@ -161,8 +170,22 @@ describe('Direct-fill checkboxes use a real click, not property assignment', () 
     expect(clicks.length).toBe(1);
   });
 
-  it('unchecks an already-checked box via a genuine click when the answer is negative', async () => {
+  it('never unticks a box the user ticked, whatever the saved answer', async () => {
     const cb = document.getElementById('subscribe');
+    cb.checked = true; // ticked by the user (not the page's default)
+    const clicks = trackClicks(cb);
+
+    const qaList = [{ question: 'Subscribe to our newsletter?', answer: 'No' }];
+    const result = await window.__jobMatchDirectFill(qaList, {});
+
+    expect(result.filled).toBe(0);
+    expect(cb.checked).toBe(true);
+    expect(clicks.length).toBe(0);
+  });
+
+  it('unchecks a box the PAGE pre-ticked via a genuine click when the answer is negative', async () => {
+    const cb = document.getElementById('subscribe');
+    cb.defaultChecked = true; // the page's own default (HTML checked attribute)
     cb.checked = true;
     const clicks = trackClicks(cb);
 

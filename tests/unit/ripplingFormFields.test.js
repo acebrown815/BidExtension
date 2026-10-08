@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldFilter.js'; // real shouldKeepExistingAnswer / fieldShowsError for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
@@ -47,7 +48,7 @@ beforeAll(() => {
     `
     ${helpers}
     const getFieldLabel = getRipplingFieldLabel;
-    const isFieldEligible = () => true; const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]'; const isWorkdaySelectTrigger = () => false; const getWorkdayFieldLabel = () => '';
+    const isFieldEligible = () => true; const shouldKeepExistingAnswer = (el) => globalThis.JMFieldFilter.shouldKeepExistingAnswer(el); const fieldShowsError = (el) => globalThis.JMFieldFilter.fieldShowsError(el); const WORKDAY_SELECT_TRIGGER_SELECTOR = '[data-automation-id^="formField-"] button[aria-haspopup="listbox"]'; const isWorkdaySelectTrigger = () => false; const getWorkdayFieldLabel = () => '';
     const seen = new Set();
     const questions = [];
     const _fieldMap = {};

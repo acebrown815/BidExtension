@@ -47,7 +47,7 @@ const AUTOFILL_FORM_SRC = SRC.slice(START, END);
  * @param {Object}   [opts.tailoredResumeSlot=null] - the (fake) tailored resume slot data.
  */
 function buildAutofillForm({
-  stepCount, maxSteps = 10, isAutoBid = true, errorAfterClicks = Infinity, calls, statusMessages = [],
+  stepCount, maxSteps = 10, isAutoBid = true, errorAfterClicks = Infinity, stuckAfterClicks = Infinity, calls, statusMessages = [],
   tailoredSlotActive = false, tailoredResumeSlot = null,
 }) {
   document.body.innerHTML = `
@@ -57,7 +57,7 @@ function buildAutofillForm({
   const shadowRoot = document;
 
   const factory = new Function( // eslint-disable-line no-new-func
-    'shadowRoot', 'stepCount', 'maxSteps', 'isAutoBid', 'errorAfterClicks', 'calls', 'statusMessages',
+    'shadowRoot', 'stepCount', 'maxSteps', 'isAutoBid', 'errorAfterClicks', 'stuckAfterClicks', 'calls', 'statusMessages',
     'tailoredSlotActive', 'tailoredResumeSlot',
     `
     let _fieldMap = {};
@@ -83,7 +83,12 @@ function buildAutofillForm({
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
     function hasVisibleValidationErrors() { return nextClickCount >= errorAfterClicks; }
+    // Each Next click moves to a new step, until stuckAfterClicks: from then
+    // on the page stays on the same step (e.g. an error shown only as a toast).
+    function getFormStepSignature() { return 'step-' + Math.min(nextClickCount, stuckAfterClicks - 1); }
     async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
+    function findFinalSubmitButton() { return null; } // covered by autoSubmitApplication.test.js
+    async function autoSubmitApplicationIfReady() { return false; }
     function watchForManualStepAdvance() { calls.push({ type: 'watchForManualStepAdvance' }); }
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}
@@ -112,7 +117,7 @@ function buildAutofillForm({
     return autofillForm;
     `,
   );
-  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, calls, statusMessages, tailoredSlotActive, tailoredResumeSlot);
+  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, stuckAfterClicks, calls, statusMessages, tailoredSlotActive, tailoredResumeSlot);
 }
 
 describe('autofillForm — multi-step wizard navigation', () => {
@@ -197,6 +202,21 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
     // ...and hands over to the watcher that resumes once the user fixes it
     // and moves on to the next step themselves.
+    expect(calls.filter(c => c.type === 'watchForManualStepAdvance').length).toBe(1);
+  });
+
+  it('stops when Next leaves the page on the same step even with no error markup (a toast-only error)', async () => {
+    // Live: a site reporting a failed Next only as a toast message — no
+    // aria-invalid / role="alert" — was taken as "advanced", so the loop
+    // re-filled the SAME step and clicked Next again until MAX_AUTOFILL_STEPS.
+    const autofillForm = buildAutofillForm({
+      stepCount: 999, stuckAfterClicks: 1, calls, statusMessages,
+    });
+    await autofillForm();
+
+    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(1);
+    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(1);
+    expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
     expect(calls.filter(c => c.type === 'watchForManualStepAdvance').length).toBe(1);
   });
 

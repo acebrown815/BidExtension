@@ -41,6 +41,12 @@ function buildHarness({ profileLocation, savedLocationAnswer = '', suggestionTex
   const factory = new Function( // eslint-disable-line no-new-func
     'sendMessage', 'fillInput', 'findSavedLocationAnswer', 'findBestLocationMatch', 'waitForVisibleOptions', 'clickElement', '_activeResumeId',
     `
+    const sleep = () => Promise.resolve();
+    const typeIntoAutocomplete = (el, v) => fillInput(el, v);
+    const waitForNewSuggestionOptions = () => waitForVisibleOptions();
+    function dispatchFocusEvents(el, direction) {
+      el.dispatchEvent(new FocusEvent(direction === 'in' ? 'focusin' : 'focusout', { bubbles: true }));
+    }
     return async function run(input, questionText) {
       ${BLOCK_SRC}
       return 'FELL_THROUGH';
