@@ -24,6 +24,17 @@
 // "gender identity" doesn't accidentally match the broader "gender" bucket.
 
 const TOPIC_PATTERNS = {
+  // Referral source — "How Did You Hear About Us?" (Workday's required
+  // "source" select). The saved answer is short ("Linkedin") while the
+  // options are long and site-specific ("Internet - LinkedIn", "Online Job
+  // Board – LinkedIn"); with no topic it went to the AI with ~70 options and
+  // often didn't come back with the LinkedIn one. Containment matching
+  // (matchAnswerToOption step 5) maps the saved answer onto the option.
+  referral_source: [
+    /\bhear(?:d)? about\b/i, /\bhow did you (?:find|learn of|learn about)\b/i,
+    /\breferral source\b/i, /\bsource of (?:application|referral)\b/i
+  ],
+
   // Relatives / close relationships working at the hiring company — a
   // conflict-of-interest question ("Do you have any relatives who work at
   // Louisiana Blue? Relatives are defined as: spouse, parent, … people who
@@ -125,6 +136,7 @@ const TOPIC_PATTERNS = {
 // question text includes phrases like "authorized to work" or "legally authorized".
 
 const TOPIC_TO_QA_KEYWORDS = {
+  referral_source:    ['hear about', 'heard about', 'how did you find', 'how did you learn', 'referral source'],
   relatives_at_company: ['relative', 'family member', 'related to', 'relationship with'],
   gender:             ['gender'],
   gender_identity:    ['gender identity'],

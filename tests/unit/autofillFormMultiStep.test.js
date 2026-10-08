@@ -47,7 +47,7 @@ const AUTOFILL_FORM_SRC = SRC.slice(START, END);
  * @param {Object}   [opts.tailoredResumeSlot=null] - the (fake) tailored resume slot data.
  */
 function buildAutofillForm({
-  stepCount, maxSteps = 10, isAutoBid = true, errorAfterClicks = Infinity, stuckAfterClicks = Infinity, calls, statusMessages = [],
+  stepCount, maxSteps = 10, isAutoBid = true, errorAfterClicks = Infinity, stuckAfterClicks = Infinity, errorOnlyOnClick = 0, calls, statusMessages = [],
   tailoredSlotActive = false, tailoredResumeSlot = null,
 }) {
   document.body.innerHTML = `
@@ -57,7 +57,7 @@ function buildAutofillForm({
   const shadowRoot = document;
 
   const factory = new Function( // eslint-disable-line no-new-func
-    'shadowRoot', 'stepCount', 'maxSteps', 'isAutoBid', 'errorAfterClicks', 'stuckAfterClicks', 'calls', 'statusMessages',
+    'shadowRoot', 'stepCount', 'maxSteps', 'isAutoBid', 'errorAfterClicks', 'stuckAfterClicks', 'errorOnlyOnClick', 'calls', 'statusMessages',
     'tailoredSlotActive', 'tailoredResumeSlot',
     `
     let _fieldMap = {};
@@ -82,12 +82,13 @@ function buildAutofillForm({
     }
     async function waitForDomSettled() { calls.push({ type: 'waitForDomSettled' }); }
     async function waitForFormFieldsReady() { calls.push({ type: 'waitForFormFieldsReady' }); }
-    function hasVisibleValidationErrors() { return nextClickCount >= errorAfterClicks; }
+    function hasVisibleValidationErrors() { return nextClickCount >= errorAfterClicks || (errorOnlyOnClick > 0 && nextClickCount === errorOnlyOnClick); }
     // Each Next click moves to a new step, until stuckAfterClicks: from then
     // on the page stays on the same step (e.g. an error shown only as a toast).
     function getFormStepSignature() { return 'step-' + Math.min(nextClickCount, stuckAfterClicks - 1); }
     async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
     function findFinalSubmitButton() { return null; } // covered by autoSubmitApplication.test.js
+    function findUnfilledRequiredFields() { return globalThis.__stillEmpty ? globalThis.__stillEmpty() : []; }
     async function autoSubmitApplicationIfReady() { return false; }
     function watchForManualStepAdvance() { calls.push({ type: 'watchForManualStepAdvance' }); }
     function clearAutofillBadges() {}
@@ -117,7 +118,7 @@ function buildAutofillForm({
     return autofillForm;
     `,
   );
-  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, stuckAfterClicks, calls, statusMessages, tailoredSlotActive, tailoredResumeSlot);
+  return factory(shadowRoot, stepCount, maxSteps, isAutoBid, errorAfterClicks, stuckAfterClicks, errorOnlyOnClick, calls, statusMessages, tailoredSlotActive, tailoredResumeSlot);
 }
 
 describe('autofillForm — multi-step wizard navigation', () => {
@@ -196,9 +197,10 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     });
     await autofillForm();
 
-    // One step filled, one Next click attempted, then STOP — not the 10-step cap.
-    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(1);
-    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(1);
+    // Filled, Next rejected, filled again (only flagged/empty fields), Next
+    // rejected again, then STOP — not the 10-step cap.
+    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
+    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(2);
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
     // ...and hands over to the watcher that resumes once the user fixes it
     // and moves on to the next step themselves.
@@ -214,10 +216,38 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     });
     await autofillForm();
 
-    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(1);
-    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(1);
+    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
+    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(2);
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
     expect(calls.filter(c => c.type === 'watchForManualStepAdvance').length).toBe(1);
+  });
+
+  it('recovers when a refill fixes the rejected step: fills again, clicks Next again, and carries on', async () => {
+    // Live (gdit.wd5 Workday, "How Did You Hear About Us?"): left empty on the
+    // first pass so Next was rejected — the same field filled fine on a
+    // second pass (what "Resume Auto Mode" did by hand).
+    // (This harness hands out one Next button per lookup, and the retry looks
+    // the button up again — hence 3 for two real steps' worth of Next.)
+    const autofillForm = buildAutofillForm({ stepCount: 3, errorOnlyOnClick: 1, calls, statusMessages });
+    await autofillForm();
+
+    // step 1: fill, Next (rejected), refill, Next (ok) → step 2: fill, Next (ok) → step 3: fill, no Next.
+    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(3);
+    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(4);
+    expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(false);
+    expect(calls.filter(c => c.type === 'watchForManualStepAdvance').length).toBe(0);
+  });
+
+  it('fills again before clicking Next when a required field is still empty after the first pass', async () => {
+    let checks = 0;
+    globalThis.__stillEmpty = () => (++checks === 1 ? ['How Did You Hear About Us?'] : []);
+    try {
+      const autofillForm = buildAutofillForm({ stepCount: 0, calls, statusMessages });
+      await autofillForm();
+      expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
+    } finally {
+      delete globalThis.__stillEmpty;
+    }
   });
 
   it('keeps advancing through steps that succeed, and only stops once one actually fails', async () => {
@@ -230,8 +260,8 @@ describe('autofillForm — stops instead of looping when a step won\'t actually 
     // so the loop continues; step 2 is filled, its OWN Next click is the
     // one that trips the validation error (nextClickCount reaches 2), and
     // the loop stops there rather than attempting a step 3.
-    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
-    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(2);
+    expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(3);
+    expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(3);
     expect(statusMessages.some(m => /could not be filled automatically/i.test(m))).toBe(true);
   });
 });

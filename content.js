@@ -5016,6 +5016,18 @@
         }
         await fillCurrentAutofillStep();
         if (!_autoBidAutofillRun) break;
+        // A required field still empty right after filling usually wasn't
+        // ready yet — Workday renders a step's sections progressively and
+        // its resume parse re-renders the form afterwards (confirmed on
+        // gdit.wd5's "How Did You Hear About Us?": empty on the first pass,
+        // filled by "Resume Auto Mode"). Let the page settle and fill once
+        // more (only empty/flagged fields are touched) before clicking Next.
+        const stillEmpty = findUnfilledRequiredFields();
+        if (stillEmpty.length) {
+          console.info('[JobMatch AI][Auto-Bid] required fields still empty after filling — settling and filling again:', stillEmpty);
+          await waitForDomSettled(4000, 500);
+          await fillCurrentAutofillStep();
+        }
         const nextBtn = findNextStepButton();
         if (!nextBtn) {
           // Last step: Auto-Bid submits it itself when the score and the
@@ -5036,18 +5048,33 @@
         // see its own doc comment for the real, live-confirmed bug this
         // fixes: a tailored resume surviving one hop only to be silently
         // lost on a later one, on a platform with several wizard steps.
-        const stepBeforeNext = getFormStepSignature();
-        await autoBidClick(nextBtn);
-        await waitForDomSettled();
-        await waitForFormFieldsReady();
-        // Stuck if the page flags an error — OR if it simply didn't move on:
-        // some sites report a failed Next only as a toast message (no
-        // aria-invalid / role="alert" on the page), and treating that as
-        // "advanced" re-filled the SAME step and clicked Next again, over
-        // and over up to MAX_AUTOFILL_STEPS.
-        const stepDidNotAdvance = getFormStepSignature() === stepBeforeNext;
-        if (hasVisibleValidationErrors() || stepDidNotAdvance) {
-          if (stepDidNotAdvance) console.info('[JobMatch AI][Auto-Bid] Next did not move to another step — stopping instead of re-filling it');
+        // Up to two Next attempts: if the first is rejected, fill the
+        // fields the page now flags (or left empty) once more — what a
+        // "Resume Auto Mode" click did by hand — and try again.
+        let advanced = false;
+        for (let attempt = 0; attempt < 2 && !advanced; attempt++) {
+          let next = nextBtn;
+          if (attempt === 1) {
+            console.info('[JobMatch AI][Auto-Bid] Next was rejected — filling the flagged/empty fields once more and retrying');
+            btn.innerHTML = '<span class="jm-spinner"></span> Re-filling this step...';
+            await fillCurrentAutofillStep();
+            next = findNextStepButton() || nextBtn;
+            btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
+          }
+          const stepBeforeNext = getFormStepSignature();
+          await autoBidClick(next);
+          await waitForDomSettled();
+          await waitForFormFieldsReady();
+          // Stuck if the page flags an error — OR if it simply didn't move
+          // on: some sites report a failed Next only as a toast message (no
+          // aria-invalid / role="alert" on the page), and treating that as
+          // "advanced" re-filled the SAME step and clicked Next again, over
+          // and over up to MAX_AUTOFILL_STEPS.
+          const stepDidNotAdvance = getFormStepSignature() === stepBeforeNext;
+          advanced = !(hasVisibleValidationErrors() || stepDidNotAdvance);
+          if (!advanced && stepDidNotAdvance) console.info('[JobMatch AI][Auto-Bid] Next did not move to another step');
+        }
+        if (!advanced) {
           setStatus('A required field could not be filled automatically — please complete it and continue manually.', 'error');
           // Auto-Bid: once the user fixes it and moves on, carry on from
           // the next step — see watchForManualStepAdvance().
@@ -9956,7 +9983,14 @@
    * @returns {{root: HTMLElement, mode: 'create'|'signin', email: HTMLInputElement|null, password: HTMLInputElement, verify: HTMLInputElement|null}|null}
    */
   function getWorkdayAuthForm() {
-    const root = document.querySelector('[data-automation-id="signInContent"]');
+    let root = document.querySelector('[data-automation-id="signInContent"]');
+    if (!root || root.offsetParent === null) {
+      // Some tenants open the email/password form somewhere else (e.g. a
+      // dialog, after "Sign in with email") — accept any visible container
+      // holding Workday's password input.
+      const pw = Array.from(document.querySelectorAll('input[data-automation-id="password"]')).find(el => el.offsetParent !== null);
+      root = pw && (pw.closest('form, [role="dialog"], [data-automation-id="wd-popup-frame"]') || pw.parentElement);
+    }
     if (!root || root.offsetParent === null) return null;
     const password = root.querySelector('input[data-automation-id="password"]');
     if (!password) return null;
@@ -10002,6 +10036,29 @@
     }
   }
 
+  const WORKDAY_SHARED_PASSWORD_KEY = 'workdaySharedPassword';
+
+  /**
+   * The ONE password used for every Workday site's candidate account —
+   * created once (reusing the most recently saved per-site password if
+   * there is one, so existing accounts keep matching), then reused to create
+   * and sign in to accounts on every other Workday tenant, so the user only
+   * ever has one Workday password to know.
+   * @returns {Promise<string>}
+   */
+  async function getSharedWorkdayPassword() {
+    try {
+      const stored = (await chrome.storage.local.get(WORKDAY_SHARED_PASSWORD_KEY))[WORKDAY_SHARED_PASSWORD_KEY];
+      if (stored) return stored;
+    } catch (_) {}
+    const accounts = Object.values(await getWorkdayAccounts())
+      .filter(a => a && a.password)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const password = (accounts[0] && accounts[0].password) || generateWorkdayPassword();
+    try { await chrome.storage.local.set({ [WORKDAY_SHARED_PASSWORD_KEY]: password }); } catch (_) {}
+    return password;
+  }
+
   async function saveWorkdayAccount(host, record) {
     const accounts = await getWorkdayAccounts();
     accounts[host] = { ...(accounts[host] || {}), ...record, updatedAt: Date.now() };
@@ -10035,10 +10092,44 @@
    *   account step; 'advanced' once the flow has moved past it; 'stop' when
    *   the user has to take over.
    */
+  /** A visible clickable element whose automation id or text matches. */
+  function findWorkdayAuthControl(automationIdRe, textRe) {
+    for (const el of document.querySelectorAll('button, a, [role="button"]')) {
+      if (el.offsetParent === null || el.disabled) continue;
+      const id = el.getAttribute('data-automation-id') || '';
+      const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if ((id && automationIdRe.test(id)) || (text && text.length <= 40 && textRe.test(text))) return el;
+    }
+    return null;
+  }
+
+  /** Clicks a control, then waits (up to ~6s) for an account form to show. */
+  async function clickAndWaitForWorkdayAuthForm(control, wantMode) {
+    clickElement(control);
+    for (let i = 0; i < 20; i++) {
+      await sleep(300);
+      const form = getWorkdayAuthForm();
+      if (form && (!wantMode || form.mode === wantMode)) return form;
+    }
+    return getWorkdayAuthForm();
+  }
+
   async function handleWorkdayAccountStep(triedSignInFallback = false) {
     if (!isWorkdayHost()) return null;
     let form = getWorkdayAuthForm();
-    if (!form) return null;
+    if (!form) {
+      // Tenants whose account step first offers sign-in options (Google,
+      // LinkedIn, …) and only shows the email/password form — and its
+      // "Create Account" link — after "Sign in with email" is clicked
+      // (confirmed on becu.wd1.myworkdayjobs.com).
+      const withEmail = findWorkdayAuthControl(/signinwithemail/i, /^sign in with email$/i);
+      if (!withEmail) return null;
+      form = await clickAndWaitForWorkdayAuthForm(withEmail);
+      if (!form) {
+        setStatus('Workday: clicked "Sign in with email" but no sign-in form appeared — continue manually.', 'error');
+        return 'stop';
+      }
+    }
 
     const host = location.hostname;
     const saved = (await getWorkdayAccounts())[host] || null;
@@ -10061,6 +10152,16 @@
       }
     }
 
+    // A Sign In form, but this extension has no account on this tenant yet —
+    // switch to Create Account if the page offers it.
+    if (form.mode === 'signin' && (!saved || !saved.password)) {
+      const createLink = findWorkdayAuthControl(/createaccount(link|button)?$/i, /^create account$/i);
+      if (createLink) {
+        const createForm = await clickAndWaitForWorkdayAuthForm(createLink, 'create');
+        if (createForm) form = createForm;
+      }
+    }
+
     let password;
     if (form.mode === 'signin') {
       if (!saved || !saved.password) {
@@ -10069,15 +10170,19 @@
       }
       password = saved.password;
     } else {
-      // Reuse a password generated on an earlier, unconfirmed attempt so a
-      // retry can't leave the saved one out of sync with the real account.
-      password = (saved && saved.password && !saved.created) ? saved.password : generateWorkdayPassword();
+      // The same password on every Workday site (see getSharedWorkdayPassword)
+      // — except an earlier, unconfirmed attempt on THIS site, whose password
+      // may already be the real one.
+      password = (saved && saved.password && !saved.created) ? saved.password : await getSharedWorkdayPassword();
       await saveWorkdayAccount(host, { email, password, created: false });
     }
 
     if (form.email && form.email.value.trim().toLowerCase() !== email.toLowerCase()) fillInput(form.email, email);
-    fillInput(form.password, password);
-    if (form.verify) fillInput(form.verify, password);
+    // Every password box on the form gets the SAME value — not just the
+    // usual password/verifyPassword pair: a tenant naming its confirm box
+    // differently (or adding another one) would otherwise end up mismatched.
+    const passwordBoxes = new Set([form.password, form.verify, ...form.root.querySelectorAll('input[type="password"]')].filter(Boolean));
+    passwordBoxes.forEach(box => fillInput(box, password));
     // Some tenants add a required "I agree" checkbox to Create Account.
     const agree = form.root.querySelector('input[type="checkbox"][data-automation-id="createAccountCheckbox"]');
     if (agree && !agree.checked) clickElement(agree);

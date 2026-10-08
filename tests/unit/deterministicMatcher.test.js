@@ -267,3 +267,31 @@ describe('deterministicFieldMatcher — relatives at the hiring company', () => 
     expect(detectTopic('Will you work from your household office?')).toBeNull();
   });
 });
+
+// Live on Workday (gdit.wd5.myworkdayjobs.com): the required "How Did You
+// Hear About Us?" select (~70 options) stayed empty although the user saved
+// "How did you hear about this position?" → "Linkedin". With no topic it went
+// to the AI with every option and didn't come back with the LinkedIn one.
+describe('deterministicFieldMatcher — referral source ("How Did You Hear About Us?")', () => {
+  const QA = [{ question: 'How did you hear about this position?', answer: 'Linkedin' }];
+
+  it('maps the saved "Linkedin" onto GDIT\'s "Internet - LinkedIn"', () => {
+    const options = ['Agency', 'Employee Referral', 'GDIT Career Website', 'Internet - Facebook', 'Internet - Glassdoor',
+      'Internet - Indeed', 'Internet - LinkedIn', 'Internet - Other', 'Internet – Website Banner/Advertisement', 'Talent Network'];
+    expect(deterministicFieldMatcher('How Did You Hear About Us?', options, QA, null))
+      .toEqual({ matched: true, option: 'Internet - LinkedIn', topic: 'referral_source' });
+  });
+
+  it('and onto "Online Job Board – LinkedIn" (en dash) on other tenants', () => {
+    const options = ['Company Website', 'Employee Referral', 'Online Job Board – Indeed', 'Online Job Board – LinkedIn', 'Other'];
+    expect(deterministicFieldMatcher('How Did You Hear About Us?*', options, QA, null).option).toBe('Online Job Board – LinkedIn');
+  });
+
+  it('falls through to the AI when nothing is saved for it', () => {
+    expect(deterministicFieldMatcher('How Did You Hear About Us?', ['Agency', 'Internet - LinkedIn'], [], null).matched).toBe(false);
+  });
+
+  it('still leaves relatives questions to their own topic', () => {
+    expect(detectTopic('Do you have any relatives who work at GDIT?')).toBe('relatives_at_company');
+  });
+});

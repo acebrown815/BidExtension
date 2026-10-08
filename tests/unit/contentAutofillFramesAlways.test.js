@@ -83,6 +83,7 @@ function buildAutofillForm({
     function hasVisibleValidationErrors() { return false; }
     async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
     function findFinalSubmitButton() { return null; } // covered by autoSubmitApplication.test.js
+    function findUnfilledRequiredFields() { return globalThis.__stillEmpty ? globalThis.__stillEmpty() : []; }
     async function autoSubmitApplicationIfReady() { return false; }
     function clearAutofillBadges() {}
     async function ensureBestResumeSelected() {}

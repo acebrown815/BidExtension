@@ -204,6 +204,91 @@ describe('handleWorkdayAccountStep', () => {
     expect(events.find(e => e.type === 'status').level).toBe('error');
   });
 
+  it('uses ONE password across Workday sites: a new site reuses the password already in use elsewhere', async () => {
+    const accounts = { 'becu.wd1.myworkdayjobs.com': { email: 'brownrandolph07@gmail.com', password: 'Shared#Pass2345xy', created: true, updatedAt: 1 } };
+    const { handleWorkdayAccountStep, store } = load({
+      accounts,
+      onClick: (el) => { if (el.getAttribute('data-automation-id') === 'click_filter') document.body.innerHTML = '<div></div>'; },
+    });
+    let typed = null;
+    document.querySelector('[data-automation-id=\"password\"]').addEventListener('input', (e) => { typed = e.target.value; });
+
+    expect(await handleWorkdayAccountStep()).toBe('advanced');
+    expect(store.workdayAccounts[HOST].password).toBe('Shared#Pass2345xy');
+    expect(store.workdaySharedPassword).toBe('Shared#Pass2345xy');
+  });
+
+  it('fills EVERY password box on the form with the same password', async () => {
+    document.querySelector('[data-automation-id=\"verifyPassword\"]').insertAdjacentHTML('afterend', '<input type=\"password\" id=\"confirm-again\" value=\"\">');
+    const { handleWorkdayAccountStep, store } = load({ autoBid: false });
+    await handleWorkdayAccountStep();
+    const values = Array.from(document.querySelectorAll('input[type=\"password\"]')).map(i => i.value);
+    expect(values).toHaveLength(3);
+    expect(new Set(values).size).toBe(1);
+    expect(values[0]).toBe(store.workdayAccounts[HOST].password);
+  });
+
+  it('clicks "Sign in with email", then "Create Account", when the step first shows sign-in options (becu.wd1)', async () => {
+    // Live: no Create Account form on arrival — only sign-in options; the
+    // email form (with its "Create Account" link) appears after "Sign in
+    // with email".
+    document.body.innerHTML = `
+      <div data-automation-id="applyFlowPage"><div class="sign-in-options">
+        <button data-automation-id="SignInWithGoogleButton">Sign in with Google</button>
+        <button data-automation-id="SignInWithEmailButton">Sign in with email</button>
+      </div></div>`;
+    const clicks = [];
+    const { handleWorkdayAccountStep, store } = load({
+      onClick: (el) => {
+        const id = el.getAttribute('data-automation-id');
+        clicks.push(id);
+        if (id === 'SignInWithEmailButton') {
+          document.body.innerHTML = SIGN_IN_HTML.replace('</form>', '</form><div>Don\'t have an account yet?<button data-automation-id="createAccountLink">Create Account</button></div>');
+        } else if (id === 'createAccountLink') {
+          document.body.innerHTML = CREATE_ACCOUNT_HTML;
+        } else if (id === 'click_filter' && document.querySelector('[data-automation-id="verifyPassword"]')) {
+          document.body.innerHTML = '<div data-automation-id="applyFlowAutoFillPage"></div>';
+        }
+      },
+    });
+
+    expect(await handleWorkdayAccountStep()).toBe('advanced');
+
+    expect(clicks).toEqual(['SignInWithEmailButton', 'createAccountLink', 'click_filter']);
+    expect(store.workdayAccounts[HOST].created).toBe(true);
+  });
+
+  it('after "Sign in with email", signs in directly when an account for this tenant is saved', async () => {
+    document.body.innerHTML = '<div data-automation-id="applyFlowPage"><button>Sign in with email</button></div>';
+    const accounts = { [HOST]: { email: 'brownrandolph07@gmail.com', password: 'Saved#Pass2345xy', created: true } };
+    let passwordAtSubmit = null;
+    const { handleWorkdayAccountStep } = load({
+      accounts,
+      onClick: (el) => {
+        if ((el.textContent || '').trim() === 'Sign in with email') document.body.innerHTML = SIGN_IN_HTML;
+        else if (el.getAttribute('data-automation-id') === 'click_filter') {
+          passwordAtSubmit = document.querySelector('[data-automation-id="password"]').value;
+          document.body.innerHTML = '<div data-automation-id="applyFlowAutoFillPage"></div>';
+        }
+      },
+    });
+
+    expect(await handleWorkdayAccountStep()).toBe('advanced');
+    expect(passwordAtSubmit).toBe('Saved#Pass2345xy');
+  });
+
+  it('finds an email/password form shown in a dialog instead of signInContent', async () => {
+    document.body.innerHTML = `<div role="dialog"><form>
+      <input type="text" data-automation-id="email" value="">
+      <input type="password" data-automation-id="password" value="">
+      <input type="password" data-automation-id="verifyPassword" value="">
+      <div role="button" data-automation-id="click_filter"></div></form></div>`;
+    const { handleWorkdayAccountStep } = load({
+      onClick: (el) => { if (el.getAttribute('data-automation-id') === 'click_filter') document.body.innerHTML = '<div></div>'; },
+    });
+    expect(await handleWorkdayAccountStep()).toBe('advanced');
+  });
+
   it('does nothing off Workday or on a step without the account form', async () => {
     expect(await load({ hostname: 'jobs.lever.co' }).handleWorkdayAccountStep()).toBeNull();
     document.body.innerHTML = '<div data-automation-id="applyFlowAutoFillPage"></div>';
