@@ -132,3 +132,14 @@ describe('qaQuestionMatchesLabel — should NOT match', () => {
     expect(qaQuestionMatchesLabel('LinkedIn Profile URL', 'LinkedIn Profile')).toBe(true); // containment strategy still works
   });
 });
+
+describe('qaQuestionMatchesLabel — salary / compensation / pay are the same topic', () => {
+  it('matches a saved "Desired annual salary (USD)" to "What is your target compensation?" (Ashby)', () => {
+    expect(qaQuestionMatchesLabel('Desired annual salary (USD)', 'What is your target compensation?')).toBe(true);
+    expect(qaQuestionMatchesLabel('Expected salary', 'What are your pay expectations for this role?')).toBe(true);
+  });
+
+  it('does not match an unrelated question', () => {
+    expect(qaQuestionMatchesLabel('Desired annual salary (USD)', 'What is your target start date for this role?')).toBe(false);
+  });
+});

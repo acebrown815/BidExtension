@@ -73,3 +73,32 @@ describe('adjustPhoneValueForField — forms without a separate country code', (
     expect(adjustPhoneValueForField(document.getElementById('city'), '+1 Main St')).toBe('+1 Main St');
   });
 });
+
+// Live on Ashby (jobs.ashbyhq.com/counsel, "What is your target compensation?",
+// <input type="number">): the saved answer "140k" was written into the number
+// box and it showed "NaN".
+describe('adjustNumberValueForField — <input type="number"> gets a plain number', () => {
+  const { adjustNumberValueForField, adjustValueForField } = require(path.join(ROOT, 'lib', 'phoneFormat.js'));
+  const numberInput = () => { document.body.innerHTML = '<input type="number" id="comp">'; return document.getElementById('comp'); };
+
+  it.each([
+    ['140k', '140000'],
+    ['$140,000', '140000'],
+    ['1.5M', '1500000'],
+    ['140k - 160k', '140000'],
+    ['around 140k per year', '140000'],
+    ['150000', '150000'],
+  ])('"%s" → "%s"', (answer, expected) => {
+    expect(adjustNumberValueForField(numberInput(), answer)).toBe(expected);
+    expect(adjustValueForField(numberInput(), answer)).toBe(expected);
+  });
+
+  it('gives "" (left empty, not NaN) when the answer has no number', () => {
+    expect(adjustNumberValueForField(numberInput(), 'Negotiable')).toBe('');
+  });
+
+  it('leaves text inputs alone', () => {
+    document.body.innerHTML = '<input type="text" id="t">';
+    expect(adjustNumberValueForField(document.getElementById('t'), '140k')).toBe('140k');
+  });
+});

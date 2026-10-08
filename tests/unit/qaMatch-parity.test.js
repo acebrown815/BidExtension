@@ -21,6 +21,8 @@ const cases = [
   ['Gender', 'I identify my gender as'],
   ['', 'Anything'],
   ['Anything', ''],
+  ['Desired annual salary (USD)', 'What is your target compensation?'],
+  ['Are you open to relocation?', 'What location do you plan to work from?'],
 ];
 
 describe('qaMatch.js ↔ qaMatch.mjs parity', () => {

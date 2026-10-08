@@ -43,6 +43,9 @@ function buildHarness({ profileLocation, savedLocationAnswer = '', suggestionTex
     `
     const sleep = () => Promise.resolve();
     const typeIntoAutocomplete = (el, v) => fillInput(el, v);
+    // City fields (what this file covers); the country/state choice is tested in locationKind.test.js.
+    const locationKindAsked = () => 'city';
+    const locationPartFor = (full) => (full || '').split(',')[0].trim();
     const waitForNewSuggestionOptions = () => waitForVisibleOptions();
     function dispatchFocusEvents(el, direction) {
       el.dispatchEvent(new FocusEvent(direction === 'in' ? 'focusin' : 'focusout', { bubbles: true }));

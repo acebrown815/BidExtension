@@ -4514,6 +4514,20 @@
     const label = (el) => (typeof getWorkdayFieldLabel === 'function' && getWorkdayFieldLabel(el)) || getFieldLabel(el) || el.id || el.name || '(unlabelled)';
     const isRequired = (el) => el.required || el.getAttribute('aria-required') === 'true';
     const radioGroups = new Map();
+    // Required file uploads with no file (Greenhouse: role="group"
+    // aria-required="true" around input#resume) — or one the page flags as
+    // missing although a file sits in the input.
+    document.querySelectorAll('input[type="file"]').forEach(fileEl => {
+      const group = fileEl.closest('[aria-required="true"], .file-upload, [data-automation-id^="formField-"]');
+      const required = fileEl.required || (group && group.getAttribute('aria-required') === 'true');
+      // Workday's input is emptied by design once its list takes the file.
+      if (!required || isAccumulatingFileInput(fileEl)) return;
+      const hasFile = fileEl.files && fileEl.files.length > 0;
+      if (hasFile && !uploadFieldShowsError(fileEl)) return;
+      const labelId = group && group.getAttribute('aria-labelledby');
+      const labelEl = labelId && document.getElementById(labelId);
+      missing.push(((labelEl && labelEl.textContent) || getFieldLabel(fileEl) || fileEl.id || 'File upload').replace(/\s*\*\s*$/, '').trim());
+    });
     // Checkbox groups ("Select all that apply"): required means AT LEAST ONE
     // box ticked — not every box (each box carries `required` on Greenhouse).
     const groupedBoxes = new Set();
@@ -5228,6 +5242,9 @@
     // Submit. Shows the resume's own recognizable list name (see
     // getActiveResumeDisplayName), not the auto-generated attachment
     // filename — see that function's own doc comment for why.
+    if (resumeResult.reason === 'no-resume') {
+      setStatus('The selected resume "' + getActiveResumeDisplayName() + '" has no file to upload — upload it on the Resumes page.', 'error');
+    }
     if (resumeResult.attached > 0) {
       const extMatch = (resumeResult.fileName || '').match(/\.(docx|pdf)$/i);
       updateAttachedResumeIndicator(getActiveResumeDisplayName() + (extMatch ? extMatch[0] : ''));
@@ -5696,7 +5713,7 @@
       seen.add(qid);
       // 'url' tells the AI this input accepts only a URL (see aiService.js
       // rule 2) — _fieldMap still fills it through the plain-text path.
-      const fieldType = tag === 'textarea' ? 'textarea' : (input.type === 'url' ? 'url' : 'text');
+      const fieldType = tag === 'textarea' ? 'textarea' : (input.type === 'url' ? 'url' : (input.type === 'number' ? 'number' : 'text'));
       questions.push({
         question_id: qid,
         question_text: label || input.placeholder || input.name || '',
@@ -5921,7 +5938,12 @@
     // positive, same as it already did for the reveal-on-click cases.
     document.querySelectorAll('input[type="file"]').forEach(fileEl => {
       if (!isFieldEligible(fileEl)) return;
-      if (fileEl.files && fileEl.files.length > 0) return; // already has a file — don't clobber it
+      // Already has a file — don't clobber it, UNLESS the page still says
+      // the upload is missing: the file reached the <input> but never the
+      // page's own state (Greenhouse, thenewyorktimes: "Resume/CV is
+      // required" with a file sitting in input#resume), and every later
+      // pass would otherwise skip it forever.
+      if (fileEl.files && fileEl.files.length > 0 && !uploadFieldShowsError(fileEl)) return;
       const label = getFieldLabel(fileEl);
       if (looksLikeResumeUpload(fileEl, label)) {
         _resumeFileFields.push({ el: fileEl, label });
@@ -5931,6 +5953,23 @@
     });
 
     return questions;
+  }
+
+  /**
+   * Does the page flag this upload field as missing/invalid? Greenhouse
+   * marks its .file-upload widget with an "upload-label--error" label and a
+   * visible "helper-text--error" message ("Resume/CV is required.");
+   * aria-invalid / Workday's inputAlert are covered by fieldShowsError.
+   * @param {HTMLInputElement} fileEl
+   * @returns {boolean}
+   */
+  function uploadFieldShowsError(fileEl) {
+    if (fieldShowsError(fileEl)) return true;
+    const widget = fileEl.closest('.file-upload, [role="group"], .field-wrapper');
+    if (!widget) return false;
+    if (widget.querySelector('.upload-label--error')) return true;
+    const msg = widget.querySelector('.helper-text--error, [id$="-error"]');
+    return !!(msg && msg.offsetParent !== null && (msg.textContent || '').trim());
   }
 
   /**
@@ -6131,7 +6170,7 @@
       return null;
     }
     const { rawResumeBase64, fileType } = raw || {};
-    if (!rawResumeBase64) return null;
+    if (!rawResumeBase64) return buildResumeFileFromProfile();
 
     const ext = fileType === 'docx' ? 'docx' : 'pdf';
     const mime = ext === 'docx'
@@ -6152,6 +6191,30 @@
       return { file, fileName, mime, ext };
     } catch (err) {
       console.warn('[JobMatch AI] Could not build resume File object:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * A .docx of the selected resume built from its parsed profile, for a
+   * resume with no original file saved — only DOCX uploads keep their bytes,
+   * so one imported from a PDF (or added/migrated) has none. Confirmed on
+   * Greenhouse (thenewyorktimes): "Resume/CV is required" stayed empty while
+   * the AI cover letter beside it attached. See lib/resumeDocx.mjs.
+   * @async
+   * @returns {Promise<{file: File, fileName: string, mime: string, ext: string}|null>}
+   */
+  async function buildResumeFileFromProfile() {
+    try {
+      const built = await sendMessage({ type: 'BUILD_RESUME_FILE', resumeId: _activeResumeId });
+      if (!built || !built.bytesBase64) return null;
+      const nameSeg = sanitizeFileNameSegment(built.name);
+      const fileName = (nameSeg ? `Resume_${nameSeg}` : 'Resume') + '.docx';
+      const file = new File([base64ToBlob(built.bytesBase64, built.mime)], fileName, { type: built.mime });
+      console.info('[JobMatch AI] Resume upload: "' + getActiveResumeDisplayName() + '" has no saved file — built', fileName, 'from its profile.');
+      return { file, fileName, mime: built.mime, ext: 'docx' };
+    } catch (err) {
+      console.warn('[JobMatch AI] Could not build a resume file from the profile:', err && err.message);
       return null;
     }
   }
@@ -6302,17 +6365,40 @@
         console.warn('[JobMatch AI][Auto-Bid] revealAndCollectHiddenResumeInput threw:', e && e.message);
       }
     }
-    if (!_resumeFileFields.length) return { attached: 0, fileName: null };
+    if (!_resumeFileFields.length) {
+      const inputs = [...document.querySelectorAll('input[type="file"]')];
+      if (inputs.length) {
+        console.info('[JobMatch AI] Resume upload: no file input recognized as a resume field —',
+          inputs.map(el => (el.id || el.name || '?') + ' → "' + uploadFieldProbeText(el, getFieldLabel(el)) + '"' +
+            (el.files && el.files.length ? ' (has a file' + (uploadFieldShowsError(el) ? ', flagged' : '') + ')' : '')));
+      }
+      return { attached: 0, fileName: null };
+    }
 
     const built = await buildActiveResumeFile();
-    if (!built) return { attached: 0, fileName: null, reason: 'no-resume' };
+    if (!built) {
+      // No saved file AND nothing to build one from (an empty profile) —
+      // say so instead of silently skipping, since the AI-written cover
+      // letter beside it still attaches.
+      console.warn('[JobMatch AI] Resume upload: the selected resume "' + getActiveResumeDisplayName() + '" (' + _activeResumeId +
+        ') has no saved file and no profile to build one from. Fields waiting:',
+        _resumeFileFields.map(f => f.el.id || f.el.name || f.label));
+      return { attached: 0, fileName: null, reason: 'no-resume' };
+    }
     const { file, fileName, ext, mime } = built;
+    console.info('[JobMatch AI] Resume upload:', fileName, '→', _resumeFileFields.map(f => f.el.id || f.el.name || f.label));
 
     let attached = 0;
+    const delivered = [];
     for (const { el } of _resumeFileFields) {
-      if (!el.isConnected) continue;
-      if (!fileAcceptsType(el, ext, mime)) continue;
+      if (!el.isConnected) { console.info('[JobMatch AI] Resume upload: field left the page before attaching —', el.id || el.name); continue; }
+      if (!fileAcceptsType(el, ext, mime)) { console.info('[JobMatch AI] Resume upload:', el.id || el.name, 'does not accept', ext, '(accept="' + el.getAttribute('accept') + '")'); continue; }
       try {
+        const before = uploadWidgetText(el);
+        // Through the element's own setter first: a value React already
+        // recorded as this same file would make the 'change' a no-op —
+        // see confirmUploadsRegistered.
+        if (el.files && el.files.length) el.value = '';
         const dt = new DataTransfer();
         dt.items.add(file);
         el.files = dt.files;
@@ -6339,11 +6425,13 @@
 
         showAutofillBadge(el);
         attached++;
+        if (!isAccumulatingFileInput(el)) delivered.push({ el, file, before });
       } catch (err) {
         console.warn('[JobMatch AI] Could not attach resume file to field:', err.message);
       }
     }
 
+    await confirmUploadsRegistered(delivered);
     return { attached, fileName: attached > 0 ? fileName : null };
   }
 
@@ -6395,6 +6483,67 @@
    */
   function isAccumulatingFileInput(el) {
     return !!(el && (el.multiple || el.getAttribute('data-automation-id') === 'file-upload-input-ref'));
+  }
+
+  /**
+   * Text of a Greenhouse-style upload widget (.file-upload), whitespace
+   * collapsed — it changes (file name shown, "Attach" → "Remove") once the
+   * page has taken a file. '' when the input isn't in such a widget.
+   * @param {HTMLInputElement} el
+   * @returns {string}
+   */
+  function uploadWidgetText(el) {
+    const widget = el && el.closest && el.closest('.file-upload');
+    return widget ? (widget.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  }
+
+  /**
+   * Makes sure the page actually took a file we put into its upload widget.
+   * Confirmed on Greenhouse (thenewyorktimes): the resume, attached first
+   * thing in AutoFill, sat in input#resume but the widget never showed it
+   * ("Resume/CV is required"), while the identical Cover Letter widget —
+   * filled seconds later, after the AI wrote the letter — registered fine.
+   * The early 'change' landed before the page's React was listening, and
+   * React then recorded the input's value as already being that file, so
+   * re-sending 'change' with the same file looks like "no change" to it.
+   * Clearing the value first (through the element's own setter, which React
+   * watches) and re-delivering makes the next 'change' count.
+   * @param {Array<{el: HTMLInputElement, file: File, before: string}>} delivered
+   *   Inputs in a .file-upload widget, with the widget's text before the attach.
+   * @param {{tries?: number, waitMs?: number}} [opts]
+   * @returns {Promise<number>} How many inputs needed a re-delivery.
+   */
+  async function confirmUploadsRegistered(delivered, opts = {}) {
+    const tries = opts.tries ?? 2;
+    const waitMs = opts.waitMs ?? 1500;
+    let pending = delivered.filter(d => d.before);
+    const redelivered = new Set();
+    for (let attempt = 0; attempt < tries && pending.length; attempt++) {
+      await sleep(waitMs);
+      pending = pending.filter(d => {
+        let el = d.el;
+        if (!el.isConnected && el.id) el = document.getElementById(el.id) || el; // re-rendered
+        if (!el.isConnected) return false;
+        const now = uploadWidgetText(el);
+        if (now && now !== d.before && !uploadFieldShowsError(el)) return false; // registered
+        try {
+          console.info('[JobMatch AI] Upload not registered by the page yet — re-delivering', d.file.name, 'to', el.id || el.name || 'file input');
+          el.value = '';
+          const dt = new DataTransfer();
+          dt.items.add(d.file);
+          el.files = dt.files;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          redelivered.add(d);
+          d.el = el;
+        } catch (err) {
+          console.warn('[JobMatch AI] Could not re-deliver upload:', err.message);
+          return false;
+        }
+        return true;
+      });
+    }
+    return redelivered.size;
   }
 
   async function verifyAndReattachResumeFile(previouslyAttached) {
@@ -7338,6 +7487,77 @@
    * @param {Array<{question: string, answer: string}>} qaList
    * @returns {string}
    */
+  /**
+   * The help text a form shows for a field — its aria-describedby targets,
+   * or a description element inside the field's own wrapper (Ashby:
+   * .ashby-application-form-question-description, e.g. "Country you're
+   * currently residing in" under a field merely labelled "Location").
+   * @param {Element} el
+   * @returns {string}
+   */
+  function getFieldDescription(el) {
+    const parts = [];
+    (el.getAttribute('aria-describedby') || '').split(/\s+/).filter(Boolean).forEach(id => {
+      const d = document.getElementById(id);
+      if (d && !/error/i.test(id)) parts.push(d.textContent || '');
+    });
+    const entry = el.closest('[data-field-path], .field-wrapper, [data-automation-id^="formField-"]');
+    const desc = entry && entry.querySelector('[class*="description"]:not(input):not(textarea)');
+    if (desc && !desc.contains(el)) parts.push(desc.textContent || '');
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * Which part of the candidate's location a location field actually asks
+   * for, from its label AND its description: 'country' ("Location" — "Country
+   * you're currently residing in"), 'state' (state/province), or 'city'
+   * (the default, and whenever a city is mentioned at all).
+   * @param {string} questionText
+   * @param {Element} input
+   * @returns {'city'|'state'|'country'}
+   */
+  function locationKindAsked(questionText, input) {
+    const context = (questionText + ' ' + getFieldDescription(input)).toLowerCase();
+    if (/\bcity\b|\btown\b/.test(context)) return 'city';
+    if (/\bcountry\b|\bnation(?:ality)?\b/.test(context)) return 'country';
+    if (/\bstate\b|\bprovince\b|\bregion\b/.test(context)) return 'state';
+    return 'city';
+  }
+
+  /** "fl" → "Florida", "new york" → "New York". */
+  function titleCase(text) {
+    return text.replace(/\b[a-z]/g, c => c.toUpperCase());
+  }
+
+  /**
+   * The part of the saved location to type for `kind`. Country comes from a
+   * saved Q&A answer about the country if there is one; otherwise it's
+   * inferred — a US state (code or name) or "US"/"USA" means United States,
+   * else the last part of the location as written.
+   * @param {string} fullLocation - e.g. "Summerfield, FL 34491"
+   * @param {'city'|'state'|'country'} kind
+   * @param {Array<{question: string, answer: string}>} qaList
+   * @returns {string}
+   */
+  function locationPartFor(fullLocation, kind, qaList) {
+    const raw = (fullLocation || '').split(',').map(p => p.replace(/\b\d{5}(?:-\d{4})?\b/g, '').trim()).filter(Boolean);
+    if (kind === 'city') return raw[0] || '';
+    const lower = raw.map(p => p.toLowerCase());
+    const stateNames = Object.values(US_STATE_NAMES);
+    const isUsState = (p) => (US_STATE_NAMES[p] && p !== 'us' && p !== 'usa') || stateNames.includes(p);
+    if (kind === 'state') {
+      const state = lower.slice(1).find(isUsState);
+      if (state) return titleCase(US_STATE_NAMES[state] || state);
+      return raw[1] || '';
+    }
+    const savedCountry = Array.isArray(qaList) && qaList.find(qa => qa && qa.answer
+      && /\bcountry\b/i.test(qa.question || '') && !/\bphone|code\b/i.test(qa.question || ''));
+    if (savedCountry) return savedCountry.answer.trim();
+    const last = lower[lower.length - 1] || '';
+    if (/^(us|usa|u\.s\.a?\.?|united states(?: of america)?)$/.test(last) || lower.slice(1).some(isUsState)) return 'United States';
+    return raw.length > 1 ? raw[raw.length - 1] : '';
+  }
+
   function findSavedLocationAnswer(qaList) {
     if (!Array.isArray(qaList)) return '';
     const locationRe = /\bcity\b|\blocation\b/i;
@@ -7564,8 +7784,13 @@
         const savedLocation = findSavedLocationAnswer(qaList);
         const profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {};
         const fullLocation = savedLocation || profile.location || '';
-        const city = fullLocation.split(',')[0].trim();
+        // What to type depends on what the field asks for — a field labelled
+        // just "Location" may want the COUNTRY (Ashby: "Country you're
+        // currently residing in"), not the city.
+        const kind = locationKindAsked(questionText, input);
+        const city = locationPartFor(fullLocation, kind, qaList);
         if (city) {
+          console.info('[JobMatch AI][Auto-Bid] location field "%s" wants the %s — typing "%s"', questionText, kind, city);
           // Snapshot first, so only the suggestions THIS typing produces are
           // considered — see waitForNewSuggestionOptions.
           const before = new Set(document.querySelectorAll('[role="option"]'));
@@ -7576,7 +7801,8 @@
             // Prefer a suggestion matching the FULL saved location (city +
             // state/country) over always trusting the first result — see
             // findBestLocationMatch's own doc comment for why.
-            clickElement(findBestLocationMatch(suggestions, fullLocation).el);
+            const exact = kind !== 'city' && suggestions.find(sg => sg.text.trim().toLowerCase() === city.toLowerCase());
+            clickElement((exact || findBestLocationMatch(suggestions, kind === 'city' ? fullLocation : city)).el);
             // Leave the field like a person would — forms like Ashby only
             // commit the chosen place on focus change.
             await sleep(200);
@@ -8915,7 +9141,10 @@
     // React-compatible value setter
     // Workday collects the country code in its own selector and rejects a
     // phone number that repeats it — see lib/phoneFormat.js.
-    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustPhoneValueForField(input, value);
+    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustValueForField(input, value);
+    // A number field whose answer had no number in it ("Negotiable") —
+    // leave it empty rather than write something it shows as NaN.
+    if ((input.type || '').toLowerCase() === 'number' && !String(value).trim()) return false;
 
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
@@ -9286,10 +9515,16 @@
     const { file, fileName, mime } = built;
 
     let attached = 0;
+    const delivered = [];
     for (const { el } of _coverLetterFileFields) {
       if (!el.isConnected) continue;
       if (!fileAcceptsType(el, 'pdf', mime)) continue;
       try {
+        const before = uploadWidgetText(el);
+        // Through the element's own setter first: a value React already
+        // recorded as this same file would make the 'change' a no-op —
+        // see confirmUploadsRegistered.
+        if (el.files && el.files.length) el.value = '';
         const dt = new DataTransfer();
         dt.items.add(file);
         el.files = dt.files;
@@ -9309,11 +9544,13 @@
 
         showAutofillBadge(el);
         attached++;
+        if (!isAccumulatingFileInput(el)) delivered.push({ el, file, before });
       } catch (err) {
         console.warn('[JobMatch AI] Could not attach cover letter file to field:', err.message);
       }
     }
 
+    await confirmUploadsRegistered(delivered);
     return { attached, fileName: attached > 0 ? fileName : null };
   }
 

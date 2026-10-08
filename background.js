@@ -94,6 +94,7 @@ import { buildTailoredProfileForRescoring } from './lib/tailoredRescore.mjs';
 // Cover-letter file generation — pure builders + filename sanitizer.
 import { buildCoverLetterFilename } from './lib/coverLetterFilename.mjs';
 import { buildCoverLetterDocxParts } from './lib/coverLetterDocx.mjs';
+import { buildResumeDocxParts } from './lib/resumeDocx.mjs';
 import { populateCoverLetterPdf } from './lib/coverLetterPdf.mjs';
 
 // Migration helper to add the `keys` field for per-provider API key memory.
@@ -1658,6 +1659,21 @@ const handlers = {
   'SAVE_RAW_RESUME': async (msg) => {
     await chrome.storage.local.set({ rawResumeBase64: msg.rawResumeBase64, resumeFileType: msg.fileType });
     return { success: true };
+  },
+
+  // A .docx built from a resume's parsed profile, for a resume with no
+  // original file saved (see lib/resumeDocx.mjs).
+  'BUILD_RESUME_FILE': async (msg) => {
+    const profile = await getProfileForResume(msg && msg.resumeId);
+    if (!profile || !(profile.name || (profile.experience || []).length)) return { bytesBase64: null };
+    const zip = new JSZip();
+    for (const [path, xml] of Object.entries(buildResumeDocxParts(profile))) zip.file(path, xml);
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    return {
+      bytesBase64: uint8ArrayToBase64(bytes),
+      mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      name: profile.name || '',
+    };
   },
 
   'GET_RAW_RESUME': async (msg) => {

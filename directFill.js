@@ -163,7 +163,7 @@
   function setNativeInputValue(el, value) {
     // Workday collects the country code in its own selector and rejects a
     // phone number that repeats it — see lib/phoneFormat.js.
-    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustPhoneValueForField(el, value);
+    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustValueForField(el, value);
     // React overrides the value setter, so we need to use the native one
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'

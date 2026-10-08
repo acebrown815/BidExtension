@@ -763,6 +763,8 @@ RULES:
      Website or other social profile"), it still expects exactly ONE URL as the answer — this is almost
      always a single-value URL input that rejects anything else. NEVER join multiple URLs together with a
      comma or "and"/"or". Pick just ONE (prefer LinkedIn if present, otherwise whichever one is available).
+   - A field with field_type "number" accepts ONLY digits: answer with a plain number, no currency symbol,
+     commas, "k"/"M" or words (e.g. a saved "140k" salary → "140000"; a range → its lower figure).
    - A field with field_type "url" accepts ONLY a single URL (e.g. "https://github.com/jane"). Answer with a
      URL from the qa_hint, saved Q&A, or profile, or NEEDS_USER_INPUT if none fits. NEVER answer a url field
      with a sentence or description (e.g. "Work samples available upon request") — the form rejects it.
