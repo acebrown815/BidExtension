@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import '../../lib/fieldFilter.js'; // real hasAnswer for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
@@ -43,6 +44,7 @@ function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior 
     const getFieldLabel = (el) => el.getAttribute('aria-label') || el.id || '';
     const getWorkdayFieldLabel = () => '';
     const isFieldEligible = () => true;
+    const hasAnswer = (el) => globalThis.JMFieldFilter.hasAnswer(el);
     const workdayPromptHasSelection = (el) => !!el.closest('[data-automation-id="multiSelectContainer"]').querySelector('[data-automation-id="selectedItem"]');
     function hasVisibleValidationErrors() { return validationError || !!document.querySelector('[role="alert"]'); }
     function setStatus(text, level) { events.push({ status: text, level }); }
@@ -205,6 +207,42 @@ describe('autoSubmitApplicationIfReady', () => {
     await autoSubmitApplicationIfReady(findFinalSubmitButton());
     expect(await autoSubmitApplicationIfReady(findFinalSubmitButton())).toBe(false);
     expect(events.filter(e => e === 'SUBMIT_CLICKED')).toHaveLength(1);
+  });
+});
+
+describe('Greenhouse "Submit application" (react-select comboboxes)', () => {
+  // Live: every field filled, score above 75, yet "Submit application" was
+  // never clicked — Greenhouse's react-select inputs stay EMPTY after a
+  // choice (shown in a sibling select__single-value), so each answered
+  // dropdown was counted as a missing required field.
+  const GREENHOUSE = (countryChosen) => `
+    <div class="field-wrapper">
+      <label for="country" id="country-label">Country<span aria-label="required">*</span></label>
+      <div class="select__control">
+        <div class="select__value-container">
+          ${countryChosen ? '<div class="select__single-value">United States</div>' : '<div class="select__placeholder">Select...</div>'}
+          <input class="select__input" id="country" role="combobox" aria-required="true" aria-labelledby="country-label" value="">
+        </div>
+      </div>
+    </div>
+    <div class="application--submit"><button type="submit" class="btn btn--pill" aria-disabled="false">Submit application</button></div>`;
+
+  it('finds the button and submits when the dropdowns are answered', async () => {
+    document.body.innerHTML = GREENHOUSE(true);
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load();
+    const btn = findFinalSubmitButton();
+    expect(btn.textContent).toBe('Submit application');
+    btn.addEventListener('click', () => events.push('SUBMIT_CLICKED'));
+
+    expect(await autoSubmitApplicationIfReady(btn)).toBe(true);
+    expect(events).toContain('SUBMIT_CLICKED');
+  });
+
+  it('still refuses when a react-select is genuinely unanswered', async () => {
+    document.body.innerHTML = GREENHOUSE(false);
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load();
+    expect(await autoSubmitApplicationIfReady(findFinalSubmitButton())).toBe(false);
+    expect(events.find(e => e && e.level === 'error').status).toContain('1 required field is still empty');
   });
 });
 

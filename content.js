@@ -55,6 +55,7 @@
   // what the user already typed/picked. See lib/fieldFilter.js.
   const shouldKeepExistingAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.shouldKeepExistingAnswer) || (() => false);
   const fieldShowsError = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.fieldShowsError) || (() => false);
+  const hasAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.hasAnswer) || ((el) => !!(el.value || '').trim());
 
   // Local (no-AI) resume-vs-JD ATS-keyword ranker. Lets the panel highlight
   // which of the user's saved resumes is the strongest ATS-keyword match
@@ -4531,7 +4532,12 @@
         if (!workdayPromptHasSelection(el)) missing.push(label(el));
         return;
       }
-      if (!(el.value || '').trim()) missing.push(label(el));
+      // hasAnswer, not just .value: a react-select combobox (Greenhouse's
+      // Country / Location / EEO selects) keeps its own <input> EMPTY and
+      // shows the choice in a sibling "single-value" element — reading
+      // .value counted every answered Greenhouse dropdown as missing, so
+      // "Submit application" was never clicked.
+      if (!hasAnswer(el)) missing.push(label(el));
     });
     radioGroups.forEach(g => { if (g.required && !g.checked) missing.push(label(g.el)); });
     document.querySelectorAll(WORKDAY_SELECT_TRIGGER_SELECTOR).forEach(btn => {
