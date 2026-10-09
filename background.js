@@ -95,6 +95,7 @@ import { buildTailoredProfileForRescoring } from './lib/tailoredRescore.mjs';
 import { buildCoverLetterFilename } from './lib/coverLetterFilename.mjs';
 import { buildCoverLetterDocxParts } from './lib/coverLetterDocx.mjs';
 import { buildResumeDocxParts } from './lib/resumeDocx.mjs';
+import { withAutoBidDefaults } from './lib/autoBidSettings.mjs';
 import { populateCoverLetterPdf } from './lib/coverLetterPdf.mjs';
 
 // Migration helper to add the `keys` field for per-provider API key memory.
@@ -691,22 +692,22 @@ async function handleTestSheetsSync() {
 // user seeds the sheet with rows that have just a Link (and optionally a
 // Title), leaving Company/Location/Salary/ResumeNo blank as a signal that
 // they're still pending. This pulls that queue from the Apps Script web
-// app, opens up to AUTO_BID_BATCH_SIZE pending postings in new tabs, and
+// app, opens up to the configured batch size of pending postings in new tabs, and
 // triggers the same "Analyze Job" flow the side panel's button runs on each
 // — so every row gets its Company/Location/Salary/ResumeNo/Score filled in
 // the normal way (via the user reviewing the analysis and clicking Mark as
 // Applied) rather than any of this writing to the sheet directly.
 
 /**
- * Retrieves the user's Auto-Bid feature settings from local storage.
- * Defaults to tailoring enabled, matching the pipeline's original behavior
- * before this became configurable.
+ * Retrieves the user's Auto-Bid feature settings from local storage, over
+ * the defaults: tailoring enabled (the pipeline's original behavior before
+ * this became configurable) and 10 jobs per batch.
  * @async
- * @returns {Promise<{tailorResumeEnabled: boolean}>}
+ * @returns {Promise<{tailorResumeEnabled: boolean, batchSize: number}>}
  */
 async function getAutoBidSettings() {
   const result = await chrome.storage.local.get('autoBidSettings');
-  return result.autoBidSettings || { tailorResumeEnabled: true };
+  return withAutoBidDefaults(result.autoBidSettings);
 }
 
 /**
@@ -778,13 +779,14 @@ async function triggerAnalyzeOnTab(tabId, originalLink, attempts = 6, delayMs = 
   }
 }
 
-// Max postings opened per "Analyze Pending Jobs" click. Bounded rather than
-// opening the whole queue at once so a large backlog doesn't spawn dozens of
-// tabs (and AI calls) from a single click.
-const AUTO_BID_BATCH_SIZE = 10;
+// Max postings opened per "Analyze Pending Jobs" click is the Auto-Bid tab's
+// "Jobs per batch" setting (autoBidSettings.batchSize, default 10, max 50 —
+// lib/autoBidSettings.mjs). Bounded rather than opening the whole queue at
+// once so a large backlog doesn't spawn dozens of tabs (and AI calls) from a
+// single click.
 
 // Delay between each tab's creation within a batch. Tabs are opened one
-// after another rather than all in the same instant — firing 10
+// after another rather than all in the same instant — firing a whole batch of
 // simultaneous navigations (each followed by its own AI call once loaded)
 // would burst the network and the AI provider's rate limit all at once.
 // Staggering the START of each tab still finishes the whole batch far
@@ -796,7 +798,7 @@ const AUTO_BID_OPEN_STAGGER_MS = 2000;
 
 /**
  * Opens one pending job's link in a new BACKGROUND tab (active: false —
- * opening up to AUTO_BID_BATCH_SIZE tabs shouldn't repeatedly steal window
+ * opening a whole batch of tabs shouldn't repeatedly steal window
  * focus) and triggers analysis on it once the tab is ready.
  *
  * Some ATS platforms (confirmed on Dover, app.dover.com) defer their own
@@ -836,7 +838,7 @@ async function openAndAnalyzeJob(job) {
 }
 
 /**
- * Pulls the pending-jobs queue and opens up to AUTO_BID_BATCH_SIZE of them
+ * Pulls the pending-jobs queue and opens up to the configured batch size of them
  * in new background tabs, one after another (see AUTO_BID_OPEN_STAGGER_MS),
  * triggering Analyze Job on each as soon as it's ready. A failure on one
  * job (bad link, page never loads, etc.) doesn't stop the rest of the batch
@@ -857,7 +859,8 @@ async function handleAnalyzePendingJobs() {
     };
   }
 
-  const batch = jobs.slice(0, AUTO_BID_BATCH_SIZE);
+  const { batchSize } = await getAutoBidSettings();
+  const batch = jobs.slice(0, batchSize);
   const outcomes = await Promise.allSettled(batch.map((job, i) =>
     new Promise(r => setTimeout(r, i * AUTO_BID_OPEN_STAGGER_MS)).then(() => openAndAnalyzeJob(job))
   ));
@@ -1507,9 +1510,13 @@ const handlers = {
 
   'GET_AUTOBID_SETTINGS': (msg) => getAutoBidSettings(),
 
+  // Merged into what's stored, so saving one setting (the tailor toggle, the
+  // batch size) never resets the others.
   'SAVE_AUTOBID_SETTINGS': async (msg) => {
-    await chrome.storage.local.set({ autoBidSettings: msg.settings });
-    return { success: true };
+    const current = await getAutoBidSettings();
+    const autoBidSettings = withAutoBidDefaults({ ...current, ...(msg.settings || {}) });
+    await chrome.storage.local.set({ autoBidSettings });
+    return { success: true, settings: autoBidSettings };
   },
 
   'TEST_SHEETS_SYNC': (msg) => handleTestSheetsSync(),
@@ -1620,9 +1627,22 @@ const handlers = {
   'TRIGGER_ANALYZE':  (msg) => forwardToActiveTab(msg, { frameId: 0 }),
   'TRIGGER_AUTOFILL': (msg) => forwardToActiveTab(msg, { frameId: 0 }),
 
-  'AUTOFILL_IN_FRAMES': async () => {
-    // Broadcast AUTOFILL_IN_FRAME to all frames in the active tab
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  // An embedded application form (subframe) asking the page's top frame for
+  // the file to upload: the panel's tailored/selected resume, the AI cover
+  // letter written from its analysis, or just which resume is selected
+  // (kind 'context'). See provideUploadFileForFrame in content.js.
+  'GET_TOP_FRAME_UPLOAD': async (msg, sender) => {
+    if (!sender?.tab?.id) return null;
+    try {
+      return await chrome.tabs.sendMessage(sender.tab.id, { type: 'PROVIDE_UPLOAD_FILE', kind: msg.kind }, { frameId: 0 });
+    } catch (_) {
+      return null;
+    }
+  },
+
+  'AUTOFILL_IN_FRAMES': async (msg, sender) => {
+    // Broadcast AUTOFILL_IN_FRAME to all frames in the asking tab
+    const tab = await senderOrActiveTab(sender);
     if (!tab?.id) return { filled: 0 };
     const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
     let totalFilled = 0;
@@ -1647,8 +1667,8 @@ const handlers = {
   // by id) for its own confidently-extracted JD text, and returns
   // whichever one is longest so the top frame's resume ranking/AI-analysis
   // pipeline has real JD text to work with instead of finding nothing.
-  'GET_JD_FROM_FRAMES': async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  'GET_JD_FROM_FRAMES': async (msg, sender) => {
+    const tab = await senderOrActiveTab(sender);
     if (!tab?.id) return { jd: '' };
     const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
     let best = '';
@@ -1779,6 +1799,19 @@ async function handleMessage(message, sender) {
   const handler = handlers[message.type];
   if (!handler) throw new Error(`Unknown message type: ${message.type}`);
   return handler(message, sender);
+}
+
+/**
+ * The tab a content-script message came from, else the active tab. Frame
+ * broadcasts must go to the ASKING tab: Auto-Bid fills jobs in background
+ * tabs, and "the active tab" is then whatever page the user is looking at.
+ * @param {chrome.runtime.MessageSender} [sender]
+ * @returns {Promise<chrome.tabs.Tab|undefined>}
+ */
+async function senderOrActiveTab(sender) {
+  if (sender?.tab?.id) return sender.tab;
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab;
 }
 
 /**

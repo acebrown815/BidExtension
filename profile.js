@@ -1836,11 +1836,30 @@ document.getElementById('autoBidTailorResumeEnabled').addEventListener('change',
 });
 
 /**
+ * "Jobs to run at once" — how many pending rows one "Analyze Pending Jobs"
+ * click opens. Saved on change; the box then shows the value background.js
+ * actually stored (a whole number 1–50, default 10 for anything unreadable).
+ */
+document.getElementById('autoBidBatchSize').addEventListener('change', async (e) => {
+  try {
+    const result = await sendMessage({ type: 'SAVE_AUTOBID_SETTINGS', settings: { batchSize: Number(e.target.value) } });
+    showAutoBidBatchSize(result && result.settings && result.settings.batchSize);
+  } catch (err) {
+    showToast('Error: ' + err.message);
+  }
+});
+
+/** @param {number} size */
+function showAutoBidBatchSize(size) {
+  document.getElementById('autoBidBatchSize').value = String(size || 10);
+}
+
+/**
  * "Analyze Pending Jobs" button handler — auto-bid pipeline step 1.
  * Saves the current Sheets Sync settings first (same reasoning as Test
  * Sync: use whatever's in the form, not just whatever was last saved), then
  * asks the background service worker to pull the pending-jobs queue and
- * open up to 10 of them in new tabs (opened one after another, not all at
+ * open up to the selected "Jobs to run at once" of them in new tabs (opened one after another, not all at
  * once, so it doesn't burst the network or the AI provider's rate limit),
  * running Analyze Job on each. The background does the actual tab/analysis
  * work — this only reports the outcome once every open in the batch has
@@ -1858,6 +1877,13 @@ document.getElementById('analyzePendingJobsBtn').addEventListener('click', async
     resultEl.style.display = 'block';
     return;
   }
+
+  // Use the "Jobs to run at once" box as it is now, even if its change
+  // hasn't finished saving yet.
+  try {
+    const saved = await sendMessage({ type: 'SAVE_AUTOBID_SETTINGS', settings: { batchSize: Number(document.getElementById('autoBidBatchSize').value) } });
+    showAutoBidBatchSize(saved && saved.settings && saved.settings.batchSize);
+  } catch (_) { /* the stored value is used */ }
 
   const btn = document.getElementById('analyzePendingJobsBtn');
   btn.disabled = true;
@@ -2008,6 +2034,7 @@ async function init() {
     // Defaults to enabled (matches the auto-bid pipeline's original,
     // non-configurable behavior) — only an explicit false unchecks it.
     document.getElementById('autoBidTailorResumeEnabled').checked = !autoBidSettings || autoBidSettings.tailorResumeEnabled !== false;
+    showAutoBidBatchSize(autoBidSettings && autoBidSettings.batchSize);
 
     // Update visibility of the "Clear saved keys" link
     await updateClearKeysVisibility();

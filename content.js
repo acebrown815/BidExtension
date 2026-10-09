@@ -5874,6 +5874,8 @@
    *   null when there's no resume file saved yet, or it couldn't be decoded.
    */
   async function buildActiveResumeFile() {
+    const fromTop = await fileFromTopFrame('resume');
+    if (fromTop) return fromTop;
     if (_tailoredSlotActive && _tailoredResumeSlot) {
       try {
         const mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -9078,6 +9080,8 @@
    *   couldn't be built.
    */
   async function buildCoverLetterFile() {
+    const fromTop = await fileFromTopFrame('coverLetter');
+    if (fromTop) return fromTop;
     if (!currentAnalysis) {
       console.warn('[JobMatch AI][Auto-Bid] buildCoverLetterFile: no currentAnalysis — skipping cover letter generation.');
       return null;
@@ -10682,9 +10686,78 @@
         handleSpaUrlChanged();
         sendResponse({ success: true });
         break;
+      case 'PROVIDE_UPLOAD_FILE':
+        // An embedded application form (a cross-origin iframe on this page)
+        // asks for the file to put in its upload field — see fileFromTopFrame.
+        if (!isRealTopFrame()) { sendResponse(null); break; }
+        provideUploadFileForFrame(message.kind).then(sendResponse, () => sendResponse(null));
+        break;
     }
     return true;
   });
+
+  // ─── Uploads for an embedded (iframe) application form ────────
+  // The job analysis, the tailored resume and the pinned resume choice all
+  // live in this top frame; an application form embedded in a cross-origin
+  // iframe (Greenhouse's embed on company career pages — confirmed on
+  // octane.co: "Cover Letter is required" left empty, and the original
+  // resume uploaded in place of the tailored one) runs its own copy of this
+  // script with none of that. So the frame asks for the files instead.
+
+  let _frameCoverLetterCache = null; // { key, payload } — one AI letter per job
+
+  /**
+   * Builds the requested upload in this (top) frame for a subframe.
+   * @param {'resume'|'coverLetter'|'context'} kind
+   * @returns {Promise<Object|null>} { base64, fileName, mime, ext, resumeId } — or
+   *   just { resumeId } for 'context'; null when there's nothing to give.
+   */
+  async function provideUploadFileForFrame(kind) {
+    if (kind === 'context') return { resumeId: _activeResumeId || null };
+    if (kind === 'coverLetter') {
+      const key = normalizeUrl(window.location.href) + '::' + (_activeResumeId || '');
+      if (_frameCoverLetterCache && _frameCoverLetterCache.key === key) return _frameCoverLetterCache.payload;
+      const built = await buildCoverLetterFile();
+      const payload = built ? await uploadPayload(built, 'pdf') : null;
+      if (payload) _frameCoverLetterCache = { key, payload };
+      return payload;
+    }
+    if (kind === 'resume') {
+      const built = await buildActiveResumeFile();
+      return built ? await uploadPayload(built, built.ext) : null;
+    }
+    return null;
+  }
+
+  /** @returns {Promise<Object>} a built file as a message-safe payload */
+  async function uploadPayload(built, ext) {
+    const bytes = new Uint8Array(await built.file.arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    return { base64: btoa(binary), fileName: built.fileName, mime: built.mime, ext: ext || built.ext, resumeId: _activeResumeId || null };
+  }
+
+  /**
+   * In a subframe: the file the top frame's panel would upload (the tailored
+   * resume if one is active, else the selected resume; or the AI cover letter
+   * written from its analysis). null in the top frame, or when the top frame
+   * has nothing to give — callers then fall back to building it here.
+   * @param {'resume'|'coverLetter'} kind
+   * @returns {Promise<{file: File, fileName: string, mime: string, ext: string}|null>}
+   */
+  async function fileFromTopFrame(kind) {
+    if (isRealTopFrame()) return null;
+    try {
+      const p = await sendMessage({ type: 'GET_TOP_FRAME_UPLOAD', kind });
+      if (!p || !p.base64) return null;
+      const file = new File([base64ToBlob(p.base64, p.mime)], p.fileName, { type: p.mime });
+      console.info('[JobMatch AI] Embedded form: using the panel file for the', kind === 'resume' ? 'resume' : 'cover letter', '—', p.fileName);
+      return { file, fileName: p.fileName, mime: p.mime, ext: p.ext };
+    } catch (err) {
+      console.warn('[JobMatch AI] Embedded form: could not get the', kind, 'from the page:', err && err.message);
+      return null;
+    }
+  }
 
   // ─── Utility ──────────────────────────────────────────────────
 
@@ -10795,9 +10868,16 @@
           try {
             let totalFilled = 0;
 
-            // Make sure the active resume is the best local ATS match
-            // before reading it below (same as the top-frame flow).
-            try { await ensureBestResumeSelected(); } catch (_) {}
+            // Answer with the resume the panel (top frame) chose — it may be
+            // pinned for Auto-Bid or picked by hand; only fall back to this
+            // frame's own best-match pick when the page can't say.
+            let topResumeId = null;
+            try {
+              const ctx = await sendMessage({ type: 'GET_TOP_FRAME_UPLOAD', kind: 'context' });
+              topResumeId = ctx && ctx.resumeId;
+            } catch (_) {}
+            if (topResumeId) _activeResumeId = topResumeId;
+            else { try { await ensureBestResumeSelected(); } catch (_) {} }
 
             // ── PASS 0: Attach resume file to any resume-upload field in
             // this frame (no AI) — detectFormFields() populates
@@ -10808,6 +10888,13 @@
               const resumeResult = await attachResumeFile();
               totalFilled += resumeResult.attached;
             } catch (_) {}
+            // Cover letter — written by the top frame from its analysis.
+            try {
+              if (_coverLetterFileFields.length > 0 || findCoverLetterAttachTrigger()) {
+                const coverLetterResult = await attachCoverLetterFile();
+                totalFilled += coverLetterResult.attached;
+              }
+            } catch (e) { console.warn('[JobMatch AI] iframe cover letter attach failed:', e && e.message); }
 
             // ── PASS 1: Direct fill from Q&A (no AI, instant, accurate) ──
             let qaList = [], profile = {};

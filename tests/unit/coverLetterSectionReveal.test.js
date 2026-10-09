@@ -46,6 +46,7 @@ function buildHarness({ analysis, generatedText, sendMessageImpl } = {}) {
   const shadowRoot = makeFakeShadowRoot();
   // eslint-disable-next-line no-eval
   const factory = (0, eval)(`(function (shadowRoot, currentAnalysis, _activeResumeId, generateCoverLetterText, sendMessage, base64ToBlob, buildContactLine, formatLongDate) {
+    const fileFromTopFrame = async () => null;
     ${FN_SRC}
     return { buildCoverLetterFile };
   })`);

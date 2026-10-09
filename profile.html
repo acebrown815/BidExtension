@@ -755,7 +755,7 @@
         <p style="font-size:12px;color:#64748b;margin:0 0 12px;">
           Add rows to your Google Sheet with just a <strong>Link</strong> (and optionally a
           Title) — leave Company, Location, Salary, and ResumeNo blank to mark them as pending.
-          Clicking below opens up to 10 pending rows in new background tabs (one after another,
+          Clicking below opens up to the selected number of pending rows in new background tabs (one after another,
           not all at once) and runs Analyze Job on each automatically. If a job scores above
           75% with its best-matching resume, the application form is also autofilled
           automatically — nothing is ever submitted for you. On job boards where "Apply" first
@@ -769,6 +769,12 @@
         <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--jm-text);margin-bottom:12px;">
           <input type="checkbox" id="autoBidTailorResumeEnabled" style="width:auto;margin:0;">
           Automatically generate a tailored resume when no resume scores above 75%
+        </label>
+
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--jm-text);margin-bottom:12px;">
+          Jobs to run at once
+          <input type="number" id="autoBidBatchSize" min="1" max="50" step="1" value="10" style="width:70px;margin:0;">
+          <span style="font-weight:400;font-size:12px;color:#64748b;">pending rows opened per click (1–50, default 10)</span>
         </label>
 
         <button class="btn btn-primary" id="analyzePendingJobsBtn">Analyze Pending Jobs</button>

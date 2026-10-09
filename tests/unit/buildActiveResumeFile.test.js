@@ -65,6 +65,8 @@ function buildHarness({ tailoredSlotActive = false, tailoredSlot = null, rawResu
       }
       return new Blob([base64], { type: mimeType });
     }
+    // Top frame: no embedded-form handoff (see embeddedFormUploads.test.js).
+    const fileFromTopFrame = async () => null;
     ${FN_SRC}
     return { buildActiveResumeFile };
     `,
