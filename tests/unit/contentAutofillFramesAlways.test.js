@@ -76,6 +76,10 @@ function buildAutofillForm({
     let _coverLetterFileFields = [];
     let currentAnalysis = null;
     let _autoBidAutofillRun = true;
+    let _autofillFormRunning = false;
+    // Not Workday — the step-render wait is a no-op (see workdayStepRendered.test.js).
+    const workdayActiveStepName = () => '';
+    async function waitForWorkdayStepRendered() {}
     const MAX_AUTOFILL_STEPS = 10;
     function findNextStepButton() { return null; }
     async function waitForDomSettled() {}

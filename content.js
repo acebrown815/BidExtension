@@ -4146,9 +4146,14 @@
    */
   function findApplyButton() {
     const applyRe = /^\s*(?:(?:easy|quick|1-click|one[-\s]click)\s+)?apply(\s+now|\s+for\s+this\s+(job|position|role))?\s*$/i;
+    // A posting the user already started applying to shows "Continue
+    // Application" in place of Apply (Workday — ngc.wd1.myworkdayjobs.com:
+    // <a data-automation-id="continueButton" href=".../apply">), leading
+    // back into the saved draft.
+    const continueRe = /^\s*(?:continue|resume)\s+(?:(?:my|your)\s+)?application\s*$/i;
     for (const el of document.querySelectorAll('a, button')) {
       const text = (el.innerText || el.textContent || '').trim();
-      if (text && text.length <= 40 && applyRe.test(text)) return el;
+      if (text && text.length <= 40 && (applyRe.test(text) || continueRe.test(text))) return el;
     }
     return null;
   }
@@ -4430,7 +4435,35 @@
    * @param {HTMLElement} submitBtn
    * @returns {Promise<boolean>} true if Submit was clicked
    */
+  /**
+   * This job's saved analysis, when the page has none in memory — a fresh
+   * page load inside a multi-page application (Workday after "Continue
+   * Application", or a reload) without the Auto-Bid state carried over.
+   * Prefers the selected resume's analysis, else the most recent one for
+   * this job; within the cache's 24-hour lifetime.
+   * @returns {Promise<Object|null>} the analysis (also set as currentAnalysis)
+   */
+  async function recoverCachedAnalysis() {
+    if (currentAnalysis) return currentAnalysis;
+    try {
+      const prefix = normalizeUrl(window.location.href) + '::';
+      const cache = (await chrome.storage.local.get(CACHE_STORAGE_KEY))[CACHE_STORAGE_KEY] || {};
+      const entries = Object.entries(cache)
+        .filter(([k, e]) => k.startsWith(prefix) && e && e.analysis && !(e.timestamp && Date.now() - e.timestamp > CACHE_TTL_MS));
+      if (!entries.length) return null;
+      const mine = entries.find(([k]) => k === prefix + (_activeResumeId || 'none'));
+      const [, entry] = mine || entries.sort((a, b) => (b[1].timestamp || 0) - (a[1].timestamp || 0))[0];
+      currentAnalysis = { ...entry.analysis, url: _autoBidOriginalLink || window.location.href };
+      console.info('[JobMatch AI][Auto-Bid] using the saved analysis for this job (match %s%%)', entry.analysis.matchScore);
+      return currentAnalysis;
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] recoverCachedAnalysis failed:', e && e.message);
+      return null;
+    }
+  }
+
   async function autoSubmitApplicationIfReady(submitBtn) {
+    if (!currentAnalysis) await recoverCachedAnalysis();
     const score = getEffectiveMatchScore();
     if (!currentAnalysis || score === null) {
       setStatus('Form filled. Not submitting automatically — this job has no match score yet (run Analyze first).', 'info');
@@ -4508,6 +4541,8 @@
    * something a manual AutoFill click should do on the user's behalf.
    */
   let _autoBidAutofillRun = false;
+  // autofillForm() is running in this tab (see its re-entrancy guard).
+  let _autofillFormRunning = false;
 
   /**
    * Detects whether the current step's form is showing a validation error
@@ -4539,6 +4574,10 @@
       // for an announcement (Greenhouse/react-select keep these on the
       // page) — not an error. Counting it blocked Auto-Bid's submit.
       if (el.getAttribute('role') === 'alert' && el.getAttribute('aria-invalid') !== 'true' && !(el.textContent || '').trim()) continue;
+      // Nor is a status announcement in one — Workday's "<page> page is
+      // loaded" / "<file> successfully uploaded".
+      if (el.getAttribute('role') === 'alert' && el.getAttribute('aria-invalid') !== 'true'
+        && /\b(page is loaded|successfully uploaded)\b/i.test(el.textContent || '')) continue;
       return true;
     }
     return false;
@@ -4630,7 +4669,20 @@
       return;
     }
     stopManualStepWatch();
-    try { await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' }); } catch (_) {}
+    // Claim the stashed Auto-Bid state — and USE it when this page doesn't
+    // have it (a fresh page load mid-application): the analysis is what the
+    // final submit is judged by, the resume and tailored resume what's uploaded.
+    let pending = null;
+    try { pending = await sendMessage({ type: 'GET_AND_CLEAR_PENDING_AUTOFILL' }); } catch (_) {}
+    if (pending && pending.pending) {
+      if (!currentAnalysis && pending.analysis) currentAnalysis = pending.analysis;
+      if (pending.activeResumeId && !_manualResumeSelection) await lockAutoBidResumeSelection(pending.activeResumeId);
+      if (pending.tailoredResumeSlot && !_tailoredSlotActive) {
+        _tailoredResumeSlot = pending.tailoredResumeSlot;
+        _tailoredSlotActive = true;
+      }
+    }
+    if (!currentAnalysis) await recoverCachedAnalysis();
     setStatus('Auto Mode: continuing from this page...', 'info');
     // Its own flag, not _autoBidContinuationActive: an Apply click below can
     // start checkPendingAutoBidAutofill() (URL-change hop), which owns that
@@ -4718,6 +4770,14 @@
   async function autofillForm() {
     const btn = shadowRoot.getElementById('jmAutofill');
     if (!btn) { console.error('[JobMatch AI] AutoFill button not found'); return; }
+    // One fill at a time per tab: Auto-Bid's paused-step watcher and a
+    // "Resume Auto Mode" click a moment apart could otherwise both fill the
+    // same step (each clicking Workday's "Add", for one).
+    if (_autofillFormRunning) {
+      console.info('[JobMatch AI][Auto-Bid] AutoFill is already running on this page — not starting a second one');
+      return;
+    }
+    _autofillFormRunning = true;
     btn.disabled = true;
     btn.innerHTML = '<span class="jm-spinner"></span> Scanning form...';
     // Hide previous run's warning
@@ -4799,7 +4859,9 @@
             btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
           }
           const stepBeforeNext = getFormStepSignature();
+          const workdayStepBefore = workdayActiveStepName();
           await autoBidClick(next);
+          await waitForWorkdayStepRendered(workdayStepBefore);
           await waitForDomSettled();
           await waitForFormFieldsReady();
           // Stuck if the page flags an error — OR if it simply didn't move
@@ -4828,6 +4890,7 @@
       console.error('[JobMatch AI] AutoFill error:', err);
       setStatus('Error: ' + err.message, 'error');
     } finally {
+      _autofillFormRunning = false;
       btn.disabled = false;
       btn.innerHTML = 'AutoFill Application';
     }
@@ -4932,6 +4995,10 @@
     try {
       await ensureBestResumeSelected();
     } catch (_) {}
+
+    // Workday renders a step only after saving the previous one — never fill
+    // a half-rendered step (whatever started this run).
+    try { await waitForWorkdayStepContent(); } catch (_) {}
 
     // Workday "My Experience": add and fill one Work Experience / Education
     // panel per resume entry before the generic detection below runs (it
@@ -8423,12 +8490,93 @@
   }
 
   /**
+   * The Workday apply-flow step the progress bar marks as current ("My
+   * Information", "My Experience", ...), or '' off the apply flow.
+   * @returns {string}
+   */
+  function workdayActiveStepName() {
+    const step = document.querySelector('[data-automation-id="progressBarActiveStep"]');
+    if (!step) return '';
+    const labels = step.querySelectorAll('label');
+    return ((labels[labels.length - 1] || {}).textContent || '').trim();
+  }
+
+  /**
+   * After "Save and Continue" on Workday: waits until the NEXT step has
+   * actually rendered — the progress bar has moved on and the step's own
+   * Next / Submit button is there — before anything fills it. Workday
+   * saves the step on its server first and can sit still on a loader for
+   * longer than a settle wait; filling then ran against a half-rendered
+   * step (confirmed on ngc.wd1.myworkdayjobs.com: My Experience's Work
+   * Experience was never added and Education 1 left empty, "School or
+   * University / Degree is required"), or found no button and stopped.
+   * Returns early when the page rejects the step (validation errors with
+   * the progress bar unchanged). No-op off Workday.
+   * @param {string} stepBefore - workdayActiveStepName() before the click.
+   * @param {number} [maxWaitMs=20000]
+   */
+  async function waitForWorkdayStepRendered(stepBefore, maxWaitMs = 20000) {
+    if (!isWorkdayHost() || !stepBefore) return;
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      const now = workdayActiveStepName();
+      if (now === stepBefore && hasVisibleValidationErrors()) return;
+      if (now && now !== stepBefore && (findNextStepButton() || findFinalSubmitButton())) {
+        await waitForDomSettled(3000, 400);
+        return;
+      }
+      await sleep(300);
+    }
+    console.info('[JobMatch AI][Auto-Bid] Workday step "%s" still showing %dms after Next', stepBefore, maxWaitMs);
+  }
+
+  /**
+   * Is the current Workday apply-flow step fully on screen — its own page
+   * (applyFlowMyExpPage, applyFlowPrimaryQuestionsPage, ...) and its
+   * "Save and Continue" / Submit button? true off the apply flow.
+   * @returns {boolean}
+   */
+  function workdayStepContentReady() {
+    if (!document.querySelector('[data-automation-id="progressBar"]')) return true;
+    const page = document.querySelector('[data-automation-id^="applyFlow"][data-automation-id$="Page"]:not([data-automation-id="applyFlowPage"])');
+    return !!page && !!(findNextStepButton() || findFinalSubmitButton());
+  }
+
+  /**
+   * Before filling a Workday step: waits for it to finish rendering. Every
+   * way a step gets filled needs this — the loop after its own "Save and
+   * Continue", and equally a "Resume Auto Mode" click or the paused-step
+   * watcher picking up right after the user's own click — since Workday
+   * saves the previous step first and renders this one only afterwards.
+   * Confirmed on ngc.wd1.myworkdayjobs.com, Application Questions: every
+   * question left at "Select One" and flagged after the run went on.
+   * @param {number} [maxWaitMs=15000]
+   */
+  async function waitForWorkdayStepContent(maxWaitMs = 15000) {
+    if (!isWorkdayHost() || workdayStepContentReady()) return;
+    const deadline = Date.now() + maxWaitMs;
+    while (!workdayStepContentReady() && Date.now() < deadline) await sleep(300);
+    if (workdayStepContentReady()) await waitForDomSettled(3000, 400);
+    else console.info('[JobMatch AI][Auto-Bid] Workday step "%s" did not finish rendering within %dms', workdayActiveStepName(), maxWaitMs);
+  }
+
+  /**
    * Workday "My Experience" step: one Work Experience / Education panel per
-   * entry on the active resume. No-op anywhere else.
+   * entry on the active resume. No-op anywhere else. When the progress bar
+   * already says "My Experience" but the step's page hasn't rendered yet
+   * (Workday still loading it), waits for it rather than skipping the step.
    * @returns {Promise<{experience: number, education: number}|null>}
    */
   async function fillWorkdayMyExperienceStep() {
-    if (!isWorkdayHost() || !document.querySelector('[data-automation-id="applyFlowMyExpPage"]')) return null;
+    if (!isWorkdayHost()) return null;
+    const pageSel = '[data-automation-id="applyFlowMyExpPage"]';
+    if (!document.querySelector(pageSel) && /my experience/i.test(workdayActiveStepName())) {
+      const deadline = Date.now() + 15000;
+      while (!document.querySelector(pageSel) && Date.now() < deadline) await sleep(300);
+      if (document.querySelector(pageSel)) await waitForDomSettled(3000, 400);
+    }
+    if (!document.querySelector(pageSel)) return null;
+    console.info('[JobMatch AI][Auto-Bid] Workday My Experience: adding work history / education from the resume');
     let profile = {};
     try { profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {}; } catch (_) {}
     const experience = (Array.isArray(profile.experience) ? profile.experience : []).filter(e => e && (e.title || e.company));

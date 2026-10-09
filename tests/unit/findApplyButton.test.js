@@ -99,3 +99,21 @@ describe('findApplyButton — avoids false positives', () => {
     expect(findApplyButton()).toBeNull();
   });
 });
+
+// Workday (ngc.wd1.myworkdayjobs.com): a posting with an unfinished
+// application shows "Continue Application" instead of Apply.
+describe('findApplyButton — an application already started', () => {
+  it('finds the Workday "Continue Application" link', () => {
+    document.body.innerHTML = `<div data-automation-id="jobPostingPage"><h2 data-automation-id="jobPostingHeader">Principal Software Engineer</h2>
+      <a href="/en-US/northrop_grumman_external_site/job/United-States-Remote/Principal-Software-Engineer_R10254773/apply" role="button" data-automation-id="continueButton">Continue Application</a>
+      <button type="button" data-automation-id="readMore">Read More</button></div>`;
+    expect(findApplyButton()?.getAttribute('data-automation-id')).toBe('continueButton');
+  });
+
+  it('also "Resume my application", but not a plain wizard "Continue"', () => {
+    document.body.innerHTML = '<button>Resume my application</button>';
+    expect(findApplyButton()?.textContent).toBe('Resume my application');
+    document.body.innerHTML = '<button>Continue</button><a href="#">Continue reading</a>';
+    expect(findApplyButton()).toBeNull();
+  });
+});

@@ -101,8 +101,11 @@ function load(profile) {
     const isWorkdayHost = () => true;
     const _activeResumeId = 'resume-1';
     async function sendMessage(msg) { return msg.type === 'GET_PROFILE' ? profile : null; }
+    const findNextStepButton = () => document.querySelector('[data-automation-id="pageFooterNextButton"]');
+    const findFinalSubmitButton = () => null;
+    const hasVisibleValidationErrors = () => !!document.querySelector('[data-automation-id="errorHeading"]');
     ${HELPERS}
-    return { fillWorkdayMyExperienceStep, parseResumeDateRange, findExactOptionByText, withAnswerHint };
+    return { fillWorkdayMyExperienceStep, parseResumeDateRange, findExactOptionByText, withAnswerHint, waitForWorkdayStepRendered, workdayActiveStepName, workdayStepContentReady, waitForWorkdayStepContent };
   `);
   return factory(profile);
 }
@@ -196,5 +199,77 @@ describe('answer hints for Workday selects/prompts', () => {
     expect(findExactOptionByText(options, 'B.S. in Computer Science').text).toBe('B.S. in Computer Science');
     expect(findExactOptionByText(options.slice(0, 2), 'B.S. in Computer Science')).toBeNull();
     expect(withAnswerHint('Degree', 'B.S. in Computer Science')).toBe('Degree (the candidate\'s answer: "B.S. in Computer Science")');
+  });
+});
+
+// Live on ngc.wd1.myworkdayjobs.com: after "Save and Continue" on My
+// Information, Workday was still loading My Experience when the fill ran —
+// Work Experience was never added and Education 1 stayed empty.
+const progressBar = (active) => `<ol data-automation-id="progressBar">
+  <li data-automation-id="${active === 'My Information' ? 'progressBarActiveStep' : 'progressBarCompletedStep'}"><label>step 2 of 6</label><label>My Information</label></li>
+  <li data-automation-id="${active === 'My Experience' ? 'progressBarActiveStep' : 'progressBarInactiveStep'}"><label>step 3 of 6</label><label>My Experience</label></li>
+</ol>`;
+
+describe('Workday steps that render late', { timeout: 20000 }, () => {
+  it('My Experience waits for its page when the progress bar already says so', async () => {
+    document.body.innerHTML = progressBar('My Experience') + '<div id="stepHost"></div>';
+    setTimeout(() => { document.getElementById('stepHost').innerHTML = PAGE_HTML; wireAddButtons(); }, 600);
+    const result = await load(PROFILE).fillWorkdayMyExperienceStep();
+    expect(result).toEqual({ experience: 2, education: 1 });
+  });
+
+  it('reads the active step from the progress bar', () => {
+    document.body.innerHTML = progressBar('My Experience');
+    expect(load({}).workdayActiveStepName()).toBe('My Experience');
+    document.body.innerHTML = '<div></div>';
+    expect(load({}).workdayActiveStepName()).toBe('');
+  });
+
+  it('after Next, waits until the next step and its Save and Continue button are there', async () => {
+    document.body.innerHTML = progressBar('My Information') + '<div id="stepHost"></div>';
+    setTimeout(() => { document.body.innerHTML = progressBar('My Experience'); }, 300);
+    setTimeout(() => { document.body.insertAdjacentHTML('beforeend', '<button data-automation-id="pageFooterNextButton">Save and Continue</button>'); }, 900);
+    const started = Date.now();
+    await load({}).waitForWorkdayStepRendered('My Information', 5000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(850);
+    expect(document.querySelector('[data-automation-id="pageFooterNextButton"]')).not.toBeNull();
+  });
+
+  it('returns at once when Workday rejects the step', async () => {
+    document.body.innerHTML = progressBar('My Information') + '<div data-automation-id="errorHeading">Errors Found</div>';
+    const started = Date.now();
+    await load({}).waitForWorkdayStepRendered('My Information', 5000);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
+// Live on ngc.wd1.myworkdayjobs.com, Application Questions: every question
+// left at "Select One" — the run (a "Resume Auto Mode" click / the paused-
+// step watcher) filled before the step had rendered.
+describe('waitForWorkdayStepContent', { timeout: 20000 }, () => {
+  const QUESTIONS_STEP = `<div data-automation-id="applyFlowPrimaryQuestionsPage">
+    <div data-automation-id="formField-q1"><fieldset><legend><p><b>Are you at least 18 years of age?</b></p></legend>
+      <button aria-haspopup="listbox" type="button" value="" id="q1">Select One</button></fieldset></div></div>
+    <button data-automation-id="pageFooterNextButton">Save and Continue</button>`;
+
+  it('waits until the step page and its Save and Continue button are on screen', async () => {
+    document.body.innerHTML = '<div data-automation-id="applyFlowPage">' + progressBar('My Experience') + '<div id="host"></div></div>';
+    const wd = load({});
+    expect(wd.workdayStepContentReady()).toBe(false);
+    setTimeout(() => { document.getElementById('host').innerHTML = QUESTIONS_STEP; }, 700);
+    const started = Date.now();
+    await wd.waitForWorkdayStepContent(5000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(650);
+    expect(wd.workdayStepContentReady()).toBe(true);
+  });
+
+  it('does not wait on a step that is already there, or off the apply flow', async () => {
+    document.body.innerHTML = '<div data-automation-id="applyFlowPage">' + progressBar('My Experience') + QUESTIONS_STEP + '</div>';
+    const wd = load({});
+    const started = Date.now();
+    await wd.waitForWorkdayStepContent(5000);
+    expect(Date.now() - started).toBeLessThan(300);
+    document.body.innerHTML = '<form><input id="x"></form>';
+    expect(wd.workdayStepContentReady()).toBe(true);
   });
 });
