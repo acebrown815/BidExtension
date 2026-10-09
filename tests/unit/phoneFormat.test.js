@@ -5,7 +5,7 @@
 // chosen in its own "Country Phone Code" selector right above it.
 //
 // Markup below is trimmed verbatim from the live page.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -100,5 +100,54 @@ describe('adjustNumberValueForField — <input type="number"> gets a plain numbe
   it('leaves text inputs alone', () => {
     document.body.innerHTML = '<input type="text" id="t">';
     expect(adjustNumberValueForField(document.getElementById('t'), '140k')).toBe('140k');
+  });
+});
+
+// Paylocity's "Available to Start" (<div format="MM/dd/yyyy"> around
+// <input placeholder="MM/DD/YYYY">) erases anything not in its own format,
+// so answers like "2 weeks" or "2026-10-16" left it empty.
+describe('adjustDateValueForField — a date field gets its own format', () => {
+  const { adjustDateValueForField, adjustValueForField, dateFormatForField, parseDateAnswer } = require(path.join(ROOT, 'lib', 'phoneFormat.js'));
+  const PAYLOCITY = `<div class="form-group form-required form-error"><label>Available to Start</label><div format="MM/dd/yyyy">
+    <div aria-invalid="true"><div><input id="d" min="1920-01-01" placeholder="MM/DD/YYYY" type="text" value=""></div></div></div></div>`;
+  const field = (html) => { document.body.innerHTML = html; return document.querySelector('input'); };
+
+  it('reads the format from a wrapper attribute, the placeholder, or type="date"', () => {
+    expect(dateFormatForField(field(PAYLOCITY))).toBe('MM/dd/yyyy');
+    expect(dateFormatForField(field('<input placeholder="DD/MM/YYYY">'))).toBe('dd/MM/yyyy');
+    expect(dateFormatForField(field('<input placeholder="YYYY-MM-DD">'))).toBe('yyyy-MM-dd');
+    expect(dateFormatForField(field('<input type="date">'))).toBe('yyyy-MM-dd');
+    expect(dateFormatForField(field('<input placeholder="Your city">'))).toBeNull();
+  });
+
+  it.each([
+    ['10/16/2026', '10/16/2026'],
+    ['2026-10-16', '10/16/2026'],
+    ['October 16, 2026', '10/16/2026'],
+    ['16 Oct 2026', '10/16/2026'],
+    ['2 weeks', '10/23/2026'],
+    ['Immediately', '10/09/2026'],
+    ['1 month', '11/09/2026'],
+  ])('"%s" → "%s" in an MM/dd/yyyy box', (answer, expected) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 9, 9));
+    try {
+      expect(adjustValueForField(field(PAYLOCITY), answer)).toBe(expected);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('gives "" for an answer with no date in it (left empty, not erased)', () => {
+    expect(adjustDateValueForField(field(PAYLOCITY), 'Negotiable')).toBe('');
+  });
+
+  it('follows a day-first format', () => {
+    expect(adjustDateValueForField(field('<input placeholder="DD/MM/YYYY">'), '10/16/2026')).toBe('16/10/2026');
+    expect(adjustDateValueForField(field('<input placeholder="DD/MM/YYYY">'), '2026-10-16')).toBe('16/10/2026');
+  });
+
+  it('rejects impossible dates and leaves non-date fields alone', () => {
+    expect(parseDateAnswer('02/30/2026', false)).toBeNull();
+    document.body.innerHTML = '<input id="city" placeholder="City">';
+    expect(adjustValueForField(document.getElementById('city'), '2 weeks')).toBe('2 weeks');
   });
 });

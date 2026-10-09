@@ -77,6 +77,7 @@ function buildAutofillForm({
     let currentAnalysis = null;
     let _autoBidAutofillRun = true;
     let _autofillFormRunning = false;
+    const _customDropdownAttempts = new Map(); const MAX_CUSTOM_DROPDOWN_ATTEMPTS = 2;
     // Not Workday — the step-render wait is a no-op (see workdayStepRendered.test.js).
     const workdayActiveStepName = () => '';
     async function waitForWorkdayStepRendered() {}

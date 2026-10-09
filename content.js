@@ -4543,6 +4543,17 @@
   let _autoBidAutofillRun = false;
   // autofillForm() is running in this tab (see its re-entrancy guard).
   let _autofillFormRunning = false;
+  // Failed fillCustomDropdown() attempts per field in this AutoFill run —
+  // see MAX_CUSTOM_DROPDOWN_ATTEMPTS.
+  const _customDropdownAttempts = new Map();
+  // A custom dropdown that came up empty (no options rendered / no usable
+  // answer) is tried this many times per run, then left alone. One retry
+  // genuinely helps (Paylocity's Country and "Desired Salary Type" filled
+  // on the second try); beyond that every pass — the main fill, its retry,
+  // the newly-revealed pass, "required still empty → fill again", the Next
+  // retry — re-opened the same Country/State/"Address Line 1" widgets and
+  // re-asked the AI, over and over.
+  const MAX_CUSTOM_DROPDOWN_ATTEMPTS = 2;
 
   /**
    * Detects whether the current step's form is showing a validation error
@@ -4778,6 +4789,7 @@
       return;
     }
     _autofillFormRunning = true;
+    _customDropdownAttempts.clear();
     btn.disabled = true;
     btn.innerHTML = '<span class="jm-spinner"></span> Scanning form...';
     // Hide previous run's warning
@@ -5005,6 +5017,12 @@
     // then skips those managed panels).
     try { await fillWorkdayMyExperienceStep(); } catch (e) {
       console.warn('[JobMatch AI][Auto-Bid] fillWorkdayMyExperienceStep threw:', e && e.message);
+    }
+
+    // Answers worked out from saved ones (start date, maximum salary,
+    // street address) — before detection, which then skips them as filled.
+    try { await fillDerivedAnswers(); } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillDerivedAnswers threw:', e && e.message);
     }
 
     // Step 1: detect fields and store DOM references
@@ -5534,9 +5552,17 @@
     // with no role="combobox" and no <form> anywhere on the page, whose
     // options are only rendered (in a popper appended to <body>) once it's
     // clicked. fillCustomDropdown() routes these to fillWorkdaySelect().
+    //
+    // Also, on any site: react-widgets' DropdownList — a bare
+    // <div role="combobox" class="rw-dropdownlist"> showing "--", its
+    // options in an aria-owns listbox rendered once opened, the question in
+    // its data-for attribute (the <label> isn't linked). Confirmed on
+    // Paylocity (recruiting.paylocity.com): "Have you applied for a job with
+    // us before?" and the SMS-permission question were never filled.
     const comboSelector = (isRipplingPage()
       ? 'div[role="combobox"], form button[role="combobox"]'
-      : 'form button[role="combobox"]') + ', ' + WORKDAY_SELECT_TRIGGER_SELECTOR;
+      : 'form button[role="combobox"]') + ', ' + WORKDAY_SELECT_TRIGGER_SELECTOR
+      + ', div[role="combobox"].rw-dropdownlist';
     {
       document.querySelectorAll(comboSelector).forEach(trigger => {
         if (trigger.offsetParent === null) return;
@@ -5554,14 +5580,17 @@
         if (!isFieldEligible(trigger)) return;
         // Workday's own aria-label is just " Select One Required" — the
         // question lives in the field's <label>/<legend>.
-        const label = (isWorkdaySelect && getWorkdayFieldLabel(trigger)) || getFieldLabel(trigger);
+        const isReactWidgets = trigger.classList.contains('rw-dropdownlist');
+        const label = (isWorkdaySelect && getWorkdayFieldLabel(trigger))
+          || (isReactWidgets && (trigger.getAttribute('data-for') || '').trim())
+          || getFieldLabel(trigger);
         if (!label) return;
         seen.add(qid);
         questions.push({
           question_id: qid,
           question_text: label,
           field_type: 'dropdown',
-          required: trigger.getAttribute('aria-required') === 'true',
+          required: trigger.getAttribute('aria-required') === 'true' || !!(isReactWidgets && trigger.closest('.form-required')),
           available_options: [] // read during fill
         });
         _fieldMap[qid] = { el: trigger, type: 'custom_dropdown', optionTexts: [], questionText: label };
@@ -6687,6 +6716,11 @@
   function labelTextWithoutBadges(label) {
     const badges = Array.from(label.querySelectorAll('*')).filter(el =>
       el.children.length === 0 && /^\(?(required|optional)\)?$/i.test(el.textContent.trim()));
+    // A label that wraps its own select also shows the select's current
+    // value / placeholder (Paylocity: "State" + "IN" read as "StateIN").
+    if (label.querySelector('input, select, textarea')) {
+      label.querySelectorAll('[class*="single-value"], [class*="singleValue"], [class*="placeholder"]').forEach(v => badges.push(v));
+    }
     if (badges.length === 0) return label.textContent.trim();
     const clone = label.cloneNode(true);
     const cloneEls = Array.from(clone.querySelectorAll('*'));
@@ -6903,6 +6937,197 @@
   // clicks were paced and the collisions moved to the text fields.
   const FIELD_FILL_PACE_MS = 200;
 
+  // ── Answers worked out from saved ones ──────────────────────────
+  // Filled before the Q&A/AI passes, and only into empty fields:
+  //   - "Available to Start": one week from today;
+  //   - a maximum desired salary: 1.2 × the saved desired salary;
+  //   - "Address Line 1": the saved "Street Address".
+  // Confirmed on Paylocity (recruiting.paylocity.com): the AI put the same
+  // 140000 in both minimum and maximum salary, and the street-address
+  // search box was treated as a dropdown and left empty.
+
+  const AVAILABLE_TO_START_RE = /\bavailab(?:le|ility) (?:to )?start\b|\bavailab(?:le|ility) (?:start )?date\b|\bdate available\b|\bearliest (?:possible |available )?start\b|\bwhen (?:can|could) you start\b/;
+  const MAX_SALARY_RE = /\bmax(?:imum)? (?:desired |expected )?(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) max(?:imum)?\b/;
+  const STREET_ADDRESS_RE = /\baddress (?:line )?1\b|\baddress line one\b|\bstreet address\b/;
+  const START_DATE_OFFSET_DAYS = 7;
+  const MAX_SALARY_FACTOR = 1.2;
+
+  /**
+   * A field's label, data-for, id, name and automation id as lowercase
+   * words ("info.maximumDesiredSalary" → "info maximum desired salary").
+   * @param {HTMLElement} el
+   * @returns {string}
+   */
+  function fieldWords(el) {
+    return [getFieldLabel(el), el.getAttribute('data-for'), el.id, el.name, el.getAttribute('data-automation-id')]
+      .filter(Boolean).join(' ')
+      .replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ')
+      .toLowerCase();
+  }
+
+  /**
+   * `date` written the way the field expects: ISO for a date input or a
+   * YYYY placeholder, DD/MM/YYYY when the placeholder asks for it, else
+   * MM/DD/YYYY.
+   * @param {HTMLInputElement} el
+   * @param {Date} date
+   * @returns {string}
+   */
+  function formatDateForField(el, date) {
+    const lib = globalThis.JMPhoneFormat;
+    const own = lib && lib.dateFormatForField(el);
+    if (own) return lib.formatDate(date, own);
+    const yyyy = String(date.getFullYear());
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const hint = (el.getAttribute('placeholder') || '').toLowerCase();
+    if ((el.type || '').toLowerCase() === 'date' || /^y{4}/.test(hint)) return `${yyyy}-${mm}-${dd}`;
+    if (/^d{1,2}[\/.-]m/.test(hint)) return `${dd}/${mm}/${yyyy}`;
+    return `${mm}/${dd}/${yyyy}`;
+  }
+
+  /**
+   * Types `text` into an input key by key — keydown / keypress, the
+   * character inserted with an insertText input event, keyup — then change
+   * and blur. Masked date boxes with their own calendar (Paylocity's
+   * "Available to Start", placeholder MM/DD/YYYY) ignore a value written in
+   * one go. A keydown the page cancels means the page inserted the
+   * character itself.
+   * @param {HTMLInputElement} el
+   * @param {string} text
+   */
+  async function typeIntoInputKeyByKey(el, text) {
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    try { el.focus(); } catch (_) {}
+    if (document.activeElement !== el) dispatchFocusEvents(el, 'in');
+    setValue.call(el, '');
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward' }));
+    for (const ch of text) {
+      // A mask that inserts the separators itself has already put this one in.
+      if (!/\d/.test(ch) && (el.value || '').endsWith(ch)) continue;
+      const code = /\d/.test(ch) ? 'Digit' + ch : ch === '/' ? 'Slash' : ch === '-' ? 'Minus' : ch === '.' ? 'Period' : '';
+      const keyInit = { key: ch, code, keyCode: ch.charCodeAt(0), which: ch.charCodeAt(0), bubbles: true, cancelable: true };
+      const notCancelled = el.dispatchEvent(new KeyboardEvent('keydown', keyInit));
+      el.dispatchEvent(new KeyboardEvent('keypress', keyInit));
+      if (notCancelled) {
+        setValue.call(el, (el.value || '') + ch);
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+      }
+      el.dispatchEvent(new KeyboardEvent('keyup', keyInit));
+      await sleep(30);
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    dispatchFocusEvents(el, 'out');
+    try { el.blur(); } catch (_) {}
+  }
+
+  /**
+   * Fills a date into a text date box and checks it took (the box keeps the
+   * date's digits). Types the date in the field's own format (skipping a
+   * separator a mask inserts itself), then falls back to a plain write.
+   * @param {HTMLInputElement} el
+   * @param {string} value - e.g. "10/16/2026"
+   * @returns {Promise<boolean>}
+   */
+  async function fillDateField(el, value) {
+    const digits = (t) => String(t || '').replace(/\D/g, '');
+    const took = async () => {
+      await sleep(400);
+      // The digits decide; a page that re-validates later may keep the
+      // field flagged a while, and a retry would only overwrite a good date.
+      return digits(el.value) === digits(value);
+    };
+    const attempts = [
+      ['typed', () => typeIntoInputKeyByKey(el, value)],
+      ['set', async () => { fillInput(el, value); }],
+    ];
+    for (const [how, attempt] of attempts) {
+      await attempt();
+      if (await took()) {
+        console.info('[JobMatch AI][Auto-Bid] date "%s" %s into %s%s', value, how, el.id || el.name || 'date field', fieldShowsError(el) ? ' (still flagged for now)' : '');
+        return true;
+      }
+    }
+    console.warn('[JobMatch AI][Auto-Bid] date "%s" did not stick in %s — it shows "%s"%s', value, el.id || el.name || 'date field', el.value, fieldShowsError(el) ? ' and is still flagged' : '');
+    return !!(el.value || '').trim();
+  }
+
+  /** The saved desired salary as a number ("140k" → 140000), or null. */
+  function savedDesiredSalary(qaList) {
+    const qa = (qaList || []).find(q => q && q.answer
+      && /\b(?:desired|expected|target)\b.*\b(?:salary|compensation|pay)\b|\bsalary expectations?\b/i.test(q.question || '')
+      && !/\bhourly\b/i.test(q.question || ''));
+    const m = qa && String(qa.answer).replace(/,/g, '').match(/(\d+(?:\.\d+)?)\s*([kKmM])?\b/);
+    if (!m) return null;
+    let n = parseFloat(m[1]);
+    if (/k/i.test(m[2] || '')) n *= 1000;
+    if (/m/i.test(m[2] || '')) n *= 1000000;
+    return n > 0 ? n : null;
+  }
+
+  /** A saved answer by question, e.g. "Street Address" (not "… Line 2"). */
+  function savedAnswer(qaList, questionRe, notRe) {
+    const qa = (qaList || []).find(q => q && q.answer && questionRe.test(q.question || '') && !(notRe && notRe.test(q.question || '')));
+    return qa ? String(qa.answer).trim() : '';
+  }
+
+  /**
+   * Types the street address into an address field. On a search-as-you-type
+   * one, picks a suggestion only when it is that street (and city, when one
+   * is saved); otherwise the typed text stays.
+   */
+  async function fillStreetAddress(input, street, city) {
+    if (input.getAttribute('role') !== 'combobox' && !input.getAttribute('aria-autocomplete')) return fillInput(input, street);
+    const before = new Set(document.querySelectorAll('[role="option"]'));
+    typeIntoAutocomplete(input, street);
+    const suggestions = await waitForNewSuggestionOptions(before, 3000);
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const match = suggestions.find(o => norm(o.text).startsWith(norm(street)) && (!city || norm(o.text).includes(norm(city))));
+    if (match) clickElement(match.el);
+    else { dispatchFocusEvents(input, 'out'); try { input.blur(); } catch (_) {} }
+    return true;
+  }
+
+  /**
+   * Fills the derived answers into the matching empty fields on this page.
+   * @returns {Promise<number>} fields filled
+   */
+  async function fillDerivedAnswers() {
+    let qaList = [];
+    try { qaList = await sendMessage({ type: 'GET_QA_LIST' }) || []; } catch (_) {}
+    let filled = 0;
+    const inputs = document.querySelectorAll('input:not([type]), input[type="text"], input[type="date"], input[type="number"], input[type="tel"]');
+    for (const el of inputs) {
+      if (el.offsetParent === null || el.disabled || el.readOnly || !isFieldEligible(el)) continue;
+      if (shouldKeepExistingAnswer(el) || (el.value || '').trim()) continue;
+      const words = fieldWords(el);
+      let value = '';
+      if (AVAILABLE_TO_START_RE.test(words)) {
+        const date = new Date();
+        date.setDate(date.getDate() + START_DATE_OFFSET_DAYS);
+        value = formatDateForField(el, date);
+        if (!(await fillDateField(el, value))) continue;
+      } else if (MAX_SALARY_RE.test(words)) {
+        const base = savedDesiredSalary(qaList);
+        if (!base) continue;
+        value = String(Math.round(base * MAX_SALARY_FACTOR));
+        if (!fillInput(el, value)) continue;
+      } else if (STREET_ADDRESS_RE.test(words) && !/\bline 2\b|\baddress 2\b/.test(words)) {
+        value = savedAnswer(qaList, /\bstreet address\b|^address(?: line 1)?$/i, /line 2|apt|suite|unit/i);
+        if (!value) continue;
+        const city = savedAnswer(qaList, /^city\b/i);
+        await fillStreetAddress(el, value, city);
+      } else {
+        continue;
+      }
+      console.info('[JobMatch AI][Auto-Bid] "%s" → %s', getFieldLabel(el) || el.id, value);
+      showAutofillBadge(el);
+      filled++;
+      await sleep(FIELD_FILL_PACE_MS);
+    }
+    return filled;
+  }
+
   async function fillFormFromAnswers(answers) {
     // Handle array format (new) or flat object (legacy)
     if (!Array.isArray(answers)) {
@@ -6961,6 +7186,14 @@
         continue;
       }
       if (!ref) {
+        skipped.push(qid);
+        continue;
+      }
+      // Only into a field that's STILL empty (or flagged): between detection
+      // and this answer arriving, the field may have been filled — by the
+      // no-AI passes, a derived answer, or the user — and that value stays.
+      const target = ref.el || (ref.radios && ref.radios[0] && ref.radios[0].el);
+      if (target && target.isConnected && shouldKeepExistingAnswer(target)) {
         skipped.push(qid);
         continue;
       }
@@ -7520,6 +7753,58 @@
     // Workday's apply-flow selects need a human-like open → wait for the
     // newly rendered list → pick → confirm sequence of their own.
     if (isWorkdaySelectTrigger(input)) return await fillWorkdaySelect(input, questionText);
+
+    const attemptKey = input.id || input.getAttribute('name') || questionText;
+    if ((_customDropdownAttempts.get(attemptKey) || 0) >= MAX_CUSTOM_DROPDOWN_ATTEMPTS) {
+      console.info('[JobMatch AI][Auto-Bid] fillCustomDropdown: "%s" already failed %d times this run — leaving it', questionText, MAX_CUSTOM_DROPDOWN_ATTEMPTS);
+      return false;
+    }
+    const filled = await fillCustomDropdownOnce(input, questionText);
+    if (!filled) _customDropdownAttempts.set(attemptKey, (_customDropdownAttempts.get(attemptKey) || 0) + 1);
+    return filled;
+  }
+
+  /**
+   * The text a custom dropdown trigger shows as its current value —
+   * react-widgets' .rw-input, else an input's value, else its own text.
+   * @param {HTMLElement} trigger
+   * @returns {string}
+   */
+  function customDropdownShownValue(trigger) {
+    const rw = trigger.querySelector && trigger.querySelector('.rw-input');
+    const text = rw ? rw.textContent : ('value' in trigger && trigger.tagName === 'INPUT' ? trigger.value : (trigger.innerText || trigger.textContent));
+    return (text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
+   * Clicks the chosen option, then checks the trigger kept it: if it now
+   * shows ANOTHER of the options instead, selects the chosen one once more.
+   * Confirmed on Paylocity's react-widgets Yes/No dropdowns: "Have you
+   * applied for a job with us before?" went to No and straight back to Yes.
+   * @param {HTMLElement} trigger
+   * @param {{el: HTMLElement, text: string}} chosen
+   * @param {string[]} optionTexts
+   */
+  async function clickCustomDropdownOption(trigger, chosen, optionTexts) {
+    clickElement(chosen.el);
+    await sleep(400);
+    const shown = customDropdownShownValue(trigger).toLowerCase();
+    const want = chosen.text.trim().toLowerCase();
+    const other = shown !== want && optionTexts.find(t => t.trim().toLowerCase() === shown);
+    if (!other) return;
+    console.warn('[JobMatch AI][Auto-Bid] dropdown shows "%s" after choosing "%s" — selecting it again', other, chosen.text);
+    if (!chosen.el.isConnected || chosen.el.offsetParent === null) {
+      clickElement(trigger);
+      const reopened = await waitForVisibleOptions(trigger, 3000);
+      const again = reopened.find(o => o.text.trim().toLowerCase() === want);
+      if (!again) return;
+      chosen = again;
+    }
+    clickElement(chosen.el);
+    await sleep(400);
+  }
+
+  async function fillCustomDropdownOnce(input, questionText) {
     if (isWorkdayPromptInput(input)) return await fillWorkdayPrompt(input, questionText);
 
     // Some location-autocomplete fields (Google-Places-backed, common on
@@ -7620,6 +7905,9 @@
     // that a plain MouseEvent/`.click()` never reaches.
     input.focus();
     let openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
+    // What <body> held before opening — a list generated on open and
+    // appended to <body> is then told apart from everything else.
+    let bodyBefore = new Set(document.body.children);
     clickElement(openTarget);
 
     // Step 2: Wait for the dropdown's options to actually render. Some
@@ -7631,7 +7919,7 @@
     // Polling instead means a fast dropdown still resolves quickly (most
     // checks succeed well under the cap) while a slow one gets real time
     // to finish rather than a coin-flip based on a fixed delay.
-    let optionEls = await waitForVisibleOptions(input);
+    let optionEls = await waitForVisibleOptions(input, 5000, 200, bodyBefore);
     if (optionEls.length === 0) {
       // The isConnected check at the top of this function only catches a
       // detachment that already happened BEFORE this call started. A
@@ -7646,8 +7934,9 @@
           input = fresh;
           input.focus();
           openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
+          bodyBefore = new Set(document.body.children);
           clickElement(openTarget);
-          optionEls = await waitForVisibleOptions(input);
+          optionEls = await waitForVisibleOptions(input, 5000, 200, bodyBefore);
         }
       }
     }
@@ -7688,8 +7977,7 @@
     // Exact text match
     for (const opt of optionEls) {
       if (opt.text.toLowerCase().trim() === choiceLower) {
-        clickElement(opt.el);
-        await sleep(200);
+        await clickCustomDropdownOption(input, opt, optionTexts);
         return true;
       }
     }
@@ -7697,8 +7985,7 @@
     // Normalized match
     for (const opt of optionEls) {
       if (opt.text.toLowerCase().replace(/[^a-z0-9]/g, '') === choiceNorm) {
-        clickElement(opt.el);
-        await sleep(200);
+        await clickCustomDropdownOption(input, opt, optionTexts);
         return true;
       }
     }
@@ -7707,8 +7994,7 @@
     for (const opt of optionEls) {
       const optLower = opt.text.toLowerCase().trim();
       if (optLower.includes(choiceLower) || choiceLower.includes(optLower)) {
-        clickElement(opt.el);
-        await sleep(200);
+        await clickCustomDropdownOption(input, opt, optionTexts);
         return true;
       }
     }
@@ -8602,12 +8888,12 @@
    * @param {number} [intervalMs=200]
    * @returns {Promise<Array<{text: string, el: HTMLElement}>>}
    */
-  async function waitForVisibleOptions(triggerEl, maxWaitMs = 5000, intervalMs = 200) {
+  async function waitForVisibleOptions(triggerEl, maxWaitMs = 5000, intervalMs = 200, bodyChildrenBefore = null) {
     const deadline = Date.now() + maxWaitMs;
-    let options = findVisibleOptions(triggerEl);
+    let options = findVisibleOptions(triggerEl, bodyChildrenBefore);
     while (options.length === 0 && Date.now() < deadline) {
       await sleep(intervalMs);
-      options = findVisibleOptions(triggerEl);
+      options = findVisibleOptions(triggerEl, bodyChildrenBefore);
     }
     return options;
   }
@@ -8619,16 +8905,17 @@
    * @param {HTMLElement} triggerEl - The combobox trigger that was clicked to open the dropdown.
    * @returns {Array<{text: string, el: HTMLElement}>} List of option text+element pairs.
    */
-  function findVisibleOptions(triggerEl) {
+  function findVisibleOptions(triggerEl, bodyChildrenBefore) {
     const results = [];
     const seen = new Set();
 
-    // Strategy 1: ARIA — find listbox via aria-controls/aria-owns
-    const lbId = triggerEl.getAttribute('aria-controls') || triggerEl.getAttribute('aria-owns');
-    if (lbId) {
-      const lb = document.getElementById(lbId);
-      if (lb) collectOptions(lb.querySelectorAll('[role="option"]'), results, seen);
-    }
+    // Strategy 1: ARIA — the list the dropdown says it owns — on the trigger itself, or on a
+    // wrapper just above it (Paylocity's pcty-input-select puts
+    // aria-owns="…-dropdown-list-container" on the wrapper around the
+    // <input>, and renders that container straight into <body> on open).
+    const lb = ownedListboxOf(triggerEl);
+    if (lb) collectOptions(optionLikeElements(lb), results, seen);
+    if (results.length) return results;
 
     // Strategy 2: Search nearby container. Start the closest() walk from the
     // PARENT, not triggerEl itself — react-select (e.g. Greenhouse's
@@ -8644,6 +8931,15 @@
       collectOptions(container.querySelectorAll('[role="option"], [class*="option"]:not([class*="options"])'), results, seen);
     }
 
+    // Strategy 2b: a list generated on open and appended to <body> (a portal) — whatever
+    // option-like items appeared in nodes added since the dropdown was opened.
+    if (results.length === 0 && bodyChildrenBefore) {
+      for (const node of document.body.children) {
+        if (bodyChildrenBefore.has(node) || node.tagName === 'SCRIPT' || node.tagName === 'STYLE') continue;
+        collectOptions(optionLikeElements(node), results, seen);
+      }
+    }
+
     // Strategy 3: Search entire document for visible options (dropdown might be portaled,
     // e.g. react-select with menuPortalTarget pointing at document.body)
     if (results.length === 0) {
@@ -8654,6 +8950,38 @@
     }
 
     return results;
+  }
+
+  /**
+   * The listbox a custom dropdown points at with aria-owns / aria-controls,
+   * on the trigger or on one of its nearest few ancestors.
+   * @param {HTMLElement} triggerEl
+   * @returns {HTMLElement|null}
+   */
+  function ownedListboxOf(triggerEl) {
+    let node = triggerEl;
+    for (let i = 0; i < 5 && node && node !== document.body; i++, node = node.parentElement) {
+      const id = node.getAttribute('aria-controls') || node.getAttribute('aria-owns');
+      const lb = id && document.getElementById(id);
+      if (lb) return lb;
+    }
+    return null;
+  }
+
+  /**
+   * The option rows inside a dropdown list: [role="option"] when the list
+   * uses it, otherwise its innermost list items / "option" / "item"
+   * elements (lists generated without ARIA roles).
+   * @param {Element} root
+   * @returns {Element[]}
+   */
+  function optionLikeElements(root) {
+    const byRole = root.querySelectorAll('[role="option"]');
+    if (byRole.length) return Array.from(byRole);
+    const candidates = Array.from(root.querySelectorAll(
+      'li, [class*="option"]:not([class*="options"]), [class*="item"]:not([class*="items"]), [data-value]'
+    ));
+    return candidates.filter(c => !candidates.some(o => o !== c && c.contains(o)));
   }
 
   /**
@@ -9014,7 +9342,11 @@
     // React-compatible value setter
     // Workday collects the country code in its own selector and rejects a
     // phone number that repeats it — see lib/phoneFormat.js.
+    const unadjusted = value;
     if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustValueForField(input, value);
+    // No date for a date box (or no number for a number box): leave it
+    // empty rather than write something the page erases.
+    if (!String(value).trim() && String(unadjusted || '').trim()) return false;
     // A number field whose answer had no number in it ("Negotiable") —
     // leave it empty rather than write something it shows as NaN.
     if ((input.type || '').toLowerCase() === 'number' && !String(value).trim()) return false;

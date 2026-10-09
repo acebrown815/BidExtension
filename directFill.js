@@ -123,6 +123,11 @@
     const allEls = Array.from(label.querySelectorAll('*'));
     const badges = allEls.filter(e =>
       e.children.length === 0 && /^\(?(required|optional)\)?$/i.test(e.textContent.trim()));
+    // A label that wraps its own select also shows the select's current
+    // value / placeholder (Paylocity: "State" + "IN" read as "StateIN").
+    if (label.querySelector('input, select, textarea')) {
+      label.querySelectorAll('[class*="single-value"], [class*="singleValue"], [class*="placeholder"]').forEach(v => badges.push(v));
+    }
     if (badges.length === 0) return label.textContent;
     const clone = label.cloneNode(true);
     const cloneEls = Array.from(clone.querySelectorAll('*'));
@@ -163,7 +168,13 @@
   function setNativeInputValue(el, value) {
     // Workday collects the country code in its own selector and rejects a
     // phone number that repeats it — see lib/phoneFormat.js.
-    if (globalThis.JMPhoneFormat) value = globalThis.JMPhoneFormat.adjustValueForField(el, value);
+    if (globalThis.JMPhoneFormat) {
+      const adjusted = globalThis.JMPhoneFormat.adjustValueForField(el, value);
+      // No number for a number box, no date for a date box: leave it empty
+      // rather than write something the page erases (or clear the field).
+      if (!String(adjusted).trim() && String(value || '').trim()) return false;
+      value = adjusted;
+    }
     // React overrides the value setter, so we need to use the native one
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
@@ -455,8 +466,10 @@
       if (answer) {
         // Sanity check: don't put long answers in short text inputs
         if (input.type !== 'textarea' && input.tagName !== 'TEXTAREA' && answer.length > 200) continue;
+        // Not written (the saved answer has no date for a date box, no
+        // number for a number box) — not filled, so later passes still try.
+        if (setNativeInputValue(input, answer) === false) continue;
         dbg(`Direct fill: "${label}" (${answer.length} chars)`);
-        setNativeInputValue(input, answer);
         await paceFieldFill();
         filledIds.add(input.id || input.name);
         filledLabels.add(label);
