@@ -5409,8 +5409,10 @@
 
     // ── 1. ALL <select> elements (visible AND hidden) ──
     document.querySelectorAll('select').forEach(sel => {
-      const qid = sel.id || sel.name;
-      if (!qid || seen.has(qid)) return;
+      // No id or name (Lever's "What is your location?" <select
+      // class="candidate-location">): a generated id, like the text pass.
+      const qid = sel.id || sel.name || ('q_' + qIndex);
+      if (seen.has(qid)) return;
       // C3b: skip CSRF/tracking/honeypot fields entirely — never send them
       // to the AI, never offer them to the user as autofill candidates.
       if (!isFieldEligible(sel)) return;
@@ -6956,6 +6958,7 @@
   const MAX_SALARY_RE = /\bmax(?:imum)? (?:desired |expected )?(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) max(?:imum)?\b/;
   const STREET_ADDRESS_RE = /\baddress (?:line )?1\b|\baddress line one\b|\bstreet address\b/;
   const START_DATE_OFFSET_DAYS = 7;
+  const SIGNATURE_DATE_RE = /\bsignature date\b|\bdate signed\b|\bsigned date\b|\btoday'?s date\b/;
   // A form's own signature date — Workday's formField-dateSignedOn, or a
   // date field labelled just "Date" / "Today's Date" / "Date Signed".
   const WORKDAY_SIGNED_DATE_KEY_RE = /^(?:dateSigned(?:On)?|signatureDate|signedDate|todaysDate)$/i;
@@ -7131,7 +7134,13 @@
       if (shouldKeepExistingAnswer(el) || (el.value || '').trim()) continue;
       const words = fieldWords(el);
       let value = '';
-      if (AVAILABLE_TO_START_RE.test(words)) {
+      if (SIGNATURE_DATE_RE.test(words) || (/^date$/i.test((getFieldLabel(el) || '').replace(/[*:]/g, '').trim())
+        && globalThis.JMPhoneFormat && globalThis.JMPhoneFormat.dateFormatForField(el))) {
+        // A form's own signature date (Lever's disability form:
+        // name="eeo[disabilitySignatureDate]", placeholder MM/DD/YYYY): today.
+        value = formatDateForField(el, new Date());
+        if (!(await fillDateField(el, value))) continue;
+      } else if (AVAILABLE_TO_START_RE.test(words)) {
         const date = new Date();
         date.setDate(date.getDate() + START_DATE_OFFSET_DAYS);
         value = formatDateForField(el, date);
@@ -7155,6 +7164,55 @@
       await sleep(FIELD_FILL_PACE_MS);
     }
     return filled;
+  }
+
+  // A question asking where the candidate is: location / country / state /
+  // province / city / where you live.
+  const LOCATION_QUESTION_RE = /\b(?:location|country|state|province|city|where (?:do|are) you (?:live|located|based|reside)|reside|residence)\b/i;
+
+  /**
+   * The option of a location <select> for the saved location: the country
+   * when the list has it (by name, or "US"/"USA" for the United States),
+   * else the state (full name, or its abbreviation on a list of states),
+   * else the city. The list decides — a country list gets the country
+   * even for "What is your location?" (Lever), a state list the state.
+   * A state abbreviation is only matched on a list of states, never on a
+   * country list ("NC" there is New Caledonia).
+   * @param {HTMLSelectElement} sel
+   * @returns {Promise<{text: string, value: string}|null>}
+   */
+  async function pickLocationOption(sel) {
+    let qaList = [];
+    let profile = {};
+    try { qaList = await sendMessage({ type: 'GET_QA_LIST' }) || []; } catch (_) {}
+    try { profile = await sendMessage({ type: 'GET_PROFILE', resumeId: _activeResumeId }) || {}; } catch (_) {}
+    const full = findSavedLocationAnswer(qaList) || profile.location || '';
+    if (!full) return null;
+    const options = Array.from(sel.options)
+      .map(o => ({ text: (o.textContent || '').trim(), value: o.value }))
+      .filter(o => o.value && o.text && !/^(select|choose|--)/i.test(o.text));
+    const norm = (t) => String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const byText = (t) => t && options.find(o => norm(o.text) === norm(t));
+
+    const country = locationPartFor(full, 'country', qaList);
+    const isUs = /^(united states|usa?|united states of america)$/i.test(country || '');
+    const countryHit = byText(country)
+      || (isUs && (byText('United States of America') || options.find(o => /^(us|usa)$/i.test(o.value))));
+    if (countryHit) return countryHit;
+
+    const state = locationPartFor(full, 'state', qaList);
+    const stateHit = byText(state);
+    if (stateHit) return stateHit;
+    const stateNames = new Set(Object.values(US_STATE_NAMES));
+    const isStateList = options.filter(o => stateNames.has(norm(o.text))).length >= 10;
+    if (isStateList && state) {
+      const abbr = Object.keys(US_STATE_NAMES).find(k => k.length === 2 && US_STATE_NAMES[k] === norm(state));
+      const abbrHit = abbr && options.find(o => norm(o.value) === abbr || norm(o.text) === abbr);
+      if (abbrHit) return abbrHit;
+    }
+
+    const city = locationPartFor(full, 'city', qaList);
+    return byText(city) || (city && options.find(o => norm(o.text).startsWith(norm(city) + ','))) || null;
   }
 
   async function fillFormFromAnswers(answers) {
@@ -7261,7 +7319,15 @@
         } else if (ref.type === 'yesno_toggle') {
           const btn = fillYesNoToggle(ref, val);
           if (btn) {
-            showAutofillBadge(btn);
+            // Did the page take it? Give it a moment to show the press,
+            // then press the live button once more if it didn't.
+            if (!(await waitForYesNoPressed(ref, val))) {
+              fillYesNoToggle(ref, val);
+              if (!(await waitForYesNoPressed(ref, val))) {
+                console.warn('[JobMatch AI][Auto-Bid] Yes/No "%s": "%s" did not register', ref.questionText, val);
+              }
+            }
+            showAutofillBadge(yesNoButtonFor(ref, val) || btn);
             filled++;
             await sleep(CHOICE_CLICK_PACE_MS);
           } else {
@@ -7331,6 +7397,20 @@
     // Phase 2: native <select> dropdowns, all matched concurrently.
     await Promise.all(nativeDropdowns.map(async ({ qid, ref, val, questionText }) => {
       try {
+        // A location question: the saved location's country, state or city —
+        // whichever the list itself offers.
+        if (LOCATION_QUESTION_RE.test(questionText || '') && ref.el && ref.el.tagName === 'SELECT') {
+          const hit = await pickLocationOption(ref.el);
+          if (hit) {
+            ref.el.value = hit.value;
+            ref.el.dispatchEvent(new Event('input', { bubbles: true }));
+            ref.el.dispatchEvent(new Event('change', { bubbles: true }));
+            console.info('[JobMatch AI][Auto-Bid] location select "%s" → "%s"', questionText, hit.text);
+            showAutofillBadge(ref.el);
+            filled++;
+            return;
+          }
+        }
         // For native selects: use deterministic matcher via background for better accuracy
         if (questionText && ref.optionTexts && ref.optionTexts.length > 0) {
           try {
@@ -7688,6 +7768,43 @@
   };
 
   /**
+   * A place autocomplete that may only know countries: types the city, and
+   * when that lists nothing types the country instead, then picks the best
+   * suggestion and leaves the field (Ashby commits on focus change). With
+   * nothing listed for either, the city stays typed in. Confirmed on Ashby
+   * (turquoise-health): "Location — Our roles are fully remote within the
+   * United States." listed nothing for a city.
+   * @returns {Promise<boolean>}
+   */
+  async function typeCityThenCountry(input, questionText, city, country, fullLocation) {
+    let typed = city;
+    let before = new Set(document.querySelectorAll('[role="option"]'));
+    console.info('[JobMatch AI][Auto-Bid] location field "%s" — typing "%s"', questionText, city);
+    typeIntoAutocomplete(input, city);
+    let suggestions = await waitForNewSuggestionOptions(before, 5000);
+    if (!suggestions.length) {
+      console.info('[JobMatch AI][Auto-Bid] location field "%s" — "%s" listed nothing, typing the country "%s"', questionText, city, country);
+      before = new Set(document.querySelectorAll('[role="option"]'));
+      typeIntoAutocomplete(input, country);
+      suggestions = await waitForNewSuggestionOptions(before, 5000);
+      typed = country;
+    }
+    if (suggestions.length) {
+      const exact = suggestions.find(sg => sg.text.trim().toLowerCase() === typed.toLowerCase());
+      const pick = exact || findBestLocationMatch(suggestions, typed === city ? fullLocation : typed);
+      console.info('[JobMatch AI][Auto-Bid] location field "%s" → "%s"', questionText, pick.text);
+      clickElement(pick.el);
+      await sleep(200);
+      if (input.isConnected) dispatchFocusEvents(input, 'out');
+      return true;
+    }
+    // Nothing listed for either — leave the city typed in.
+    typeIntoAutocomplete(input, city);
+    if (input.isConnected) dispatchFocusEvents(input, 'out');
+    return true;
+  }
+
+  /**
    * Types into a search-as-you-type field (place autocomplete) the way a
    * person does: focus it and type — WITHOUT leaving it. fillInput() ends
    * with blur/focusout to commit plain text fields, but on an autocomplete
@@ -8018,6 +8135,15 @@
         // currently residing in"), not the city.
         const kind = locationKindAsked(questionText, input);
         const city = locationPartFor(fullLocation, kind, qaList);
+        // When the asked-for part lists nothing (a field that only knows
+        // countries — Ashby, turquoise-health: "Our roles are fully remote
+        // within the United States."), the country is tried next.
+        if (city && kind === 'city') {
+          const country = locationPartFor(fullLocation, 'country', qaList);
+          if (country && country.toLowerCase() !== city.toLowerCase()) {
+            return await typeCityThenCountry(input, questionText, city, country, fullLocation);
+          }
+        }
         if (city) {
           console.info('[JobMatch AI][Auto-Bid] location field "%s" wants the %s — typing "%s"', questionText, kind, city);
           // Snapshot first, so only the suggestions THIS typing produces are
@@ -9465,6 +9591,18 @@
    *   answer isn't clearly yes or no (skip rather than guess).
    */
   function fillYesNoToggle(ref, value) {
+    const btn = yesNoButtonFor(ref, value);
+    if (!btn) return null;
+    if (btn.getAttribute('aria-pressed') !== 'true') clickNatively(btn);
+    return btn;
+  }
+
+  /**
+   * The live Yes or No button of a toggle for `value` — re-found through
+   * the decoy input when a click re-rendered the group. Doesn't click.
+   * @returns {HTMLButtonElement|null}
+   */
+  function yesNoButtonFor(ref, value) {
     const v = String(value).trim().toLowerCase();
     let option = null;
     if (/^(no|false|n)\b|^i (do|will|am) not\b|^i don't\b|^not\b/.test(v)) option = 'no';
@@ -9482,8 +9620,18 @@
         (b.getAttribute('data-option') || b.textContent).trim().toLowerCase() === option);
     }
     if (!btn || !btn.isConnected) return null;
-    if (btn.getAttribute('aria-pressed') !== 'true') clickNatively(btn);
     return btn;
+  }
+
+  /** Waits up to `maxWaitMs` for the toggle's button for `value` to show pressed. */
+  async function waitForYesNoPressed(ref, value, maxWaitMs = 1200) {
+    const start = Date.now();
+    for (;;) {
+      const b = yesNoButtonFor(ref, value);
+      if (b && b.getAttribute('aria-pressed') === 'true') return true;
+      if (Date.now() - start >= maxWaitMs) return false;
+      await sleep(150);
+    }
   }
 
   /**
@@ -9562,9 +9710,14 @@
     // re-render (and detach) the element, so the "leave" events go to its
     // still-attached field container in that case.
     const container = el.closest('[data-field-path], fieldset, [role="radiogroup"], [role="group"]') || el.parentElement;
+    // Pointer events too: some toggles (Ashby's Yes/No buttons) react to
+    // pointerdown/pointerup, not only mouse events and click.
+    const pointer = { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    if (typeof PointerEvent === 'function') el.dispatchEvent(new PointerEvent('pointerdown', pointer));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
     el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    if (typeof PointerEvent === 'function') el.dispatchEvent(new PointerEvent('pointerup', pointer));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     el.click();
     const leaveTarget = el.isConnected ? el : (container && container.isConnected ? container : null);

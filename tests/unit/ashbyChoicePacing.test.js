@@ -75,6 +75,8 @@ function loadFill() {
       btn.click();
       return btn;
     }
+    function yesNoButtonFor(ref, val) { return val === 'Yes' ? ref.yesBtn : ref.noBtn; }
+    async function waitForYesNoPressed(ref, val) { return yesNoButtonFor(ref, val).getAttribute('aria-pressed') === 'true'; }
     async function sendMessage() { return {}; }
     async function fillCustomDropdown() { return true; }
     async function fillFormLegacy() { return { filled: 0, skipped: [] }; }

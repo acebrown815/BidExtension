@@ -372,9 +372,13 @@
     // re-render (and detach) the element, so the "leave" events go to its
     // still-attached field container in that case.
     const container = el.closest('[data-field-path], fieldset, [role="radiogroup"], [role="group"]') || el.parentElement;
+    // Pointer events too: some toggles (Ashby's Yes/No buttons) react to
+    // pointerdown/pointerup, not only mouse events and click.
+    if (typeof PointerEvent === 'function') el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     el.dispatchEvent(new FocusEvent('focus', { bubbles: false }));
     el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    if (typeof PointerEvent === 'function') el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
     el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     el.click();
     const leaveTarget = el.isConnected ? el : (container && container.isConnected ? container : null);
@@ -610,6 +614,33 @@
       dbg(`Direct fill yes/no toggle: "${label}" -> ${wantsYes ? 'Yes' : 'No'}`);
       clickNatively(target);
       await paceChoiceClick();
+      // Did the page take it? (The button can be re-rendered — re-find it.)
+      const wanted = wantsYes ? 'yes' : 'no';
+      const live = () => {
+        const g = target.isConnected ? target.parentElement : (hiddenInput && hiddenInput.name && document.querySelector(`input[name="${CSS.escape(hiddenInput.name)}"]`)?.parentElement);
+        return g && Array.from(g.querySelectorAll('button[aria-pressed]')).find(b =>
+          (b.getAttribute('data-option') || b.textContent).trim().toLowerCase() === wanted);
+      };
+      // Give the page a moment to show the press before pressing again —
+      // pressing an already-chosen toggle would switch it back off.
+      const waitPressed = async () => {
+        for (let i = 0; i < 8; i++) {
+          const b = live();
+          if (b && b.getAttribute('aria-pressed') === 'true') return b;
+          await new Promise(r => setTimeout(r, 150));
+        }
+        return live();
+      };
+      let pressed = await waitPressed();
+      if (pressed && pressed.getAttribute('aria-pressed') !== 'true') {
+        clickNatively(pressed);
+        pressed = await waitPressed();
+      }
+      if (!pressed || pressed.getAttribute('aria-pressed') !== 'true') {
+        // Not recorded as filled — the content-script pass tries again.
+        dbg(`Direct fill yes/no toggle: "${label}" did not register`);
+        continue;
+      }
       filledLabels.add(label);
       filled++;
     }
