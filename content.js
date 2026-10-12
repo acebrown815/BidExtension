@@ -7114,14 +7114,20 @@
   // ── Answers worked out from saved ones ──────────────────────────
   // Filled before the Q&A/AI passes, and only into empty fields:
   //   - "Available to Start": one week from today;
-  //   - a maximum desired salary: 1.2 × the saved desired salary;
+  //   - a maximum desired salary: 1.2 × the saved desired salary; a
+  //     minimum one: the saved desired salary;
+  //   - a Workday start-date picker ("What is your earliest available start
+  //     date?"): next Monday;
   //   - "Address Line 1": the saved "Street Address".
   // Confirmed on Paylocity (recruiting.paylocity.com): the AI put the same
   // 140000 in both minimum and maximum salary, and the street-address
   // search box was treated as a dropdown and left empty.
 
   const AVAILABLE_TO_START_RE = /\bavailab(?:le|ility) (?:to )?start\b|\bavailab(?:le|ility) (?:start )?date\b|\bdate available\b|\bearliest (?:possible |available )?start\b|\bwhen (?:can|could) you start\b/;
-  const MAX_SALARY_RE = /\bmax(?:imum)? (?:desired |expected )?(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) max(?:imum)?\b/;
+  // Workday (exactcare.wd1): "What do you expect the minimum / maximum
+  // Annual Salary for this position to be?"
+  const MAX_SALARY_RE = /\bmax(?:imum)? (?:(?:desired|expected|annual|yearly|base) )*(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) max(?:imum)?\b/;
+  const MIN_SALARY_RE = /\bmin(?:imum)? (?:(?:desired|expected|annual|yearly|base) )*(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) min(?:imum)?\b/;
   const STREET_ADDRESS_RE = /\baddress (?:line )?1\b|\baddress line one\b|\bstreet address\b/;
   const START_DATE_OFFSET_DAYS = 7;
   const SIGNATURE_DATE_RE = /\bsignature date\b|\bdate signed\b|\bsigned date\b|\btoday'?s date\b/;
@@ -7138,7 +7144,8 @@
    * @returns {string}
    */
   function fieldWords(el) {
-    return [getFieldLabel(el), el.getAttribute('data-for'), el.id, el.name, el.getAttribute('data-automation-id')]
+    // Workday's question lives in the field's <legend> (getFieldLabel can miss it).
+    return [getFieldLabel(el), typeof getWorkdayFieldLabel === 'function' && getWorkdayFieldLabel(el), el.getAttribute('data-for'), el.id, el.name, el.getAttribute('data-automation-id')]
       .filter(Boolean).join(' ')
       .replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[._\-]+/g, ' ').replace(/\s+/g, ' ')
       .toLowerCase();
@@ -7231,6 +7238,17 @@
     return !!(el.value || '').trim();
   }
 
+  /**
+   * The next Monday after `from` (a week on when `from` is a Monday).
+   * @param {Date} from
+   * @returns {Date}
+   */
+  function nextMonday(from) {
+    const d = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    d.setDate(d.getDate() + (((8 - d.getDay()) % 7) || 7));
+    return d;
+  }
+
   /** The saved desired salary as a number ("140k" → 140000), or null. */
   function savedDesiredSalary(qaList) {
     const qa = (qaList || []).find(q => q && q.answer
@@ -7283,14 +7301,18 @@
     for (const field of document.querySelectorAll('[data-automation-id^="formField-"]')) {
       if (field.offsetParent === null || !field.querySelector('[data-automation-id="dateInputWrapper"]')) continue;
       const key = field.getAttribute('data-automation-id').slice('formField-'.length);
-      const labelEl = field.querySelector('legend label, label');
+      // The question is a <label>, or rich text in the <legend>
+      // (exactcare.wd1: "What is your earliest available start date?").
+      const labelEl = field.querySelector('legend label, label') || field.querySelector('legend');
       const label = ((labelEl && labelEl.textContent) || '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
-      if (!WORKDAY_SIGNED_DATE_KEY_RE.test(key) && !WORKDAY_SIGNED_DATE_LABEL_RE.test(label)) continue;
+      const isSignature = WORKDAY_SIGNED_DATE_KEY_RE.test(key) || WORKDAY_SIGNED_DATE_LABEL_RE.test(label);
+      const isStart = !isSignature && AVAILABLE_TO_START_RE.test(label.toLowerCase());
+      if (!isSignature && !isStart) continue;
       const parts = Array.from(field.querySelectorAll('input[data-automation-id$="-input"]'));
       if (parts.length && parts.every(el => (el.value || '').trim()) && !parts.some(fieldShowsError)) continue;
-      const now = new Date();
-      await fillWorkdayDateField(field, { month: now.getMonth() + 1, day: now.getDate(), year: now.getFullYear() });
-      console.info('[JobMatch AI][Auto-Bid] "%s" (%s) → today', label || key, key);
+      const d = isStart ? nextMonday(new Date()) : new Date();
+      await fillWorkdayDateField(field, { month: d.getMonth() + 1, day: d.getDate(), year: d.getFullYear() });
+      console.info('[JobMatch AI][Auto-Bid] "%s" (%s) → %s', label || key, key, isStart ? 'next Monday' : 'today');
       filled++;
     }
 
@@ -7298,6 +7320,8 @@
     for (const el of inputs) {
       if (el.offsetParent === null || el.disabled || el.readOnly || !isFieldEligible(el)) continue;
       if (shouldKeepExistingAnswer(el) || (el.value || '').trim()) continue;
+      // A Workday date picker's Month/Day/Year boxes — filled above.
+      if (el.closest('[data-automation-id="dateInputWrapper"]')) continue;
       const words = fieldWords(el);
       let value = '';
       if (SIGNATURE_DATE_RE.test(words) || (/^date$/i.test((getFieldLabel(el) || '').replace(/[*:]/g, '').trim())
@@ -7315,6 +7339,11 @@
         const base = savedDesiredSalary(qaList);
         if (!base) continue;
         value = String(Math.round(base * MAX_SALARY_FACTOR));
+        if (!fillInput(el, value)) continue;
+      } else if (MIN_SALARY_RE.test(words)) {
+        const base = savedDesiredSalary(qaList);
+        if (!base) continue;
+        value = String(Math.round(base));
         if (!fillInput(el, value)) continue;
       } else if (STREET_ADDRESS_RE.test(words) && !/\bline 2\b|\baddress 2\b/.test(words)) {
         value = savedAnswer(qaList, /\bstreet address\b|^address(?: line 1)?$/i, /line 2|apt|suite|unit/i);
@@ -8878,7 +8907,7 @@
    * @param {string} previousSignature
    * @param {number} [maxWaitMs=6000]
    */
-  async function waitForWorkdayPromptLevel(input, previousSignature, maxWaitMs = 6000) {
+  async function waitForWorkdayPromptLevel(input, previousSignature, maxWaitMs = 6000, { stablePolls = 1, accept = null } = {}) {
     const start = Date.now();
     let last = '';
     let stable = 0;
@@ -8891,9 +8920,11 @@
       const titleEl = popup.querySelector('[data-automation-id="promptTitle"]');
       const quickSig = (titleEl ? titleEl.textContent.trim() : '') + '|' + Array.from(rows, workdayPromptRowText).join('|');
       if (quickSig === last) stable++; else { stable = 0; last = quickSig; }
-      if (stable >= 1) {
+      if (stable >= stablePolls) {
         const level = await readWorkdayPromptLevel(popup);
-        if (level.options.length && level.signature !== previousSignature) return { popup, ...level };
+        // `accept` rejects a list that isn't the answer to THIS search yet
+        // (the previous search's results, still on screen while it loads).
+        if (level.options.length && level.signature !== previousSignature && (!accept || accept(level))) return { popup, ...level };
       }
     }
     return null;
@@ -8950,8 +8981,7 @@
       // Search-style prompts ("Field of Study": "returns the first 100
       // results alphabetically") — type the term and press Enter, as a
       // person would, instead of paging through the whole list.
-      fillInput(input, opts.searchText);
-      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      await searchWorkdayPrompt(input, opts.searchText);
       level = await waitForWorkdayPromptLevel(input, '', 4000);
     }
     if (!level) {
@@ -9413,7 +9443,163 @@
       setStatus(`Adding ${education.length} education entr${education.length === 1 ? 'y' : 'ies'}...`, 'info');
       result.education = await fillWorkdayRepeatableSection('Education-section', education, fillWorkdayEducationPanel);
     }
+    result.skills = await fillWorkdaySkills(profile);
     return result;
+  }
+
+  /**
+   * Sets a Workday prompt's search text WITHOUT leaving the box: Workday
+   * clears the search text when the box loses focus, so fillInput()'s
+   * focus-out wiped it before Enter was pressed and nothing was searched.
+   * @param {HTMLInputElement} input
+   * @param {string} text
+   */
+  function setWorkdaySearchText(input, text) {
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setValue.call(input, text);
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, data: text || null, inputType: text ? 'insertText' : 'deleteContentBackward' }));
+  }
+
+  /**
+   * Types a search term into a Workday prompt key by key, staying in the
+   * box, then presses Enter — Workday searches on Enter, not as you type.
+   * @param {HTMLInputElement} input
+   * @param {string} text
+   */
+  async function searchWorkdayPrompt(input, text) {
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    clickElement(input);
+    try { input.focus(); } catch (_) {}
+    if (document.activeElement !== input) input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    setWorkdaySearchText(input, '');
+    for (const ch of text) {
+      const init = { key: ch, keyCode: ch.charCodeAt(0), which: ch.charCodeAt(0), bubbles: true, cancelable: true };
+      const notCancelled = input.dispatchEvent(new KeyboardEvent('keydown', init));
+      input.dispatchEvent(new KeyboardEvent('keypress', init));
+      if (notCancelled) {
+        setValue.call(input, (input.value || '') + ch);
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+      }
+      input.dispatchEvent(new KeyboardEvent('keyup', init));
+      await sleep(20);
+    }
+    // Typed into a re-rendered box, or the keys were ignored: write it whole.
+    if (input.value !== text) setWorkdaySearchText(input, text);
+    await sleep(150);
+    const enter = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, charCode: 13, bubbles: true, cancelable: true };
+    input.dispatchEvent(new KeyboardEvent('keydown', enter));
+    input.dispatchEvent(new KeyboardEvent('keypress', enter));
+    input.dispatchEvent(new KeyboardEvent('keyup', enter));
+  }
+
+  // At most this many skills are added to Workday's "Skills" prompt.
+  const MAX_WORKDAY_SKILLS = 15;
+  // How long one skill search may take to show its results, and the pause
+  // before searching once more when none came.
+  const WORKDAY_SKILL_SEARCH_WAIT_MS = 8000;
+  const WORKDAY_SKILL_RETRY_MS = 1000;
+  const skillKey = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9+#]/g, '');
+
+  /**
+   * The skills to add, best first: the ones the analysis found in both the
+   * resume and the job description, then the rest of the resume's skills.
+   * @param {Object} profile - the active resume's parsed profile
+   * @returns {string[]}
+   */
+  function skillsForWorkday(profile) {
+    const asText = (s) => String((s && typeof s === 'object' ? (s.name || s.skill) : s) || '').trim();
+    const seen = new Set();
+    const out = [];
+    const matching = (currentAnalysis && Array.isArray(currentAnalysis.matchingSkills)) ? currentAnalysis.matchingSkills : [];
+    const resume = Array.isArray(profile && profile.skills) ? profile.skills : [];
+    for (const s of [...matching, ...resume].map(asText)) {
+      const key = s.toLowerCase().replace(/[^a-z0-9+#]/g, '');
+      // Skip blanks and sentence-like entries ("Strong communication with…").
+      if (!key || seen.has(key) || s.length > 40 || s.split(/\s+/).length > 4) continue;
+      seen.add(key);
+      out.push(s);
+    }
+    return out.slice(0, MAX_WORKDAY_SKILLS);
+  }
+
+  /**
+   * The search result that IS this skill — "Node.js" for "Node.js" or
+   * "NodeJS"; "React.js" for "React" — never a merely related one
+   * ("Node.js Development", "NodeBox").
+   * @param {Array<{text: string}>} options
+   * @param {string} skill
+   */
+  function findSkillOption(options, skill) {
+    const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9+#]/g, '');
+    const want = norm(skill);
+    const bare = (t) => norm(t).replace(/js$/, '');
+    return options.find(o => norm(o.text) === want)
+      || options.find(o => bare(o.text) === bare(skill) && bare(skill).length >= 3)
+      || null;
+  }
+
+  /**
+   * Workday My Experience "Skills" ("Type to Add Skills"): a multi-select
+   * search prompt — type a skill, press Enter, tick it in the results
+   * popup (rendered straight into <body>), and it becomes a pill. Adds the
+   * skills from skillsForWorkday() that are not there yet; a skill whose
+   * search returns nothing that is that skill is skipped.
+   * @param {Object} profile
+   * @returns {Promise<number>} skills added
+   */
+  async function fillWorkdaySkills(profile) {
+    const input = document.querySelector('[data-automation-id="formField-skills"] input[data-uxi-widget-type="selectinput"]');
+    if (!input || input.offsetParent === null) return 0;
+    if (!currentAnalysis) await recoverCachedAnalysis();
+    const skills = skillsForWorkday(profile);
+    if (!skills.length) return 0;
+    const container = input.closest('[data-automation-id="multiSelectContainer"]') || input.parentElement;
+    const pills = () => Array.from(container.querySelectorAll('[data-automation-id="selectedItem"]'))
+      .map(p => (p.querySelector('[data-automation-id="promptOption"]')?.getAttribute('data-automation-label') || p.textContent || '').trim());
+    const pressKey = (key, code, keyCode) => input.dispatchEvent(new KeyboardEvent('keydown', { key, code, keyCode, which: keyCode, bubbles: true, cancelable: true }));
+    setStatus(`Adding skills (${skills.length})...`, 'info');
+    let added = 0;
+    let lastSignature = '';
+    for (const skill of skills) {
+      if (pills().some(p => findSkillOption([{ text: p }], skill))) continue;
+      // Slow searches: wait for a settled list that answers THIS search
+      // (mentions the skill), and search once more if none comes — a short
+      // fixed wait read the previous search's list, or gave up, for skills
+      // that were in the results a moment later.
+      const term = skillKey(skill).replace(/js$/, '');
+      const answersThisSearch = (lvl) => lvl.options.some(o => skillKey(o.text).includes(term));
+      let level = null;
+      let opt = null;
+      for (let attempt = 0; attempt < 2 && !opt; attempt++) {
+        if (attempt) await sleep(WORKDAY_SKILL_RETRY_MS);
+        try { input.scrollIntoView({ block: 'center' }); } catch (_) {}
+        input.focus();
+        await searchWorkdayPrompt(input, skill);
+        level = await waitForWorkdayPromptLevel(input, lastSignature, WORKDAY_SKILL_SEARCH_WAIT_MS, { stablePolls: 2, accept: answersThisSearch });
+        if (level) lastSignature = level.signature;
+        opt = level && findSkillOption(level.options, skill);
+        // Results that mention the skill but don't include it: searching
+        // again won't change that.
+        if (level && !opt) break;
+      }
+      if (!opt) {
+        setWorkdaySearchText(input, '');
+        continue;
+      }
+      const before = pills().length;
+      // A click on a row that was still re-rendering can be lost: click
+      // once more if no pill shows up.
+      for (let click = 0; click < 2 && pills().length === before; click++) {
+        if (!(await clickWorkdayPromptOption(level.popup, opt))) break;
+        for (let i = 0; i < 15 && pills().length === before; i++) await sleep(200);
+      }
+      if (pills().length > before) added++;
+      if ((input.value || '').trim()) setWorkdaySearchText(input, '');
+      await sleep(FIELD_FILL_PACE_MS);
+    }
+    pressKey('Escape', 'Escape', 27);
+    await closeOpenWorkdayPopups();
+    return added;
   }
 
   /**

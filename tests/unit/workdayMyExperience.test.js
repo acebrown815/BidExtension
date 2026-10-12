@@ -91,8 +91,8 @@ function wireAddButtons() {
   wire('Education-section', educationPanel);
 }
 
-function load(profile) {
-  const factory = new Function('profile', ` // eslint-disable-line no-new-func
+function load(profile, analysis = null) {
+  const factory = new Function('profile', 'analysis', ` // eslint-disable-line no-new-func
     const sleep = (ms) => new Promise(r => setTimeout(r, Math.min(ms, 50)));
     const clickElement = (el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     function fillInput(el, value) { el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); return true; }
@@ -104,10 +104,13 @@ function load(profile) {
     const findNextStepButton = () => document.querySelector('[data-automation-id="pageFooterNextButton"]');
     const findFinalSubmitButton = () => null;
     const hasVisibleValidationErrors = () => !!document.querySelector('[data-automation-id="errorHeading"]');
+    let currentAnalysis = analysis;
+    const FIELD_FILL_PACE_MS = 0;
+    async function recoverCachedAnalysis() { return null; }
     ${HELPERS}
-    return { fillWorkdayMyExperienceStep, parseResumeDateRange, findExactOptionByText, withAnswerHint, waitForWorkdayStepRendered, workdayActiveStepName, workdayStepContentReady, waitForWorkdayStepContent };
+    return { fillWorkdaySkills, skillsForWorkday, findSkillOption, fillWorkdayMyExperienceStep, parseResumeDateRange, findExactOptionByText, withAnswerHint, waitForWorkdayStepRendered, workdayActiveStepName, workdayStepContentReady, waitForWorkdayStepContent };
   `);
-  return factory(profile);
+  return factory(profile, analysis);
 }
 
 const PROFILE = {
@@ -144,7 +147,7 @@ describe('fillWorkdayMyExperienceStep', { timeout: 20000 }, () => {
 
   it('clicks Add / Add Another and fills one Work Experience panel per resume entry', async () => {
     const result = await load(PROFILE).fillWorkdayMyExperienceStep();
-    expect(result).toEqual({ experience: 2, education: 1 });
+    expect(result).toEqual({ experience: 2, education: 1, skills: 0 });
 
     const exp = document.querySelectorAll('[aria-labelledby="Work-Experience-section"] [aria-labelledby$="-panel"]');
     expect(exp).toHaveLength(2);
@@ -182,7 +185,7 @@ describe('fillWorkdayMyExperienceStep', { timeout: 20000 }, () => {
 
   it('never touches the Websites section or adds panels with no resume entries', async () => {
     const result = await load({ experience: [], education: [] }).fillWorkdayMyExperienceStep();
-    expect(result).toEqual({ experience: 0, education: 0 });
+    expect(result).toEqual({ experience: 0, education: 0, skills: 0 });
     expect(document.querySelectorAll('[aria-labelledby$="-panel"]')).toHaveLength(0);
   });
 
@@ -215,7 +218,7 @@ describe('Workday steps that render late', { timeout: 20000 }, () => {
     document.body.innerHTML = progressBar('My Experience') + '<div id="stepHost"></div>';
     setTimeout(() => { document.getElementById('stepHost').innerHTML = PAGE_HTML; wireAddButtons(); }, 600);
     const result = await load(PROFILE).fillWorkdayMyExperienceStep();
-    expect(result).toEqual({ experience: 2, education: 1 });
+    expect(result).toEqual({ experience: 2, education: 1, skills: 0 });
   });
 
   it('reads the active step from the progress bar', () => {
@@ -271,5 +274,99 @@ describe('waitForWorkdayStepContent', { timeout: 20000 }, () => {
     expect(Date.now() - started).toBeLessThan(300);
     document.body.innerHTML = '<form><input id="x"></form>';
     expect(wd.workdayStepContentReady()).toBe(true);
+  });
+});
+
+// Workday My Experience "Skills" (exactcare.wd1.myworkdayjobs.com): a
+// multi-select search prompt — type a skill, press Enter, and a "Search
+// Results" popup (rendered straight into <body>) lists matches; ticking
+// one adds a pill. Markup trimmed from the live page.
+describe('Workday Skills prompt', () => {
+  const WIDGET_ID = 'a189aafc-28c5-4084-a041-24acfc14c740';
+  const CATALOG = ['Node.js', 'Node.js Development', 'React.js', 'JavaScript', 'Moment.js', 'NodeBox', 'Express.js', 'Python', 'Python (Programming Language)', 'Kubernetes'];
+  const SKILLS_FIELD = `
+    <div role="group" aria-labelledby="Skills-section"><h4 id="Skills-section">Skills</h4>
+      <div data-automation-id="formField-skills" data-fkit-id="skills--skills"><label for="skills--skills">Type to Add Skills</label>
+        <div data-automation-id="multiSelectContainer" id="${WIDGET_ID}" data-uxi-widget-type="multiselect">
+          <input placeholder="Search" aria-required="false" autocomplete="off" data-uxi-widget-type="selectinput" data-uxi-multiselect-id="${WIDGET_ID}" id="skills--skills" value="">
+          <ul role="listbox" data-automation-id="selectedItemList"></ul>
+        </div></div></div>`;
+  const pill = (label) => `<li role="presentation"><div role="option" data-automation-id="selectedItem"><p data-automation-id="promptOption" data-automation-label="${label}">${label}</p></div></li>`;
+
+  /** Workday's behaviour: search on Enter only; clicking a result adds a pill. */
+  function wireWorkday(searches, { delayMs = 0, loseFirstClick = false } = {}) {
+    let clicks = 0;
+    const input = document.getElementById('skills--skills');
+    // Live: Workday clears the search text when the box loses focus — a
+    // fill that blurred before pressing Enter searched for nothing.
+    input.addEventListener('focusout', () => { input.value = ''; });
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      const q = input.value.toLowerCase().replace(/[^a-z0-9]/g, '');
+      searches.push(input.value);
+      // Slow: the previous results stay on screen until the new ones load.
+      setTimeout(() => render(q), delayMs);
+    });
+    const render = (q) => {
+      document.querySelector('[data-automation-id="responsiveMonikerPrompt"]')?.parentElement.remove();
+      const hits = CATALOG.filter(c => c.toLowerCase().replace(/[^a-z0-9]/g, '').includes(q));
+      const wrap = document.createElement('div');
+      wrap.setAttribute('data-behavior-click-outside-close', 'topmost');
+      wrap.innerHTML = `<div data-associated-widget="${WIDGET_ID}" data-automation-id="responsiveMonikerPrompt" data-uxi-prompt-type="multiselect">
+        <div data-automation-id="promptTitle">Search Results</div>
+        <div data-automation-id="activeListContainer" role="listbox">${hits.map((h, i) => `
+          <div aria-setsize="${hits.length}" id="menuItem-${i}-${h.replace(/\W/g, '')}" data-automation-id="menuItem" role="option" aria-posinset="${i + 1}">
+            <div data-automation-id="promptLeafNode"><input type="checkbox" data-automation-id="checkboxPanel">
+              <div data-automation-id="promptOption" data-automation-label="${h}">${h}</div></div></div>`).join('')}
+        </div></div>`;
+      document.body.appendChild(wrap);
+      wrap.querySelectorAll('[data-automation-id="promptOption"]').forEach(o => o.addEventListener('click', () => {
+        if (loseFirstClick && clicks++ === 0) return; // landed mid re-render
+        document.querySelector('[data-automation-id="selectedItemList"]').insertAdjacentHTML('beforeend', pill(o.getAttribute('data-automation-label')));
+      }));
+    };
+  }
+  const pills = () => Array.from(document.querySelectorAll('[data-automation-id="selectedItem"] [data-automation-id="promptOption"]')).map(p => p.getAttribute('data-automation-label'));
+
+  it('types each skill, presses Enter, and ticks the result that IS that skill', async () => {
+    document.body.innerHTML = SKILLS_FIELD;
+    const searches = [];
+    wireWorkday(searches);
+    const api = load({ skills: ['Python', 'Kubernetes', 'Leadership of cross-functional engineering teams'] },
+      { matchingSkills: ['Node.js', 'React', 'Rust'] });
+    const added = await api.fillWorkdaySkills({ skills: ['Python', 'Kubernetes', 'Leadership of cross-functional engineering teams'] });
+    // job-matched skills first; "Rust" has no result (searched once more in
+    // case it was slow); the sentence is skipped
+    expect(searches).toEqual(['Node.js', 'React', 'Rust', 'Rust', 'Python', 'Kubernetes']);
+    expect(pills()).toEqual(['Node.js', 'React.js', 'Python', 'Kubernetes']);
+    expect(added).toBe(4);
+  }, 40000);
+
+  it('waits for slow results (ignoring the previous list) and clicks again when a click is lost', async () => {
+    document.body.innerHTML = SKILLS_FIELD;
+    const searches = [];
+    wireWorkday(searches, { delayMs: 1500, loseFirstClick: true });
+    const api = load({}, { matchingSkills: ['Node.js', 'Python', 'Kubernetes'] });
+    expect(await api.fillWorkdaySkills({})).toBe(3);
+    expect(pills()).toEqual(['Node.js', 'Python', 'Kubernetes']);
+    expect(searches).toEqual(['Node.js', 'Python', 'Kubernetes']);
+  }, 30000);
+
+  it('skips skills already added as pills', async () => {
+    document.body.innerHTML = SKILLS_FIELD;
+    document.querySelector('[data-automation-id="selectedItemList"]').innerHTML = pill('Node.js') + pill('React.js');
+    const searches = [];
+    wireWorkday(searches);
+    const api = load({}, { matchingSkills: ['Node.js', 'React', 'JavaScript'] });
+    await api.fillWorkdaySkills({});
+    expect(searches).toEqual(['JavaScript']);
+    expect(pills()).toEqual(['Node.js', 'React.js', 'JavaScript']);
+  }, 20000);
+
+  it('picks the skill itself, never a related one', () => {
+    const { findSkillOption } = load({});
+    const opts = ['Node.js Development', 'NodeBox', 'Node.js'].map(text => ({ text }));
+    expect(findSkillOption(opts, 'NodeJS').text).toBe('Node.js');
+    expect(findSkillOption([{ text: 'Node.js Development' }, { text: 'NodeBox' }], 'Node.js')).toBeNull();
   });
 });

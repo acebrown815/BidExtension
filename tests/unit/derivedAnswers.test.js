@@ -31,6 +31,7 @@ const QA = [
 let derived;
 beforeAll(() => {
   const code = slice('  const AVAILABLE_TO_START_RE', '  async function fillFormFromAnswers(');
+  const workdayLabel = slice('  function getWorkdayFieldLabel(', '  /**\n   * Closes any OTHER open Workday popup');
   derived = (env) => new Function('env', ` // eslint-disable-line no-new-func
     const FIELD_FILL_PACE_MS = 0;
     const sleep = () => Promise.resolve();
@@ -50,8 +51,9 @@ beforeAll(() => {
     function dispatchFocusEvents() {}
     function showAutofillBadge() {}
     async function fillWorkdayDateField(field, date) { env.workdayDates.push([field.getAttribute('data-automation-id'), date]); }
+    ${workdayLabel}
     ${code}
-    return { fillDerivedAnswers, formatDateForField, fillDateField };
+    return { fillDerivedAnswers, formatDateForField, fillDateField, nextMonday };
   `)(env);
 });
 
@@ -74,15 +76,15 @@ const PAYLOCITY = `
   <div><label for="wh.startDate">Start Date</label><input id="wh.startDate" type="text" value=""></div>`;
 
 describe('derived answers', () => {
-  it('fills start date (+1 week), maximum salary (1.2 × desired) and the street address', async () => {
+  it('fills start date (+1 week), minimum (desired) and maximum salary (1.2 × desired) and the street address', async () => {
     document.body.innerHTML = PAYLOCITY;
     const api = derived(env);
-    expect(await api.fillDerivedAnswers()).toBe(3);
+    expect(await api.fillDerivedAnswers()).toBe(4);
     expect(document.getElementById('info.availableStartDate').value).toBe('10/16/2026');
     expect(document.getElementById('info.maximumDesiredSalary').value).toBe('168000');
     expect(document.getElementById('public-site-address-address-1').value).toBe('533 N Main St');
-    // not touched: the minimum (left to Q&A/AI), Line 2, a work-history start date
-    expect(document.getElementById('info.minimumDesiredSalary').value).toBe('');
+    expect(document.getElementById('info.minimumDesiredSalary').value).toBe('140000');
+    // not touched: Line 2, a work-history start date
     expect(document.getElementById('public-site-address-address-2').value).toBe('');
     expect(document.getElementById('wh.startDate').value).toBe('');
   });
@@ -238,5 +240,46 @@ describe('Workday signature date', () => {
     document.body.innerHTML = dateField('signature', 'Date') + dateField('dateSignedOn', 'Date', ['10', '01', '2026']);
     await derived(env).fillDerivedAnswers();
     expect(env.workdayDates.map(d => d[0])).toEqual(['formField-signature']);
+  });
+});
+
+// Workday (exactcare.wd1.myworkdayjobs.com, Senior Software Engineer
+// R-109039): the start-date picker and both salary boxes were left empty.
+// Their questions are rich text in the field's <legend>, not a <label>.
+describe('Workday start date and min/max salary', () => {
+  const START_DATE = `
+    <div data-automation-id="formField-3bac844e48ef1002064e9381d8160005" data-fkit-id="primaryQuestionnaire--3bac844e48ef1002064e9381d8160005"><fieldset><legend><div id="rich-label527"><div data-automation-id="richText"><p><span style="font-size:14px">What is your earliest available start date?<abbr title="required" class="requiredAsterisk">*</abbr></span></p></div></div></legend>
+      <div><div><div aria-hidden="true" id="helpText-x">current value is MM/DD/YYYY</div><div id="primaryQuestionnaire--3bac844e48ef1002064e9381d8160005" role="group" data-automation-id="dateInputWrapper">
+        <input role="spinbutton" aria-label="Month" id="m" data-automation-id="dateSectionMonth-input" value="" aria-invalid="true">/
+        <input role="spinbutton" aria-label="Day" id="d" data-automation-id="dateSectionDay-input" value="" aria-invalid="true">/
+        <input role="spinbutton" aria-label="Year" id="y" data-automation-id="dateSectionYear-input" value="" aria-invalid="true">
+      </div></div></div></fieldset></div>`;
+  const SALARY = (which, key) => `
+    <div data-automation-id="formField-${key}" data-fkit-id="primaryQuestionnaire--${key}"><fieldset><legend><div><div data-automation-id="richText"><p><span style="font-size:14px">What do you expect the </span><b><u><span style="font-size:14px">${which}</span></u><span style="font-size:14px"> </span></b><span style="font-size:14px">Annual Salary for this position to be?</span></p><p><span style="font-size:14px">&nbsp;</span></p><p><span style="color:#a33600"><b><span style="font-size:14px">Please note the following important details:</span></b></span></p><ul><li><p><span style="font-size:14px">Special characters such as commas, decimals, or symbols </span><b><span style="font-size:14px">cannot be used</span></b><span style="font-size:14px"> in the pay fields.</span></p></li><li><p><b><span style="font-size:14px">Round </span></b><span style="font-size:14px">the pay amount to the </span><b><span style="font-size:14px">nearest whole dollar.</span></b></p></li></ul><p><span style="font-size:14px">For example, if the rate is $45,250.25/year, input either 45250 or 45251.<abbr title="required" class="requiredAsterisk">*</abbr></span></p></div></div></legend>
+      <div><div><input type="text" id="primaryQuestionnaire--${key}" aria-required="true" value="" aria-describedby="error1-primaryQuestionnaire--${key}" aria-invalid="true"></div></div></fieldset></div>`;
+
+  it('puts next Monday into the start-date picker, never a whole date into its Month box', async () => {
+    document.body.innerHTML = START_DATE; // 9 Oct 2026 is a Friday
+    await derived(env).fillDerivedAnswers();
+    expect(env.workdayDates).toEqual([['formField-3bac844e48ef1002064e9381d8160005', { month: 10, day: 12, year: 2026 }]]);
+    expect(document.getElementById('m').value).toBe('');
+  });
+
+  it('fills minimum = saved desired salary and maximum = 1.2 ×, digits only', async () => {
+    document.body.innerHTML = SALARY('minimum', 'k1') + SALARY('maximum', 'k2');
+    env.qa = [{ question: 'Desired annual salary (USD)Salary', answer: '150000' }];
+    await derived(env).fillDerivedAnswers();
+    expect(document.getElementById('primaryQuestionnaire--k1').value).toBe('150000');
+    expect(document.getElementById('primaryQuestionnaire--k2').value).toBe('180000');
+  });
+});
+
+describe('nextMonday', () => {
+  it('is the coming Monday — a week on from a Monday', () => {
+    const { nextMonday } = derived(env);
+    const iso = (d) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    expect(iso(nextMonday(new Date(2026, 9, 9)))).toBe('2026-10-12');  // Fri
+    expect(iso(nextMonday(new Date(2026, 9, 11)))).toBe('2026-10-12'); // Sun
+    expect(iso(nextMonday(new Date(2026, 9, 12)))).toBe('2026-10-19'); // Mon
   });
 });
