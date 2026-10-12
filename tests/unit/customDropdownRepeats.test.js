@@ -18,7 +18,7 @@ const slice = (a, b) => {
 };
 
 describe('fillCustomDropdown — at most two tries per field in one run', () => {
-  const wrapper = slice('  async function fillCustomDropdown(input, questionText) {', '  /**\n   * The text a custom dropdown trigger shows');
+  const wrapper = slice('  async function fillCustomDropdown(input, questionText, answerHint', '  /**\n   * The text a custom dropdown trigger shows');
 
   const build = (results) => new Function('results', ` // eslint-disable-line no-new-func
     const calls = [];
@@ -63,6 +63,10 @@ describe('clickCustomDropdownOption — the choice has to stick', () => {
     const console = { warn: () => {} };
     const sleep = () => Promise.resolve();
     function clickElement(el) { el.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
+    function dispatchFocusEvents() {}
+    async function sendMessage() { return null; }
+    function typeIntoAutocomplete() {}
+    async function waitForNewSuggestionOptions() { return []; }
     async function waitForVisibleOptions(trigger) {
       return Array.from(document.querySelectorAll('[role="option"]')).map(el => ({ el, text: el.textContent.trim() }));
     }

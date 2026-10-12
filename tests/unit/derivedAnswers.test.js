@@ -49,6 +49,7 @@ beforeAll(() => {
     function clickElement(el) { env.clicked.push(el.textContent.trim()); }
     function dispatchFocusEvents() {}
     function showAutofillBadge() {}
+    async function fillWorkdayDateField(field, date) { env.workdayDates.push([field.getAttribute('data-automation-id'), date]); }
     ${code}
     return { fillDerivedAnswers, formatDateForField, fillDateField };
   `)(env);
@@ -58,7 +59,7 @@ let env;
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date(2026, 9, 9)); // 9 Oct 2026
-  env = { qa: QA, typed: [], clicked: [] };
+  env = { qa: QA, typed: [], clicked: [], workdayDates: [] };
 });
 afterEach(() => { vi.useRealTimers(); document.body.innerHTML = ''; });
 
@@ -211,5 +212,31 @@ describe('fillDateField — a date box that only takes typed characters', () => 
     document.body.innerHTML = PAYLOCITY_DATE;
     await derived(env).fillDerivedAnswers();
     expect(document.getElementById('info.dateAvailableToStart').value).toBe('10/16/2026');
+  });
+});
+
+// Workday (unisys.wd5.myworkdayjobs.com), Voluntary Self-Identification of
+// Disability: "Date" (formField-dateSignedOn, MM/DD/YYYY spinbuttons) was
+// left empty — "The field Date is required and must have a value."
+describe('Workday signature date', () => {
+  const spin = (part, value = '') => `<input role="spinbutton" aria-label="${part}" data-automation-id="dateSection${part}-input" value="${value}">`;
+  const dateField = (key, label, values = ['', '', '']) => `
+    <div data-automation-id="formField-${key}"><fieldset><legend><label><span>${label}<abbr aria-hidden="true">*</abbr></span></label></legend>
+      <div role="group" data-automation-id="dateInputWrapper">${spin('Month', values[0])}/${spin('Day', values[1])}/${spin('Year', values[2])}</div>
+    </fieldset></div>`;
+
+  it('fills the self-identification "Date" with today, and leaves other dates alone', async () => {
+    document.body.innerHTML = '<div data-automation-id="applyFlowSelfIdentifyPage">'
+      + dateField('dateSignedOn', 'Date')
+      + dateField('startDate', 'From')
+      + '</div>';
+    await derived(env).fillDerivedAnswers();
+    expect(env.workdayDates).toEqual([['formField-dateSignedOn', { month: 10, day: 9, year: 2026 }]]);
+  });
+
+  it('matches a plain "Date" label too, but skips one already entered', async () => {
+    document.body.innerHTML = dateField('signature', 'Date') + dateField('dateSignedOn', 'Date', ['10', '01', '2026']);
+    await derived(env).fillDerivedAnswers();
+    expect(env.workdayDates.map(d => d[0])).toEqual(['formField-signature']);
   });
 });

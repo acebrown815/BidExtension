@@ -26,7 +26,7 @@ import path from 'node:path';
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 const SRC = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
 
-const START_MARKER = 'async function fillCustomDropdown(input, questionText) {';
+const START_MARKER = 'async function fillCustomDropdown(input, questionText, answerHint';
 const END_MARKER = '// Some location-autocomplete fields';
 const START = SRC.indexOf(START_MARKER);
 const END = SRC.indexOf(END_MARKER, START);

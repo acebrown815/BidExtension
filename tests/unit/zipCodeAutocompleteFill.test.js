@@ -61,7 +61,7 @@ beforeAll(() => {
       function fillInput(input, value) { calls.fillInput = { input, value }; }
       const sleep = () => Promise.resolve();
       function dispatchFocusEvents() {}
-      const _customDropdownAttempts = new Map(); const MAX_CUSTOM_DROPDOWN_ATTEMPTS = 2;
+      const _customDropdownAttempts = new Map(); const MAX_CUSTOM_DROPDOWN_ATTEMPTS = 2; const snapshotDropdownState = () => null;
       function clickElement(el) { calls.clickElement++; calls.clickedText = el.dataset.text || null; }
       async function waitForVisibleOptions() {
         return dropdownOptionTexts.map(text => {

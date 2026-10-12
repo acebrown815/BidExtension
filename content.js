@@ -5015,6 +5015,12 @@
     // Workday "My Experience": add and fill one Work Experience / Education
     // panel per resume entry before the generic detection below runs (it
     // then skips those managed panels).
+    // Workday single-choice checkbox groups (Voluntary Self-Identification
+    // of Disability) — one box for the saved answer.
+    try { await fillWorkdayCheckboxGroups(); } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillWorkdayCheckboxGroups threw:', e && e.message);
+    }
+
     try { await fillWorkdayMyExperienceStep(); } catch (e) {
       console.warn('[JobMatch AI][Auto-Bid] fillWorkdayMyExperienceStep threw:', e && e.message);
     }
@@ -6950,6 +6956,10 @@
   const MAX_SALARY_RE = /\bmax(?:imum)? (?:desired |expected )?(?:salary|pay|compensation)\b|\b(?:salary|pay|compensation) max(?:imum)?\b/;
   const STREET_ADDRESS_RE = /\baddress (?:line )?1\b|\baddress line one\b|\bstreet address\b/;
   const START_DATE_OFFSET_DAYS = 7;
+  // A form's own signature date — Workday's formField-dateSignedOn, or a
+  // date field labelled just "Date" / "Today's Date" / "Date Signed".
+  const WORKDAY_SIGNED_DATE_KEY_RE = /^(?:dateSigned(?:On)?|signatureDate|signedDate|todaysDate)$/i;
+  const WORKDAY_SIGNED_DATE_LABEL_RE = /^(?:date|today'?s date|date signed|signature date|signed date)$/i;
   const MAX_SALARY_FACTOR = 1.2;
 
   /**
@@ -7096,6 +7106,25 @@
     let qaList = [];
     try { qaList = await sendMessage({ type: 'GET_QA_LIST' }) || []; } catch (_) {}
     let filled = 0;
+
+    // A Workday form's signature date ("Date" on the Voluntary
+    // Self-Identification of Disability step, formField-dateSignedOn):
+    // today, in its month/day/year spinbuttons. Confirmed on
+    // unisys.wd5.myworkdayjobs.com — "The field Date is required".
+    for (const field of document.querySelectorAll('[data-automation-id^="formField-"]')) {
+      if (field.offsetParent === null || !field.querySelector('[data-automation-id="dateInputWrapper"]')) continue;
+      const key = field.getAttribute('data-automation-id').slice('formField-'.length);
+      const labelEl = field.querySelector('legend label, label');
+      const label = ((labelEl && labelEl.textContent) || '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+      if (!WORKDAY_SIGNED_DATE_KEY_RE.test(key) && !WORKDAY_SIGNED_DATE_LABEL_RE.test(label)) continue;
+      const parts = Array.from(field.querySelectorAll('input[data-automation-id$="-input"]'));
+      if (parts.length && parts.every(el => (el.value || '').trim()) && !parts.some(fieldShowsError)) continue;
+      const now = new Date();
+      await fillWorkdayDateField(field, { month: now.getMonth() + 1, day: now.getDate(), year: now.getFullYear() });
+      console.info('[JobMatch AI][Auto-Bid] "%s" (%s) → today', label || key, key);
+      filled++;
+    }
+
     const inputs = document.querySelectorAll('input:not([type]), input[type="text"], input[type="date"], input[type="number"], input[type="tel"]');
     for (const el of inputs) {
       if (el.offsetParent === null || el.disabled || el.readOnly || !isFieldEligible(el)) continue;
@@ -7355,7 +7384,7 @@
     const failedDropdowns = [];
     for (const { qid, ref, val } of customDropdowns) {
       try {
-        if (await fillCustomDropdown(ref.el, ref.questionText || val)) {
+        if (await fillCustomDropdown(ref.el, ref.questionText || val, val)) {
           showAutofillBadge(ref.el);
           filled++;
         } else {
@@ -7386,7 +7415,7 @@
         if (!el.isConnected) { skipped.push(qid); continue; }
         if (shouldKeepExistingAnswer(el) || (isWorkdayPromptInput(el) && workdayPromptHasSelection(el))) continue;
         try {
-          if (await fillCustomDropdown(el, ref.questionText || val)) {
+          if (await fillCustomDropdown(el, ref.questionText || val, val)) {
             console.info('[JobMatch AI][Auto-Bid] custom dropdown filled on retry for qid="%s"', qid);
             showAutofillBadge(el);
             filled++;
@@ -7464,7 +7493,7 @@
         fillSelectByText(ref.el, value, ref.optionMap, ref.optionTexts);
         showAutofillBadge(ref.el);
       } else if (ref.type === 'custom_dropdown') {
-        await fillCustomDropdown(ref.el, ref.questionText || value);
+        await fillCustomDropdown(ref.el, ref.questionText || value, value);
         showAutofillBadge(ref.el);
       } else {
         if (!fillInput(ref.el, value)) continue;
@@ -7726,7 +7755,7 @@
    * @param {string}      questionText - The field's label, sent to the AI for context.
    * @returns {Promise<boolean>} true if successfully filled, false otherwise.
    */
-  async function fillCustomDropdown(input, questionText) {
+  async function fillCustomDropdown(input, questionText, answerHint = '') {
     // Phase 3 processes custom ARIA dropdowns sequentially specifically
     // because opening one on a real page can affect another still mid-fill
     // (see this function's call site) — but a sibling field's own fill can
@@ -7759,7 +7788,7 @@
       console.info('[JobMatch AI][Auto-Bid] fillCustomDropdown: "%s" already failed %d times this run — leaving it', questionText, MAX_CUSTOM_DROPDOWN_ATTEMPTS);
       return false;
     }
-    const filled = await fillCustomDropdownOnce(input, questionText);
+    const filled = await fillCustomDropdownOnce(input, questionText, answerHint);
     if (!filled) _customDropdownAttempts.set(attemptKey, (_customDropdownAttempts.get(attemptKey) || 0) + 1);
     return filled;
   }
@@ -7788,6 +7817,8 @@
   async function clickCustomDropdownOption(trigger, chosen, optionTexts) {
     clickElement(chosen.el);
     await sleep(400);
+    // A search-as-you-type field (Ashby) commits the pick on focus change.
+    if (isSearchAsYouTypeCombobox(trigger) && trigger.isConnected) dispatchFocusEvents(trigger, 'out');
     const shown = customDropdownShownValue(trigger).toLowerCase();
     const want = chosen.text.trim().toLowerCase();
     const other = shown !== want && optionTexts.find(t => t.trim().toLowerCase() === shown);
@@ -7804,7 +7835,128 @@
     await sleep(400);
   }
 
-  async function fillCustomDropdownOnce(input, questionText) {
+  /**
+   * A search-as-you-type combobox (<input role="combobox"
+   * aria-autocomplete="list">) — its options only appear once typed into,
+   * or opened with its own toggle button, in a list portaled into <body>.
+   * Confirmed on Ashby ("Please let us know where you heard about this job
+   * opening?", class ashby-application-form-input-autocomplete).
+   * @param {HTMLElement} el
+   * @returns {boolean}
+   */
+  function isSearchAsYouTypeCombobox(el) {
+    return el.tagName === 'INPUT' && el.getAttribute('role') === 'combobox'
+      && /^(list|both)$/i.test(el.getAttribute('aria-autocomplete') || '');
+  }
+
+  /** The button next to a search-as-you-type input that opens its full list. */
+  function comboboxToggleButton(input) {
+    const box = input.parentElement;
+    return box ? Array.from(box.querySelectorAll('button')).find(b => b !== input && !b.disabled) || null : null;
+  }
+
+  /**
+   * What to type into a search-as-you-type field for this question: the
+   * saved Q&A answer for it, else the AI's answer. Referral-source
+   * questions are matched loosely ("where you heard about this job
+   * opening" ↔ saved "How did you hear about this position?").
+   * @returns {Promise<string[]>}
+   */
+  async function searchTextsFor(questionText, answerHint) {
+    const texts = [];
+    try {
+      const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
+      const match = globalThis.JMQaMatch && globalThis.JMQaMatch.qaQuestionMatchesLabel;
+      const referral = /\bhear(?:d)?\b[^?]*\babout\b|\breferr(?:al|ed)\b|\bsource\b/i;
+      const qa = qaList.find(q => q && q.answer && match && match(q.question, questionText))
+        || (referral.test(questionText) && qaList.find(q => q && q.answer && referral.test(q.question || '')));
+      if (qa) texts.push(String(qa.answer).trim());
+    } catch (_) {}
+    const hint = String(answerHint || '').trim();
+    if (hint && hint !== 'NEEDS_USER_INPUT' && hint !== 'SKIP' && !texts.some(t => t.toLowerCase() === hint.toLowerCase())) texts.push(hint);
+    return texts.filter(Boolean);
+  }
+
+  /** Visible [role="option"] rows on the page, with their text. */
+  function listedOptions() {
+    const out = [];
+    for (const el of document.querySelectorAll('[role="option"]')) {
+      if (el.getAttribute('aria-disabled') === 'true') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) out.push({ el, text });
+    }
+    return out;
+  }
+
+  function listedOptionsSignature() {
+    return listedOptions().map(o => o.text).join('|');
+  }
+
+  /**
+   * After typing into a search-as-you-type field: waits for the listed
+   * options to differ from `beforeSignature` and stay the same for two
+   * polls, then returns them — the rows may be the same elements as before
+   * (Ashby filters the open list in place, keeping "LinkedIn"'s node), so
+   * this goes by what's listed, not by which elements are new.
+   * @param {string} beforeSignature
+   * @param {number} [maxWaitMs=5000]
+   * @returns {Promise<Array<{el: HTMLElement, text: string}>>}
+   */
+  async function waitForListedOptionsToChange(beforeSignature, maxWaitMs = 5000) {
+    const start = Date.now();
+    let last = null;
+    let stable = 0;
+    while (Date.now() - start < maxWaitMs) {
+      await sleep(250);
+      const sig = listedOptionsSignature();
+      if (sig && sig !== beforeSignature) {
+        if (sig === last) { if (++stable >= 2) return listedOptions(); } else stable = 0;
+      }
+      last = sig;
+    }
+    return listedOptions();
+  }
+
+  /**
+   * Types each search text and picks from the suggestions it produces — the
+   * Location field's approach, for any search-as-you-type question: an exact
+   * (punctuation-insensitive) match to what was typed, else the matcher's
+   * pick among the suggestions. Leaves the field afterwards (Ashby commits
+   * the choice on focus change).
+   * @returns {Promise<boolean>}
+   */
+  async function typeAndPickSuggestion(input, questionText, answerHint) {
+    const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const texts = await searchTextsFor(questionText, answerHint);
+    if (!texts.length) console.info('[JobMatch AI][Auto-Bid] "%s": no saved or AI answer to type', questionText);
+    for (const text of texts) {
+      const listedBefore = listedOptionsSignature();
+      console.info('[JobMatch AI][Auto-Bid] "%s": typing "%s" to find it in the list', questionText, text);
+      typeIntoAutocomplete(input, text);
+      const suggestions = await waitForListedOptionsToChange(listedBefore, 5000);
+      console.info('[JobMatch AI][Auto-Bid] "%s": typing "%s" listed %o', questionText, text, suggestions.map(o => o.text).slice(0, 12));
+      if (!suggestions.length) continue;
+      let chosen = suggestions.find(o => norm(o.text) === norm(text))
+        || suggestions.find(o => norm(o.text).startsWith(norm(text)) || norm(text).startsWith(norm(o.text)));
+      if (!chosen) {
+        try {
+          const pick = await sendMessage({ type: 'MATCH_DROPDOWN', questionText, options: suggestions.map(o => o.text), resumeId: _activeResumeId });
+          chosen = pick && suggestions.find(o => norm(o.text) === norm(pick));
+        } catch (_) {}
+      }
+      if (!chosen) continue;
+      console.info('[JobMatch AI][Auto-Bid] "%s": picked "%s"', questionText, chosen.text);
+      clickElement(chosen.el);
+      await sleep(200);
+      if (input.isConnected) dispatchFocusEvents(input, 'out');
+      return true;
+    }
+    return false;
+  }
+
+  async function fillCustomDropdownOnce(input, questionText, answerHint = '') {
     if (isWorkdayPromptInput(input)) return await fillWorkdayPrompt(input, questionText);
 
     // Some location-autocomplete fields (Google-Places-backed, common on
@@ -7907,7 +8059,9 @@
     let openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
     // What <body> held before opening — a list generated on open and
     // appended to <body> is then told apart from everything else.
-    let bodyBefore = new Set(document.body.children);
+    const searchAsYouType = isSearchAsYouTypeCombobox(input);
+    if (searchAsYouType) openTarget = comboboxToggleButton(input) || openTarget;
+    let bodyBefore = snapshotDropdownState();
     clickElement(openTarget);
 
     // Step 2: Wait for the dropdown's options to actually render. Some
@@ -7934,11 +8088,14 @@
           input = fresh;
           input.focus();
           openTarget = input.closest('[class*="__control"], [class*="-control"], [class*="select-shell"]') || input;
-          bodyBefore = new Set(document.body.children);
+          bodyBefore = snapshotDropdownState();
           clickElement(openTarget);
           optionEls = await waitForVisibleOptions(input, 5000, 200, bodyBefore);
         }
       }
+    }
+    if (optionEls.length === 0 && searchAsYouType && input.isConnected) {
+      if (await typeAndPickSuggestion(input, questionText, answerHint)) return true;
     }
     if (optionEls.length === 0) {
       console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: no options ever rendered for "%s" (connected=%s)', questionText, input.isConnected);
@@ -7948,6 +8105,21 @@
     }
 
     const optionTexts = optionEls.map(o => o.text);
+    console.info('[JobMatch AI][Auto-Bid] "%s": %d option(s) listed: %o', questionText, optionTexts.length, optionTexts.slice(0, 12));
+
+    // A search-as-you-type list: the saved / AI answer picked straight off
+    // the list when it names one of the options — no matcher round-trip.
+    if (searchAsYouType) {
+      const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      for (const text of await searchTextsFor(questionText, answerHint)) {
+        const direct = optionEls.find(o => norm(o.text) === norm(text));
+        if (direct) {
+          console.info('[JobMatch AI][Auto-Bid] "%s": picking "%s" (the saved/AI answer "%s")', questionText, direct.text, text);
+          await clickCustomDropdownOption(input, direct, optionTexts);
+          return true;
+        }
+      }
+    }
 
     // Step 3: Ask AI to pick the best option
     let aiChoice;
@@ -7965,10 +8137,18 @@
     }
 
     if (!aiChoice || aiChoice === 'SKIP' || aiChoice === 'NEEDS_USER_INPUT') {
-      console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: "%s" got no usable choice (%o) — leaving unfilled', questionText, aiChoice);
       document.body.click();
+      // A search-as-you-type field: type the saved / AI answer and pick from
+      // what that lists instead (the Location field's way) before giving up.
+      if (searchAsYouType && input.isConnected) {
+        console.info('[JobMatch AI][Auto-Bid] "%s": matcher gave %o for the full list — typing the answer instead', questionText, aiChoice);
+        await sleep(200);
+        if (await typeAndPickSuggestion(input, questionText, answerHint)) return true;
+      }
+      console.warn('[JobMatch AI][Auto-Bid] fillCustomDropdown: "%s" got no usable choice (%o) — leaving unfilled', questionText, aiChoice);
       return false;
     }
+    console.info('[JobMatch AI][Auto-Bid] "%s": matcher picked %o', questionText, aiChoice);
 
     // Step 4: Find the option element that matches AI's choice and click it
     const choiceLower = aiChoice.toLowerCase().trim();
@@ -8633,19 +8813,22 @@
   }
 
   /**
-   * Fills a Workday date field (month/year spinbuttons, or year only).
+   * Fills a Workday date field (month/day/year spinbuttons, month/year, or
+   * year only).
    * @param {Element|null} field - the formField-… wrapper
-   * @param {{month: number|null, year: number}|null} date
+   * @param {{month: number|null, day?: number|null, year: number}|null} date
    */
   async function fillWorkdayDateField(field, date) {
     if (!field || !date || !date.year) return;
     const month = field.querySelector('input[data-automation-id="dateSectionMonth-input"]');
+    const day = field.querySelector('input[data-automation-id="dateSectionDay-input"]');
     const year = field.querySelector('input[data-automation-id="dateSectionYear-input"]');
     // Already entered (by the user or an earlier pass) and not flagged —
     // never re-type it.
     const entered = (el) => !el || !!(el.value || '').trim();
-    if (entered(month) && entered(year) && !fieldShowsError(month || year)) return;
+    if (entered(month) && entered(day) && entered(year) && !fieldShowsError(month || day || year)) return;
     if (month) await typeIntoWorkdaySpinbutton(month, String(date.month || 1).padStart(2, '0'));
+    if (day) await typeIntoWorkdaySpinbutton(day, String(date.day || 1).padStart(2, '0'));
     if (year) await typeIntoWorkdaySpinbutton(year, String(date.year));
   }
 
@@ -8847,6 +9030,68 @@
   }
 
   /**
+   * Workday's checkbox-group questions — <fieldset
+   * data-automation-id="<key>-CheckboxGroup"> of boxes with no shared
+   * name, where ticking one disables the others (a single choice drawn as
+   * checkboxes). Confirmed on unisys.wd5.myworkdayjobs.com, Voluntary
+   * Self-Identification of Disability: "Please check one of the boxes
+   * below:" stayed unticked with a saved "Disability status" answer — the
+   * boxes share no name, so they were never one question. Asks the
+   * dropdown matcher (saved Q&A first, then AI) for ONE of the box labels
+   * and ticks only that box; groups with a box already ticked are left
+   * alone. Each group is marked data-jm-managed so the generic passes skip
+   * its boxes.
+   * @returns {Promise<number>} groups answered
+   */
+  async function fillWorkdayCheckboxGroups() {
+    if (!isWorkdayHost()) return 0;
+    let answered = 0;
+    for (const group of document.querySelectorAll('fieldset[data-automation-id$="-CheckboxGroup"]')) {
+      if (group.offsetParent === null && !group.getClientRects().length) continue;
+      const boxes = Array.from(group.querySelectorAll('input[type="checkbox"]'));
+      if (boxes.length < 2) continue;
+      const field = group.closest('[data-automation-id^="formField-"]');
+      (field || group).setAttribute('data-jm-managed', 'workday-checkbox-group');
+      const isTicked = (b) => b.checked || b.getAttribute('aria-checked') === 'true';
+      if (boxes.some(isTicked) && !fieldShowsError(group)) continue;
+      const labelOf = (b) => {
+        const l = b.id && group.querySelector('label[for="' + b.id.replace(/["\\]/g, '\\$&') + '"]');
+        return ((l && l.textContent) || '').replace(/\s+/g, ' ').trim();
+      };
+      const options = boxes.map(b => ({ el: b, text: labelOf(b) })).filter(o => o.text);
+      if (!options.length) continue;
+      const legend = field && field.querySelector('legend label, legend');
+      const shown = ((legend && legend.textContent) || getWorkdayFieldLabel(group) || '').replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+      // The visible question can be generic ("Please check one of the boxes
+      // below:"); the group's key names the topic ("disabilityStatus"), which
+      // is what the saved Q&A ("Disability status") is matched by.
+      const topic = (group.getAttribute('data-automation-id') || '').replace(/-CheckboxGroup$/, '')
+        .replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().trim();
+      const question = topic && !shown.toLowerCase().includes(topic) ? `${shown} (${topic})`.trim() : shown;
+      let choice = null;
+      try {
+        choice = await sendMessage({ type: 'MATCH_DROPDOWN', questionText: question, options: options.map(o => o.text), resumeId: _activeResumeId });
+      } catch (e) {
+        console.warn('[JobMatch AI][Auto-Bid] Workday checkbox group "%s": matcher threw:', question, e && e.message);
+      }
+      const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const chosen = choice && options.find(o => norm(o.text) === norm(choice));
+      if (!chosen) {
+        console.info('[JobMatch AI][Auto-Bid] Workday checkbox group "%s": no choice (%o) among %o', question, choice, options.map(o => o.text));
+        continue;
+      }
+      if (chosen.el.disabled) continue;
+      clickNatively(chosen.el);
+      await sleep(CHOICE_CLICK_PACE_MS);
+      if (!isTicked(chosen.el)) { chosen.el.click(); await sleep(CHOICE_CLICK_PACE_MS); }
+      console.info('[JobMatch AI][Auto-Bid] Workday checkbox group "%s" → "%s"', question, chosen.text);
+      showAutofillBadge(chosen.el);
+      answered++;
+    }
+    return answered;
+  }
+
+  /**
    * Workday "My Experience" step: one Work Experience / Education panel per
    * entry on the active resume. No-op anywhere else. When the progress bar
    * already says "My Experience" but the step's page hasn't rendered yet
@@ -8905,9 +9150,13 @@
    * @param {HTMLElement} triggerEl - The combobox trigger that was clicked to open the dropdown.
    * @returns {Array<{text: string, el: HTMLElement}>} List of option text+element pairs.
    */
-  function findVisibleOptions(triggerEl, bodyChildrenBefore) {
+  function findVisibleOptions(triggerEl, before) {
     const results = [];
     const seen = new Set();
+    // `before` is a snapshotDropdownState() (or, from older callers, just
+    // the Set of <body>'s children).
+    const snap = before instanceof Set ? { bodyChildren: before } : (before || null);
+    const bodyChildrenBefore = snap && snap.bodyChildren;
 
     // Strategy 1: ARIA — the list the dropdown says it owns — on the trigger itself, or on a
     // wrapper just above it (Paylocity's pcty-input-select puts
@@ -8916,6 +9165,21 @@
     const lb = ownedListboxOf(triggerEl);
     if (lb) collectOptions(optionLikeElements(lb), results, seen);
     if (results.length) return results;
+
+    // Strategy 1b: what the click made appear — a listbox that wasn't on the
+    // page before, else options that weren't. Ashby reuses ONE floating-ui
+    // portal in <body> for every dropdown on the form, so the list shows up
+    // inside an existing node; looking for new <body> children missed it,
+    // and the page-wide search below then mixed in unrelated "options".
+    if (snap && snap.listboxes) {
+      for (const box of document.querySelectorAll('[role="listbox"]')) {
+        if (!snap.listboxes.has(box)) collectOptions(optionLikeElements(box), results, seen);
+      }
+      if (!results.length) {
+        collectOptions(Array.from(document.querySelectorAll('[role="option"]')).filter(o => !snap.options.has(o)), results, seen);
+      }
+      if (results.length) return results;
+    }
 
     // Strategy 2: Search nearby container. Start the closest() walk from the
     // PARENT, not triggerEl itself — react-select (e.g. Greenhouse's
@@ -8950,6 +9214,19 @@
     }
 
     return results;
+  }
+
+  /**
+   * What's on the page before a dropdown is opened, so findVisibleOptions()
+   * can tell the list that click produced from everything else.
+   * @returns {{bodyChildren: Set<Element>, listboxes: Set<Element>, options: Set<Element>}}
+   */
+  function snapshotDropdownState() {
+    return {
+      bodyChildren: new Set(document.body.children),
+      listboxes: new Set(document.querySelectorAll('[role="listbox"]')),
+      options: new Set(document.querySelectorAll('[role="option"]')),
+    };
   }
 
   /**
