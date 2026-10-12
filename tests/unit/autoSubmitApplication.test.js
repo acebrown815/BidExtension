@@ -271,6 +271,32 @@ describe('autoSubmitApplicationIfReady', () => {
     expect(events).toContain('SUBMIT_CLICKED');
   });
 
+  it('ticks the required acknowledgement before Submit even while its footnote is hidden (Paylocity 4569526)', async () => {
+    // Verbatim from the page. In a browser the footnote is display:none
+    // until a Submit is rejected, so no error is visible to react to.
+    document.body.innerHTML = `
+      <div class="col-xs-12" style="margin-top: 20px;"><div class="form-group form-required form-error"><input id="applyAcknowledgement" name="applyAcknowledgement" type="checkbox" style="display: block; float: left;"><div style="float: left; margin-left: 6px; font-weight: 600; font-size: 14px; color: rgb(34, 34, 34);"><label for="applyAcknowledgement">I have read and accept the above acknowledgement<em style="color: rgb(102, 102, 102); font-style: normal; text-transform: lowercase;"> (required)</em></label></div><span><div class="clearfix"></div><div class="type-footnote">Please accept the acknowledgement</div></span></div></div>
+      <button class="button form-button branding-button-color full-width" data-automation-id="btnSubmit" id="btn-submit" title="Please read and accept the above acknowledgement">Submit<span></span></button>`;
+    Object.defineProperty(document.querySelector('.type-footnote'), 'offsetParent', { configurable: true, get: () => null });
+    const box = document.getElementById('applyAcknowledgement');
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ realValidation: true });
+    const btn = findFinalSubmitButton();
+    let tickedAtSubmit = null;
+    btn.addEventListener('click', () => { events.push('SUBMIT_CLICKED'); tickedAtSubmit = box.checked; });
+
+    expect(await autoSubmitApplicationIfReady(btn)).toBe(true);
+    expect(tickedAtSubmit).toBe(true);
+    expect(events.filter(e => e === 'SUBMIT_CLICKED')).toHaveLength(1);
+  });
+
+  it('counts an unticked required consent box as a missing required field', () => {
+    document.body.innerHTML = `
+      <div class="form-group form-required"><input id="ack" type="checkbox"><label for="ack">I have read and accept the above acknowledgement (required)</label></div>
+      <div class="form-group"><input id="news" type="checkbox"><label for="news">Send me job alerts</label></div>`;
+    const { findUnfilledRequiredFields } = load();
+    expect(findUnfilledRequiredFields()).toEqual(['ack']);
+  });
+
   it('still refuses when a flagged required field is empty', async () => {
     document.body.innerHTML = `
       <div class="form-group form-error"><label>LinkedIn Profile URL</label><input id="li" type="text" value=""><div class="type-footnote">This field is required</div></div>

@@ -4192,7 +4192,9 @@
    */
   function findNextStepButton() {
     const finalActionRe = /\b(submit|apply|finish|complete|review|send|done)\b/i;
-    const nextRe = /^\s*(next(\s+step)?|continue|proceed|save\s*(?:and|&)\s*(?:continue|next))\s*$/i;
+    // "Start My Application": a gate form before the real application
+    // (Axiom Law's HubSpot form — email + privacy consent — leads on to it).
+    const nextRe = /^\s*(next(\s+step)?|continue|proceed|save\s*(?:and|&)\s*(?:continue|next)|(?:start|begin)\s+(?:my\s+|your\s+|the\s+)?application)\s*$/i;
     // Strips decorative arrow/chevron glyphs a real "Next" button commonly
     // wraps itself in — confirmed on Jobvite, whose Next button's actual
     // text is "Next →" (a trailing U+2192). nextRe's strict ^...$ anchoring
@@ -4281,8 +4283,11 @@
         radioGroups.set(el.name, group);
         return;
       }
+      if (type === 'checkbox') {
+        if ((isRequired(el) || isRequiredConsentBox(el)) && !el.checked) missing.push(label(el));
+        return;
+      }
       if (!isRequired(el)) return;
-      if (type === 'checkbox') { if (!el.checked) missing.push(label(el)); return; }
       if (el.getAttribute('data-uxi-widget-type') === 'selectinput') {
         if (!workdayPromptHasSelection(el)) missing.push(label(el));
         return;
@@ -4427,6 +4432,41 @@
   const CONSENT_MESSAGE_RE = /\b(accept|agree|acknowledg|consent|certif|attest|confirm)/i;
 
   /**
+   * A single checkbox the application requires the applicant to tick to
+   * agree to something — Paylocity's last step: "I have read and accept
+   * the above acknowledgement (required)" in a .form-required group, with
+   * no `required` attribute and its "Please accept…" footnote hidden until
+   * a Submit is rejected.
+   * @param {HTMLInputElement} el
+   * @returns {boolean}
+   */
+  function isRequiredConsentBox(el) {
+    if (el.type !== 'checkbox' || (el.name && document.getElementsByName(el.name).length > 1)) return false;
+    const text = [getFieldLabel(el), ...Array.from(el.labels || []).map(l => l.textContent)].join(' ').replace(/\s+/g, ' ');
+    if (!CONSENT_MESSAGE_RE.test(text)) return false;
+    return el.required || el.getAttribute('aria-required') === 'true'
+      || !!el.closest('.form-required, [aria-required="true"]') || /\(required\)|\*/i.test(text);
+  }
+
+  /**
+   * Ticks every visible, unticked required consent box (see
+   * isRequiredConsentBox) — done right before Auto-Bid submits.
+   * @returns {Promise<number>} how many boxes were ticked
+   */
+  async function tickRequiredConsentBoxes() {
+    let ticked = 0;
+    for (const el of document.querySelectorAll('input[type="checkbox"]')) {
+      if (el.checked || el.offsetParent === null || el.disabled || !isFieldEligible(el)) continue;
+      if (!isRequiredConsentBox(el)) continue;
+      clickNatively(el);
+      console.info('[JobMatch AI][Auto-Bid] ticked the required "%s"', (getFieldLabel(el) || el.id || '').slice(0, 80));
+      ticked++;
+      await sleep(CHOICE_CLICK_PACE_MS);
+    }
+    return ticked;
+  }
+
+  /**
    * The fields on screen the page rejected, each with the message it shows
    * for it: text fields holding a value ("Must be a valid LinkedIn URL.
    * Example: https://www.linkedin.com/in/yourname") — empty ones are left
@@ -4440,8 +4480,11 @@
       if (el.offsetParent === null || el.disabled || el.readOnly || !isFieldEligible(el)) continue;
       if (el.type === 'checkbox') {
         if (el.name && document.getElementsByName(el.name).length > 1) continue; // one option of a group
+        // The message, or the box's own label when the message is generic
+        // (HubSpot: "Please complete this required field." under "I have
+        // read and agree to the Privacy Notice.").
         const message = fieldErrorMessage(el);
-        if (message && CONSENT_MESSAGE_RE.test(message)) out.push({ el, message });
+        if (message && (CONSENT_MESSAGE_RE.test(message) || CONSENT_MESSAGE_RE.test(getFieldLabel(el) || ''))) out.push({ el, message });
         continue;
       }
       if (el.tagName === 'INPUT' && !/^(text|url|email|tel|number|search)$/i.test(el.type || 'text')) continue;
@@ -4556,6 +4599,7 @@
     }
     const jobKey = normalizeUrl(currentAnalysis.url || window.location.href);
     if (_autoSubmittedJobKey === jobKey) return false;
+    if ((await tickRequiredConsentBoxes()) > 0) await waitForDomSettled();
     if (hasVisibleValidationErrors() && (await fixFieldsFromErrorMessages()) > 0) await waitForDomSettled();
     if (hasVisibleValidationErrors({ fieldMessages: 'unanswered' })) {
       setStatus('Not submitting — the form is showing an error. Fix it, then click "Resume Auto Mode".', 'error');

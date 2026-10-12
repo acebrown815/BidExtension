@@ -100,6 +100,15 @@ describe('findNextStepButton — never matches a final submit action (the safety
     expect(findNextStepButton()).not.toBeNull();
   });
 
+  it('finds Axiom Law\'s HubSpot gate-form "Start My Application" (input type=submit)', () => {
+    document.body.innerHTML = `
+      <form class="hs-form stacked" novalidate="">
+        <input name="email" type="email" class="hs-input" value="jane@x.com">
+        <div class="hs_submit hs-submit"><div class="actions"><input type="submit" class="hs-button primary large" value="Start My Application"></div></div>
+      </form>`;
+    expect(findNextStepButton()?.value).toBe('Start My Application');
+  });
+
   it('returns null when there is nothing next-step-shaped on the page', () => {
     document.body.innerHTML = '<div>Some job application content</div><button>Cancel</button>';
     expect(findNextStepButton()).toBeNull();

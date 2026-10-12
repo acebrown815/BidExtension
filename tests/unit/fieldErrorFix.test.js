@@ -49,6 +49,21 @@ describe('fieldErrorMessage', () => {
     expect(fieldErrorMessage(document.getElementById('b'))).toBe('');
   });
 
+  it("reads HubSpot's error under an unticked consent box (input marked, message 5 levels up)", () => {
+    // Axiom Law's "Start My Application" gate form, as HubSpot renders it
+    // after a submit with the box unticked.
+    document.body.innerHTML = `
+      <form class="hs-form">
+        <div class="hs_email field hs-form-field"><label for="email-1"><span>Email</span></label><div class="input"><input id="email-1" name="email" type="email" class="hs-input" value="jane@x.com"></div></div>
+        <div class="hs_i_have_read_and_agree_to_the_privacy_policy_ hs-fieldtype-booleancheckbox field hs-form-field">
+          <div class="input"><ul class="inputs-list"><li class="hs-form-booleancheckbox"><label for="pp-1" class="hs-form-booleancheckbox-display"><input id="pp-1" class="hs-input error invalid" type="checkbox" name="i_have_read_and_agree_to_the_privacy_policy_" value="true"><span>I have read and agree to the Privacy Notice.<span class="hs-form-required">*</span></span></label></li></ul></div>
+          <ul class="no-list hs-error-msgs inputs-list" role="alert"><li><label class="hs-error-msg hs-main-font-element">Please complete this required field.</label></li></ul>
+        </div>
+      </form>`;
+    expect(fieldErrorMessage(document.getElementById('pp-1'))).toBe('Please complete this required field.');
+    expect(fieldErrorMessage(document.getElementById('email-1'))).toBe('');
+  });
+
   it('reads an aria-errormessage target', () => {
     document.body.innerHTML = '<input id="w" aria-errormessage="w-err" value="foo"><span id="w-err">Please enter a valid URL</span>';
     expect(fieldErrorMessage(document.getElementById('w'))).toBe('Please enter a valid URL');
