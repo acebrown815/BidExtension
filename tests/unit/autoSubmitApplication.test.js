@@ -7,11 +7,13 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import '../../lib/fieldErrorFix.js';
 import '../../lib/fieldFilter.js'; // real hasAnswer for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
 let SECTION;
+let VALIDATION; // the real hasVisibleValidationErrors + fieldHoldsAnswer
 
 beforeAll(() => {
   const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
@@ -22,6 +24,10 @@ beforeAll(() => {
   const g0 = src.indexOf('  function getCheckboxGroups() {');
   const g1 = src.indexOf('  /**\n   * Detects all fillable form fields', g0);
   SECTION += src.slice(g0, g1); // real checkbox-group helper
+  const v0 = src.indexOf('  function hasVisibleValidationErrors(');
+  const v1 = src.indexOf('  /**\n   * A cheap fingerprint', v0);
+  if (v0 === -1 || v1 === -1) throw new Error('content.js validation anchors moved');
+  VALIDATION = src.slice(v0, v1);
 });
 
 const ORIGINAL_LINK = 'https://bcbsla.wd1.myworkdayjobs.com/external/job/Remote-LA/Senior-Software-Engineer--Remote---Louisiana-_R11452';
@@ -35,7 +41,7 @@ const REVIEW_STEP = `
   </div>
 `;
 
-function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior Software Engineer' }, tailored = null, markResult = { sheetsSynced: true, sheetsSyncConfigured: true }, validationError = false } = {}) {
+function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior Software Engineer' }, tailored = null, markResult = { sheetsSynced: true, sheetsSyncConfigured: true }, validationError = false, realValidation = false } = {}) {
   const events = [];
   const factory = new Function('events', 'analysis', 'tailored', 'markResult', 'validationError', ` // eslint-disable-line no-new-func
     const MIN_SCORE_TO_APPLY = 75;
@@ -47,9 +53,11 @@ function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior 
     const getFieldLabel = (el) => el.getAttribute('aria-label') || el.id || '';
     const getWorkdayFieldLabel = () => '';
     const isFieldEligible = () => true;
+    const { fieldErrorMessage, suggestFixFromErrorMessage } = globalThis.JMFieldErrorFix;
+    const _activeResumeId = null;
     const hasAnswer = (el) => globalThis.JMFieldFilter.hasAnswer(el);
     const workdayPromptHasSelection = (el) => !!el.closest('[data-automation-id="multiSelectContainer"]').querySelector('[data-automation-id="selectedItem"]');
-    function hasVisibleValidationErrors() { return validationError || !!document.querySelector('[role="alert"]'); }
+    ${realValidation ? VALIDATION : 'function hasVisibleValidationErrors() { return validationError || !!document.querySelector(\'[role="alert"]\'); }'}
     function setStatus(text, level) { events.push({ status: text, level }); }
     function stopManualStepWatch() { events.push('stopWatch'); }
     async function sendMessage(msg) { events.push(msg.type); return {}; }
@@ -57,6 +65,7 @@ function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior 
     async function markApplied(opts) { events.push({ markApplied: opts }); return markResult; }
     const sleep = (ms) => new Promise(r => setTimeout(r, Math.min(ms, 20))); const FIELD_FILL_PACE_MS = 0; const CHOICE_CLICK_PACE_MS = 0;
     const clickElement = (el) => el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const clickNatively = (el) => el.click();
     function dispatchFocusEvents(el, direction) {
       const [own, bubbling] = direction === 'in' ? ['focus', 'focusin'] : ['blur', 'focusout'];
       el.dispatchEvent(new FocusEvent(own, { bubbles: false }));
@@ -202,6 +211,86 @@ describe('autoSubmitApplicationIfReady', () => {
     expect(await autoSubmitApplicationIfReady(findFinalSubmitButton())).toBe(true);
     expect(events.filter(e => e === 'SUBMIT_CLICKED')).toHaveLength(2);
     expect(committed.linkedin).toBe('https://linkedin.com/in/randolph');
+  });
+
+  it('rewrites a value the form rejected with a message, then submits again (Paylocity LinkedIn URL)', async () => {
+    document.body.insertAdjacentHTML('afterbegin', `
+      <div class="form-group form-required"><label>LinkedIn Profile URL</label><input id="info.linkedIn" type="text" value="linkedin.com/in/randolph-brown-34286528b"><div class="type-footnote">Must be a valid LinkedIn URL. Example: https://www.linkedin.com/in/yourname</div></div>`);
+    const input = document.getElementById('info.linkedIn');
+    const group = input.closest('.form-group');
+    const btn = document.querySelector('[data-automation-id="pageFooterNextButton"]');
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ validationError: false });
+    btn.addEventListener('click', () => {
+      events.push('SUBMIT_CLICKED');
+      document.querySelector('[role="alert"]')?.remove();
+      const ok = /^https:\/\/www\.linkedin\.com\//.test(input.value);
+      group.classList.toggle('form-error', !ok);
+      if (!ok) document.body.insertAdjacentHTML('afterbegin', '<div role="alert">Please fix the errors below</div>');
+    });
+
+    expect(await autoSubmitApplicationIfReady(findFinalSubmitButton())).toBe(true);
+    expect(events.filter(e => e === 'SUBMIT_CLICKED')).toHaveLength(2);
+    expect(input.value).toBe('https://www.linkedin.com/in/randolph-brown-34286528b');
+    expect(events).not.toContain('FIX_FIELD_FROM_ERROR'); // the message's own rule — no AI call
+  });
+
+  // Paylocity's last step (5 of 5): the acknowledgement's group is marked
+  // form-error as soon as the step renders, even with the box ticked — the
+  // page re-checks it only on Submit. That stale flag must not block it.
+  const PAYLOCITY_LAST_STEP = (ticked) => `
+    <div class="form-group form-required form-error"><input id="applyAcknowledgement" name="applyAcknowledgement" type="checkbox" ${ticked ? 'checked=""' : ''}><div><label for="applyAcknowledgement">I have read and accept the above acknowledgement<em> (required)</em></label></div><span><div class="clearfix"></div><div class="type-footnote">Please accept the acknowledgement</div></span></div>
+    <button class="button form-button branding-button-color full-width" data-automation-id="btnSubmit" id="btn-submit" title="">Submit<span></span></button>`;
+
+  it('finds Paylocity\'s Submit and submits past a stale acknowledgement flag (box ticked)', async () => {
+    document.body.innerHTML = PAYLOCITY_LAST_STEP(true);
+    const box = document.getElementById('applyAcknowledgement');
+    const toggles = [];
+    box.addEventListener('click', () => toggles.push(box.checked));
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ realValidation: true });
+    const btn = findFinalSubmitButton();
+    expect(btn && btn.id).toBe('btn-submit');
+    btn.addEventListener('click', () => {
+      events.push('SUBMIT_CLICKED');
+      // The page re-checks on Submit: a ticked box clears its flag.
+      box.closest('.form-group').classList.toggle('form-error', !box.checked);
+    });
+
+    expect(await autoSubmitApplicationIfReady(btn)).toBe(true);
+    expect(events.filter(e => e === 'SUBMIT_CLICKED')).toHaveLength(1);
+    expect(toggles).toEqual([false, true]); // re-committed: untick, tick
+    expect(box.checked).toBe(true);
+  });
+
+  it('ticks an unticked acknowledgement the page asks for, then submits', async () => {
+    document.body.innerHTML = PAYLOCITY_LAST_STEP(false);
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ realValidation: true });
+    const btn = findFinalSubmitButton();
+    btn.addEventListener('click', () => events.push('SUBMIT_CLICKED'));
+    expect(await autoSubmitApplicationIfReady(btn)).toBe(true);
+    expect(document.getElementById('applyAcknowledgement').checked).toBe(true);
+    expect(events).toContain('SUBMIT_CLICKED');
+  });
+
+  it('still refuses when a flagged required field is empty', async () => {
+    document.body.innerHTML = `
+      <div class="form-group form-error"><label>LinkedIn Profile URL</label><input id="li" type="text" value=""><div class="type-footnote">This field is required</div></div>
+      <button id="btn-submit">Submit</button>`;
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ realValidation: true });
+    const btn = findFinalSubmitButton();
+    btn.addEventListener('click', () => events.push('SUBMIT_CLICKED'));
+    expect(await autoSubmitApplicationIfReady(btn)).toBe(false);
+    expect(events).not.toContain('SUBMIT_CLICKED');
+  });
+
+  it('asks the AI when the message states no rule it knows', async () => {
+    document.body.insertAdjacentHTML('afterbegin', `
+      <div class="form-group form-error"><label>Preferred name</label><input id="nick" type="text" value="R"><div class="type-footnote">Please enter your full first name</div></div>`);
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ validationError: false });
+    wireSubmit(events);
+    // The harness's hasVisibleValidationErrors only sees role="alert".
+    document.body.insertAdjacentHTML('afterbegin', '<div role="alert">Please fix the errors below</div>');
+    await autoSubmitApplicationIfReady(findFinalSubmitButton());
+    expect(events).toContain('FIX_FIELD_FROM_ERROR');
   });
 
   it('never submits the same application twice', async () => {

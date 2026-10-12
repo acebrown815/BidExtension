@@ -15,13 +15,14 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import '../../lib/fieldErrorFix.js';
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
 
 let hasVisibleValidationErrors;
 beforeAll(() => {
   const src = fs.readFileSync(CONTENT_JS_PATH, 'utf8').replace(/\r\n/g, '\n');
-  const startMarker = 'function hasVisibleValidationErrors() {';
+  const startMarker = 'function hasVisibleValidationErrors(';
   const endMarker = '/**\n   * Initiates the autofill pipeline:';
   const start = src.indexOf(startMarker);
   const end = src.indexOf(endMarker);
@@ -30,7 +31,7 @@ beforeAll(() => {
   }
   const extracted = src.slice(start, end);
   // eslint-disable-next-line no-eval
-  const factory = (0, eval)(`(function () { ${extracted} return { hasVisibleValidationErrors }; })`);
+  const factory = (0, eval)(`(function () { const { fieldErrorMessage } = globalThis.JMFieldErrorFix; ${extracted} return { hasVisibleValidationErrors }; })`);
   ({ hasVisibleValidationErrors } = factory());
 });
 
@@ -41,6 +42,29 @@ describe('hasVisibleValidationErrors', () => {
       <input aria-invalid="true" data-invalid="true" name="candidateLocation">
     `;
     expect(hasVisibleValidationErrors()).toBe(true);
+  });
+
+  it("detects Paylocity's .form-group.form-error footnote (no aria-invalid, no alert)", () => {
+    document.body.innerHTML = `
+      <div class="form-group form-required form-error"><label>LinkedIn Profile URL<span><em> (required)</em></span></label><input data-automation-id="infoLinkedIn" id="info.linkedIn" type="text" value="linkedin.com/in/randolph-brown-34286528b"><div class="type-footnote show">Must be a valid LinkedIn URL. Example: https://www.linkedin.com/in/yourname</div></div>`;
+    expect(hasVisibleValidationErrors()).toBe(true);
+    document.querySelector('.form-group').classList.remove('form-error');
+    expect(hasVisibleValidationErrors()).toBe(false);
+  });
+
+  it("fieldMessages modes: Paylocity's acknowledgement flagged on a ticked box", () => {
+    document.body.innerHTML = `
+      <div class="form-group form-required form-error"><input id="applyAcknowledgement" type="checkbox" checked=""><label for="applyAcknowledgement">I have read and accept the above acknowledgement</label><span><div class="type-footnote">Please accept the acknowledgement</div></span></div>`;
+    expect(hasVisibleValidationErrors()).toBe(true);
+    expect(hasVisibleValidationErrors({ fieldMessages: 'unanswered' })).toBe(false);
+    expect(hasVisibleValidationErrors({ fieldMessages: 'none' })).toBe(false);
+    document.getElementById('applyAcknowledgement').checked = false;
+    expect(hasVisibleValidationErrors({ fieldMessages: 'unanswered' })).toBe(true);
+  });
+
+  it("fieldMessages 'none' still sees aria-invalid / alerts", () => {
+    document.body.innerHTML = '<input aria-invalid="true">';
+    expect(hasVisibleValidationErrors({ fieldMessages: 'none' })).toBe(true);
   });
 
   it('detects aria-invalid alone', () => {

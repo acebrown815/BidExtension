@@ -55,6 +55,10 @@
   // what the user already typed/picked. See lib/fieldFilter.js.
   const shouldKeepExistingAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.shouldKeepExistingAnswer) || (() => false);
   const fieldShowsError = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.fieldShowsError) || (() => false);
+  // The validation message a form shows for a field, and a value that
+  // satisfies it when the message states its rule. See lib/fieldErrorFix.js.
+  const fieldErrorMessage = (globalThis.JMFieldErrorFix && globalThis.JMFieldErrorFix.fieldErrorMessage) || (() => '');
+  const suggestFixFromErrorMessage = (globalThis.JMFieldErrorFix && globalThis.JMFieldErrorFix.suggestFixFromErrorMessage) || (() => null);
   const hasAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.hasAnswer) || ((el) => !!(el.value || '').trim());
 
   // Local (no-AI) resume-vs-JD ATS-keyword ranker. Lets the panel highlight
@@ -4418,6 +4422,81 @@
     return count;
   }
 
+  // A checkbox message asking the applicant to accept/agree to something
+  // (Paylocity's last step: "Please accept the acknowledgement").
+  const CONSENT_MESSAGE_RE = /\b(accept|agree|acknowledg|consent|certif|attest|confirm)/i;
+
+  /**
+   * The fields on screen the page rejected, each with the message it shows
+   * for it: text fields holding a value ("Must be a valid LinkedIn URL.
+   * Example: https://www.linkedin.com/in/yourname") — empty ones are left
+   * to the normal fill — and single consent checkboxes ("Please accept the
+   * acknowledgement").
+   * @returns {Array<{el: HTMLInputElement|HTMLTextAreaElement, message: string}>}
+   */
+  function collectFieldErrorMessages() {
+    const out = [];
+    for (const el of document.querySelectorAll('input, textarea')) {
+      if (el.offsetParent === null || el.disabled || el.readOnly || !isFieldEligible(el)) continue;
+      if (el.type === 'checkbox') {
+        if (el.name && document.getElementsByName(el.name).length > 1) continue; // one option of a group
+        const message = fieldErrorMessage(el);
+        if (message && CONSENT_MESSAGE_RE.test(message)) out.push({ el, message });
+        continue;
+      }
+      if (el.tagName === 'INPUT' && !/^(text|url|email|tel|number|search)$/i.test(el.type || 'text')) continue;
+      if (!(el.value || '').trim()) continue;
+      const message = fieldErrorMessage(el);
+      if (message) out.push({ el, message });
+    }
+    return out;
+  }
+
+  /**
+   * Rewrites each rejected value so it satisfies the message the page
+   * shows for it — by the message's own rule when it states one (a URL
+   * missing "https://www.", digits only, a length limit), else by asking
+   * the AI with the field's label, value and message.
+   * @param {Array<{el: Element, message: string}>} [errors] - collected
+   *   before a re-fill that may hide the messages; defaults to what shows now
+   * @returns {Promise<number>} how many fields were changed
+   */
+  async function fixFieldsFromErrorMessages(errors = collectFieldErrorMessages()) {
+    let fixed = 0;
+    for (const { el, message } of errors) {
+      if (!el.isConnected) continue;
+      if (el.type === 'checkbox') {
+        // Tick it — or, when it already shows ticked, untick and tick again:
+        // the page flagged it, so the tick never reached its state.
+        if (el.checked) { clickNatively(el); await sleep(CHOICE_CLICK_PACE_MS); }
+        clickNatively(el);
+        console.info('[JobMatch AI][Auto-Bid] ticked "%s" (the page\'s message: "%s")', getFieldLabel(el) || el.id, message);
+        fixed++;
+        await sleep(CHOICE_CLICK_PACE_MS);
+        continue;
+      }
+      const value = el.value || '';
+      if (!value.trim()) continue;
+      let next = suggestFixFromErrorMessage(value, message);
+      let how = 'by its rule';
+      if (next == null) {
+        how = 'by the AI';
+        try {
+          next = await sendMessage({ type: 'FIX_FIELD_FROM_ERROR', label: getFieldLabel(el), value, errorMessage: message, resumeId: _activeResumeId });
+        } catch (e) {
+          console.warn('[JobMatch AI][Auto-Bid] could not fix %s from "%s":', el.id || el.name || 'field', message, e && e.message);
+          continue;
+        }
+      }
+      if (typeof next !== 'string' || !next.trim() || next === value) continue;
+      recommitFieldValue(el, next);
+      console.info('[JobMatch AI][Auto-Bid] "%s" → "%s" (%s, from the page\'s message: "%s")', value, next, how, message);
+      fixed++;
+      await sleep(FIELD_FILL_PACE_MS);
+    }
+    return fixed;
+  }
+
   // Normalized job URL this content-script instance already auto-submitted
   // — never submit the same application twice.
   let _autoSubmittedJobKey = null;
@@ -4477,7 +4556,8 @@
     }
     const jobKey = normalizeUrl(currentAnalysis.url || window.location.href);
     if (_autoSubmittedJobKey === jobKey) return false;
-    if (hasVisibleValidationErrors()) {
+    if (hasVisibleValidationErrors() && (await fixFieldsFromErrorMessages()) > 0) await waitForDomSettled();
+    if (hasVisibleValidationErrors({ fieldMessages: 'unanswered' })) {
       setStatus('Not submitting — the form is showing an error. Fix it, then click "Resume Auto Mode".', 'error');
       console.info('[JobMatch AI][Auto-Bid] not submitting: page shows an error —', Array.from(document.querySelectorAll('[aria-invalid="true"], [role="alert"]')).filter(e => e.offsetParent !== null).map(e => e.id || e.getAttribute('name') || (e.textContent || '').trim().slice(0, 80)));
       return false;
@@ -4515,9 +4595,11 @@
     // "Missing entry for required field: X" for a field that visibly holds
     // our value means the form never registered it (see fillInput's focus
     // events) — re-commit those values, the way clicking into each field
-    // fixes it by hand, and submit once more.
-    if (hasVisibleValidationErrors() && (await recommitFieldsNamedInErrors()) > 0) {
-      console.info('[JobMatch AI][Auto-Bid] re-committed fields the form reported missing — submitting again');
+    // fixes it by hand, and submit once more. A value rejected with a
+    // message ("Must be a valid … URL") is rewritten to satisfy it first.
+    if (hasVisibleValidationErrors()
+      && (await fixFieldsFromErrorMessages()) + (await recommitFieldsNamedInErrors()) > 0) {
+      console.info('[JobMatch AI][Auto-Bid] fixed / re-committed fields the form rejected — submitting again');
       (findFinalSubmitButton() || submitBtn).click();
       await waitForDomSettled();
     }
@@ -4576,9 +4658,18 @@
    * making AutoFill's multi-step loop believe step 1 had already failed
    * and stop right after the very first "Next" click, before step 2 was
    * ever even filled in.
+   *
+   * fieldMessages — how to count a message shown only in a field's own
+   * wrapper (Paylocity's .form-group.form-error, see lib/fieldErrorFix.js):
+   * 'all' (default); 'unanswered', skipping fields that now hold an answer
+   * — the page re-checks those only on its next Submit/Next, so before
+   * that click they are stale (Paylocity flags its acknowledgement box the
+   * moment the last step renders, ticked or not); 'none', for a step that
+   * just rendered.
+   * @param {{fieldMessages?: 'all'|'unanswered'|'none'}} [opts]
    * @returns {boolean}
    */
-  function hasVisibleValidationErrors() {
+  function hasVisibleValidationErrors({ fieldMessages = 'all' } = {}) {
     for (const el of document.querySelectorAll('[aria-invalid="true"], [role="alert"]')) {
       if (el.offsetParent === null) continue;
       // An EMPTY alert region is just a screen-reader live region waiting
@@ -4591,7 +4682,29 @@
         && /\b(page is loaded|successfully uploaded)\b/i.test(el.textContent || '')) continue;
       return true;
     }
+    // Forms that flag only the field's wrapper — Paylocity's
+    // .form-group.form-error with a footnote under the input, no
+    // aria-invalid and no alert (see lib/fieldErrorFix.js).
+    if (fieldMessages === 'none') return false;
+    for (const el of document.querySelectorAll('input:not([type="hidden"]), select, textarea')) {
+      if (el.offsetParent === null || !fieldErrorMessage(el)) continue;
+      if (fieldMessages === 'unanswered' && fieldHoldsAnswer(el)) continue;
+      return true;
+    }
     return false;
+  }
+
+  /**
+   * Does this field hold an answer right now — ticked, chosen or typed?
+   * Unlike hasAnswer(), a box ticked by default counts (Paylocity's
+   * acknowledgement carries the checked attribute once ticked).
+   * @param {Element} el
+   * @returns {boolean}
+   */
+  function fieldHoldsAnswer(el) {
+    if (el.type === 'checkbox') return el.checked;
+    if (el.type === 'radio') return el.checked || (!!el.name && Array.from(document.getElementsByName(el.name)).some(r => r.checked));
+    return !!(el.value || '').trim();
   }
 
   /**
@@ -4761,7 +4874,7 @@
         }
         // Another automated run (e.g. the URL-change path) is already going.
         if (_autoBidAutofillRun || _autoBidContinuationActive || _resumeAutoBidInFlight) return;
-        if (getFormStepSignature() === stuckSignature || hasVisibleValidationErrors()) return;
+        if (getFormStepSignature() === stuckSignature || hasVisibleValidationErrors({ fieldMessages: 'none' })) return;
         await waitForDomSettled();
         if (getFormStepSignature() === stuckSignature) return;
         stopManualStepWatch();
@@ -4866,7 +4979,13 @@
           if (attempt === 1) {
             console.info('[JobMatch AI][Auto-Bid] Next was rejected — filling the flagged/empty fields once more and retrying');
             btn.innerHTML = '<span class="jm-spinner"></span> Re-filling this step...';
+            // Read the page's messages before the re-fill (typing may hide
+            // them), then rewrite each rejected value to satisfy its message
+            // — Paylocity: "Must be a valid LinkedIn URL. Example: https://…"
+            // for a "linkedin.com/in/…" the re-fill just typed again.
+            const rejected = collectFieldErrorMessages();
             await fillCurrentAutofillStep();
+            await fixFieldsFromErrorMessages(rejected);
             next = findNextStepButton() || nextBtn;
             btn.innerHTML = '<span class="jm-spinner"></span> Moving to next step...';
           }
@@ -4882,7 +5001,10 @@
           // "advanced" re-filled the SAME step and clicked Next again, over
           // and over up to MAX_AUTOFILL_STEPS.
           const stepDidNotAdvance = getFormStepSignature() === stepBeforeNext;
-          advanced = !(hasVisibleValidationErrors() || stepDidNotAdvance);
+          // A NEW step may flag its fields' wrappers as soon as it renders
+          // (Paylocity's acknowledgement) — only the error markers say Next
+          // was rejected there; on the same step, its messages do too.
+          advanced = !(stepDidNotAdvance || hasVisibleValidationErrors({ fieldMessages: 'none' }));
           if (!advanced && stepDidNotAdvance) console.info('[JobMatch AI][Auto-Bid] Next did not move to another step');
         }
         if (!advanced) {

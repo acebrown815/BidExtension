@@ -56,6 +56,7 @@ import {
   buildJobAnalysisPrompt,   // Builds the prompt that scores/analyses a JD against the user's profile
   buildAutofillPrompt,      // Builds the prompt that maps form fields to profile data
   buildDropdownMatchPrompt, // Builds the prompt that selects the best option from a dropdown list
+  buildFieldErrorFixPrompt, // Builds the prompt that corrects a field from the form's validation message
   buildCoverLetterPrompt,   // Builds the prompt that writes a tailored cover letter
   buildBulletRewritePrompt, // Builds the ONE consolidated prompt that rewrites resume bullets, summary, languages, and skill categories together to target a specific JD
   buildSingleBulletRewritePrompt, // Builds the prompt to regenerate a single bullet
@@ -431,6 +432,28 @@ async function handleMatchDropdown(questionText, options, resumeId) {
   // AI returned something that doesn't match any option — leave field unfilled
   // rather than submitting a wrong value.
   return null;
+}
+
+/**
+ * Corrects one field's value from the validation message the form showed
+ * for it — content.js tries lib/fieldErrorFix.js's rules first and only
+ * asks here when none of them apply.
+ * @returns {Promise<string|null>} the corrected value, or null to leave it
+ */
+async function handleFixFieldFromError(label, value, errorMessage, resumeId) {
+  const settings = await getSettings();
+  if (!settings.apiKey) throw new Error('No API key configured.');
+  const profile = await getProfileForResume(resumeId);
+  const qaList = await getQAList();
+  const messages = buildFieldErrorFixPrompt(profile, qaList, label, value, errorMessage);
+  const result = await callAI(settings.provider, settings.apiKey, messages, {
+    model: settings.model,
+    temperature: 0,
+    maxTokens: 300
+  });
+  const fixed = String(result || '').trim().replace(/^["'`]|["'`]$/g, '').trim();
+  if (!fixed || /^skip$/i.test(fixed)) return null;
+  return fixed;
 }
 
 // ─── Applied jobs helpers ────────────────────────────────────────────────────
@@ -1483,6 +1506,8 @@ const handlers = {
   'GENERATE_AUTOFILL': (msg) => handleGenerateAutofill(msg.formFields, msg.resumeId),
 
   'MATCH_DROPDOWN': (msg) => handleMatchDropdown(msg.questionText, msg.options, msg.resumeId),
+
+  'FIX_FIELD_FROM_ERROR': (msg) => handleFixFieldFromError(msg.label, msg.value, msg.errorMessage, msg.resumeId),
 
   // ── Storage operations ─────────────────────────────────────────────────
   // Direct reads and writes to chrome.storage.local; no AI calls involved.

@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeUrlForCache as mjsNormalize } from '../../lib/urlKey.mjs';
+import '../../lib/fieldErrorFix.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SRC = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -47,8 +48,8 @@ describe('normalizeUrlForCache — a Workday application shares its posting\'s k
 describe('hasVisibleValidationErrors — status announcements are not errors', () => {
   let hasVisibleValidationErrors;
   beforeAll(() => {
-    const code = slice('  function hasVisibleValidationErrors() {', '  /**\n   * A cheap fingerprint of which wizard step');
-    hasVisibleValidationErrors = new Function(`${code} return hasVisibleValidationErrors;`)(); // eslint-disable-line no-new-func
+    const code = slice('  function hasVisibleValidationErrors(', '  /**\n   * A cheap fingerprint of which wizard step');
+    hasVisibleValidationErrors = new Function(`const { fieldErrorMessage } = globalThis.JMFieldErrorFix; ${code} return hasVisibleValidationErrors;`)(); // eslint-disable-line no-new-func
   });
 
   it('ignores Workday\'s "page is loaded" and "successfully uploaded" announcements', () => {

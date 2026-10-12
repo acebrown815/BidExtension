@@ -93,6 +93,8 @@ function buildAutofillForm({
     function getFormStepSignature() { return 'step-' + Math.min(nextClickCount, stuckAfterClicks - 1); }
     async function handleWorkdayAccountStep() { return null; } // covered by workdayAccountStep.test.js
     function findFinalSubmitButton() { return null; } // covered by autoSubmitApplication.test.js
+    function collectFieldErrorMessages() { return []; } // covered by fieldErrorFix.test.js
+    async function fixFieldsFromErrorMessages() { return 0; }
     function findUnfilledRequiredFields() { return globalThis.__stillEmpty ? globalThis.__stillEmpty() : []; }
     async function autoSubmitApplicationIfReady() { return false; }
     function watchForManualStepAdvance() { calls.push({ type: 'watchForManualStepAdvance' }); }
