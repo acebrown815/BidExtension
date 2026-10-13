@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import '../../lib/fieldErrorFix.js';
+import '../../lib/radioGroupLabel.js';
 import '../../lib/fieldFilter.js'; // real hasAnswer for the sliced harness
 
 const CONTENT_JS_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'content.js');
@@ -55,6 +56,7 @@ function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior 
     const isFieldEligible = () => true;
     const { fieldErrorMessage, suggestFixFromErrorMessage } = globalThis.JMFieldErrorFix;
     const _activeResumeId = null;
+    const { radioGroupKey, radiosInGroup } = globalThis.JMRadioGroupLabel;
     const hasAnswer = (el) => globalThis.JMFieldFilter.hasAnswer(el);
     const workdayPromptHasSelection = (el) => !!el.closest('[data-automation-id="multiSelectContainer"]').querySelector('[data-automation-id="selectedItem"]');
     ${realValidation ? VALIDATION : 'function hasVisibleValidationErrors() { return validationError || !!document.querySelector(\'[role="alert"]\'); }'}

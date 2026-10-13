@@ -55,6 +55,11 @@
   // what the user already typed/picked. See lib/fieldFilter.js.
   const shouldKeepExistingAnswer = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.shouldKeepExistingAnswer) || (() => false);
   const fieldShowsError = (globalThis.JMFieldFilter && globalThis.JMFieldFilter.fieldShowsError) || (() => false);
+  // A radio's group: by name, or for nameless radios their shared wrapper.
+  // See lib/radioGroupLabel.js.
+  const radioGroupKey = (globalThis.JMRadioGroupLabel && globalThis.JMRadioGroupLabel.radioGroupKey) || ((r) => r.name);
+  const radiosInGroup = (globalThis.JMRadioGroupLabel && globalThis.JMRadioGroupLabel.radiosInGroup)
+    || ((r) => (r.name ? Array.from(document.getElementsByName(r.name)) : [r]));
   // The validation message a form shows for a field, and a value that
   // satisfies it when the message states its rule. See lib/fieldErrorFix.js.
   const fieldErrorMessage = (globalThis.JMFieldErrorFix && globalThis.JMFieldErrorFix.fieldErrorMessage) || (() => '');
@@ -4276,11 +4281,12 @@
       const type = (el.type || '').toLowerCase();
       if (['hidden', 'submit', 'button', 'file', 'image', 'reset'].includes(type)) return;
       if (type === 'radio') {
-        if (!el.name) return;
-        const group = radioGroups.get(el.name) || { required: false, checked: false, el };
+        const key = radioGroupKey(el);
+        if (!key) return;
+        const group = radioGroups.get(key) || { required: false, checked: false, el };
         group.required = group.required || isRequired(el) || !!el.closest('[aria-required="true"]');
         group.checked = group.checked || el.checked;
-        radioGroups.set(el.name, group);
+        radioGroups.set(key, group);
         return;
       }
       if (type === 'checkbox') {
@@ -4540,6 +4546,9 @@
     return fixed;
   }
 
+  // How many times a rejected Submit is fixed up and clicked again.
+  const MAX_RESUBMITS = 4;
+
   // Normalized job URL this content-script instance already auto-submitted
   // — never submit the same application twice.
   let _autoSubmittedJobKey = null;
@@ -4641,8 +4650,10 @@
     // events) — re-commit those values, the way clicking into each field
     // fixes it by hand, and submit once more. A value rejected with a
     // message ("Must be a valid … URL") is rewritten to satisfy it first.
-    if (hasVisibleValidationErrors()
-      && (await fixFieldsFromErrorMessages()) + (await recommitFieldsNamedInErrors()) > 0) {
+    // Up to MAX_RESUBMITS rounds: a phone number the page calls "not valid"
+    // without saying why gets the next common format each round.
+    for (let round = 0; round < MAX_RESUBMITS && hasVisibleValidationErrors(); round++) {
+      if ((await fixFieldsFromErrorMessages()) + (await recommitFieldsNamedInErrors()) === 0) break;
       console.info('[JobMatch AI][Auto-Bid] fixed / re-committed fields the form rejected — submitting again');
       (findFinalSubmitButton() || submitBtn).click();
       await waitForDomSettled();
@@ -4747,7 +4758,7 @@
    */
   function fieldHoldsAnswer(el) {
     if (el.type === 'checkbox') return el.checked;
-    if (el.type === 'radio') return el.checked || (!!el.name && Array.from(document.getElementsByName(el.name)).some(r => r.checked));
+    if (el.type === 'radio') return radiosInGroup(el).some(r => r.checked);
     return !!(el.value || '').trim();
   }
 
@@ -5776,7 +5787,8 @@
     const radioGroups = {};
     document.querySelectorAll('input[type="radio"]').forEach(radio => {
       if (radio.offsetParent === null) return;
-      const groupName = radio.name;
+      // By name — or, for nameless radios, by their shared wrapper.
+      const groupName = radioGroupKey(radio);
       if (!groupName) return;
       // C3b: skip groups whose name looks like CSRF/tracking/etc.
       if (!isFieldEligible(radio)) return;
@@ -11533,6 +11545,57 @@
   const WORKDAY_DIALOG_WAIT_MS = 10000;
 
   /**
+   * The web address a new-tab Apply link goes to, or null when it is not an
+   * ordinary http(s) link (no href, javascript:, a button).
+   * @param {HTMLElement} el
+   * @returns {string|null}
+   */
+  function applyLinkUrl(el) {
+    if (el.tagName !== 'A') return null;
+    let url;
+    try { url = new URL(el.getAttribute('href') || '', location.href); } catch (_) { return null; }
+    return /^https?:$/.test(url.protocol) ? url.href : null;
+  }
+
+  /**
+   * Does this Apply control go to a different page (not a "#section"
+   * scroll on this one, nor this same URL)?
+   * @param {HTMLElement|null} el
+   * @returns {boolean}
+   */
+  function applyLinkLeadsElsewhere(el) {
+    const href = el ? applyLinkUrl(el) : null;
+    if (!href) return false;
+    const strip = (u) => u.split('#')[0].replace(/\/$/, '');
+    return strip(href) !== strip(location.href);
+  }
+
+  /**
+   * Opens a new-tab Apply link in a new tab, as the page would, with
+   * Auto-Bid carrying on there: the background opens the tab and gives it
+   * this job's analysis, resume and tailored resume (OPEN_APPLY_TAB), and
+   * the new page's checkPendingAutoBidAutofill() runs AutoFill.
+   * @param {string} url
+   * @returns {Promise<boolean>} true if the tab was opened
+   */
+  async function openApplyInNewAutoBidTab(url) {
+    try {
+      await sendMessage({
+        type: 'OPEN_APPLY_TAB',
+        url,
+        analysis: currentAnalysis,
+        activeResumeId: _activeResumeId,
+        tailoredResumeSlot: _tailoredSlotActive ? _tailoredResumeSlot : null,
+      });
+    } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] could not open the application tab:', e && e.message);
+      return false;
+    }
+    setStatus('Opened the application in a new tab — Auto-Bid carries on there.', 'info');
+    return true;
+  }
+
+  /**
    * If the current page has a strong match but no application form yet —
    * e.g. CATS (catsone.com) job postings, whose real form lives on a
    * SEPARATE page reached only by clicking "Apply Now" — clicks that link
@@ -11585,9 +11648,17 @@
       // reached.
       const topFrameFields = detectFormFields();
       const submitBtnHere = findFinalSubmitButton();
-      console.info('[JobMatch AI][Auto-Bid] on this page: %d field(s) to fill, final submit button: %s',
-        topFrameFields.length, submitBtnHere ? JSON.stringify((submitBtnHere.innerText || submitBtnHere.value || '').trim()) : 'none');
-      if (topFrameFields.length > 0 || submitBtnHere) {
+      // Fields, but nothing to submit or move on with, and an Apply link to
+      // ANOTHER page: those fields are the site's own (coinbase.com/careers —
+      // a search box, cookie toggles, a security agent's injected inputs),
+      // not the application. Follow Apply instead of filling them.
+      const applyLeadsAway = topFrameFields.length > 0 && !submitBtnHere && !findNextStepButton()
+        && applyLinkLeadsElsewhere(findApplyButton());
+      console.info('[JobMatch AI][Auto-Bid] on this page: %d field(s) to fill %o, final submit button: %s%s',
+        topFrameFields.length, topFrameFields.slice(0, 5).map(q => q.question_text || q.question_id),
+        submitBtnHere ? JSON.stringify((submitBtnHere.innerText || submitBtnHere.value || '').trim()) : 'none',
+        applyLeadsAway ? ' — the Apply link leads to another page, following it' : '');
+      if ((topFrameFields.length > 0 && !applyLeadsAway) || submitBtnHere) {
         await autofillForm();
         return;
       }
@@ -11609,11 +11680,16 @@
         await autofillForm(); // reports "No form fields found" as usual if the iframe broadcast also comes up empty
         return;
       }
-      // target="_blank" would open a NEW tab whose id we have no way to
-      // connect back to this one — the pending-autofill flag below is keyed
-      // by tab id, so it would never be picked up. Leave this case as
-      // analysis-only rather than guess at rewriting the link's target.
+      // target="_blank" opens a NEW tab, and the pending-autofill state is
+      // kept per tab — so the background opens that tab itself and hands it
+      // the state (see openApplyInNewAutoBidTab).
       if ((applyBtn.getAttribute('target') || '').toLowerCase() === '_blank') {
+        // A plain link (coinbase.com/careers: "Apply now" →
+        // job-boards.greenhouse.io/embed/job_app?…, target="_blank") opens
+        // in a new tab that Auto-Bid carries on in. Anything else (no real
+        // URL, a script-driven control) stays analysis-only.
+        const url = applyLinkUrl(applyBtn);
+        if (url) await openApplyInNewAutoBidTab(url);
         return;
       }
       // Some ATS "Apply" controls are a dropdown-TOGGLE, not a direct
@@ -11650,7 +11726,11 @@
           // rather than guessing further.
           return;
         }
-        if ((menuItem.getAttribute('target') || '').toLowerCase() === '_blank') return;
+        if ((menuItem.getAttribute('target') || '').toLowerCase() === '_blank') {
+          const url = applyLinkUrl(menuItem);
+          if (url) await openApplyInNewAutoBidTab(url);
+          return;
+        }
         finalApplyEl = menuItem;
       }
       // Carry the analysis result (matchScore, matchingSkills, company,

@@ -510,8 +510,10 @@
 
     // ── 3. Radio buttons ──
     const radioGroups = {};
+    // Grouped by name — or, for nameless radios, by their shared wrapper.
+    const groupKey = (globalThis.JMRadioGroupLabel && globalThis.JMRadioGroupLabel.radioGroupKey) || ((r) => r.name);
     document.querySelectorAll('input[type="radio"]').forEach(r => {
-      const name = r.name;
+      const name = groupKey(r);
       if (!name) return;
       if (!isFieldEligible(r)) return; // C3b
       if (shouldKeepExistingAnswer(r)) return; // group already answered

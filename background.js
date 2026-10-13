@@ -1773,6 +1773,32 @@ const handlers = {
     return { set: true };
   },
 
+  // An Apply link that opens a new tab (coinbase.com/careers: "Apply now" →
+  // job-boards.greenhouse.io/embed/job_app?…, target="_blank"): opens it
+  // here — never blocked as a popup — and hands the Auto-Bid state to the
+  // NEW tab, so its page carries on with AutoFill. The tab starts blank and
+  // only loads the link once its state is stored, so it can't read too early.
+  'OPEN_APPLY_TAB': async (msg, sender) => {
+    let url;
+    try { url = new URL(msg.url); } catch (_) { throw new Error('Not a valid Apply link.'); }
+    if (!/^https?:$/.test(url.protocol)) throw new Error('Not a web Apply link.');
+    const opener = sender && sender.tab;
+    const tab = await chrome.tabs.create({
+      url: 'about:blank',
+      active: true,
+      ...(opener ? { openerTabId: opener.id, index: opener.index + 1 } : {}),
+    });
+    await chrome.storage.session.set({
+      [`pendingAutofill_${tab.id}`]: {
+        analysis: msg.analysis || null,
+        activeResumeId: msg.activeResumeId || null,
+        tailoredResumeSlot: msg.tailoredResumeSlot || null,
+      }
+    });
+    await chrome.tabs.update(tab.id, { url: url.href });
+    return { tabId: tab.id };
+  },
+
   'GET_AND_CLEAR_PENDING_AUTOFILL': async (msg, sender) => {
     const tabId = sender && sender.tab && sender.tab.id;
     if (!tabId) return { pending: false, analysis: null, activeResumeId: null, tailoredResumeSlot: null };

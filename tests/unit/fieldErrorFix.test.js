@@ -39,14 +39,14 @@ describe('fieldErrorMessage', () => {
     expect(fieldErrorMessage(document.getElementById('e'))).toBe('');
   });
 
-  it("does not read another field's message from a shared error-classed section", () => {
+  it("does not read another field's message from a shared error-classed section — only its own", () => {
     document.body.innerHTML = `
       <section class="form-error">
         <div><input id="a" value="1"></div>
         <div><input id="b" value="2"><div class="error-message">B is wrong</div></div>
       </section>`;
     expect(fieldErrorMessage(document.getElementById('a'))).toBe('');
-    expect(fieldErrorMessage(document.getElementById('b'))).toBe('');
+    expect(fieldErrorMessage(document.getElementById('b'))).toBe('B is wrong'); // in b's own wrapper
   });
 
   it("reads HubSpot's error under an unticked consent box (input marked, message 5 levels up)", () => {
