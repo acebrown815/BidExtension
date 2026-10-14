@@ -1,6 +1,6 @@
 // Auto-Bid's last step: after filling every step of a multi-step form, it used
 // to stop at the final "Submit" (findNextStepButton never matches a final
-// action). It now submits — only for a match score above 75, only when the
+// action). It now submits — only for a match score above 80, only when the
 // form is complete, and only after marking the job as Applied (which appends
 // the user's Google Sheet row, keyed by the sheet's original job link).
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
@@ -45,7 +45,7 @@ const REVIEW_STEP = `
 function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior Software Engineer' }, tailored = null, markResult = { sheetsSynced: true, sheetsSyncConfigured: true }, validationError = false, realValidation = false } = {}) {
   const events = [];
   const factory = new Function('events', 'analysis', 'tailored', 'markResult', 'validationError', ` // eslint-disable-line no-new-func
-    const MIN_SCORE_TO_APPLY = 75;
+    const MIN_SCORE_TO_APPLY = 80;
     const currentAnalysis = analysis;
     const _tailoredSlotActive = !!tailored;
     const _tailoredResumeSlot = tailored;
@@ -129,8 +129,8 @@ describe('autoSubmitApplicationIfReady', () => {
     expect(events.indexOf('WATCH_APPLY_CONFIRMATION')).toBe(submit - 1);
   });
 
-  it('does not submit (or mark applied) at a score of 75 or below', async () => {
-    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ analysis: { matchScore: 75, url: ORIGINAL_LINK } });
+  it('does not submit (or mark applied) at a score of 80 or below', async () => {
+    const { autoSubmitApplicationIfReady, findFinalSubmitButton, events } = load({ analysis: { matchScore: 80, url: ORIGINAL_LINK } });
     wireSubmit(events);
     expect(await autoSubmitApplicationIfReady(findFinalSubmitButton())).toBe(false);
     expect(events).not.toContain('SUBMIT_CLICKED');
@@ -333,7 +333,7 @@ describe('autoSubmitApplicationIfReady', () => {
 });
 
 describe('Greenhouse "Submit application" (react-select comboboxes)', () => {
-  // Live: every field filled, score above 75, yet "Submit application" was
+  // Live: every field filled, score above 80, yet "Submit application" was
   // never clicked — Greenhouse's react-select inputs stay EMPTY after a
   // choice (shown in a sibling select__single-value), so each answered
   // dropdown was counted as a missing required field.

@@ -3977,10 +3977,10 @@
   // Jobs at or below this AI match score can't be marked as applied — a
   // guardrail against tracking (and syncing to Sheets) applications to
   // obviously poor-fit postings. The button enables only for a score
-  // strictly ABOVE this value (75 itself stays disabled). Only gates the
+  // strictly ABOVE this value (80 itself stays disabled). Only gates the
   // "Mark as Applied" default state; a job already confirmed-synced
   // ("Applied", locked) is left alone.
-  const MIN_SCORE_TO_APPLY = 75;
+  const MIN_SCORE_TO_APPLY = 80;
 
   /**
    * Enables/disables the Mark Applied button based on the current job's AI
@@ -11911,7 +11911,7 @@
    * fields (and advances to the next one, under Auto-Bid), leaving the
    * actual application submission for the user to review and send.
    *
-   * The score threshold reuses MIN_SCORE_TO_APPLY (75) — the same bar that
+   * The score threshold reuses MIN_SCORE_TO_APPLY (80) — the same bar that
    * already gates the "Mark as Applied" button — so "good enough to
    * autofill automatically" and "good enough to mark as applied" stay one
    * consistent number instead of two separate opinions about what counts

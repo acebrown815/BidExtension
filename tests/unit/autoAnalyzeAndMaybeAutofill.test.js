@@ -1,7 +1,7 @@
 // Tests for Auto-Bid's fully-automated analyze step.
 //
 // Behavior (user request): when the best of the (up to 3) compared resumes
-// still scores at or below MIN_SCORE_TO_APPLY (75), Auto-Bid automatically
+// still scores at or below MIN_SCORE_TO_APPLY (80), Auto-Bid automatically
 // runs the same "Improve Resume Bullets" -> "Generate Tailored Resume"
 // flow a user would trigger manually (skipping the manual review step,
 // since this runs unattended), then re-checks the TAILORED resume's own
@@ -62,7 +62,7 @@ function buildHarness({
   const factory = new Function( // eslint-disable-line no-new-func
     'calls', 'matchScore', 'bulletCount', 'bulletListText', 'generateSucceeds', 'tailoredScore', 'tailoredStatusText', 'tailorResumeEnabled',
     `
-    const MIN_SCORE_TO_APPLY = 75;
+    const MIN_SCORE_TO_APPLY = 80;
     let currentAnalysis = null;
     let _tailoredResumeSlot = null;
     let _tailoredSlotActive = false;
@@ -170,7 +170,7 @@ describe('autoAnalyzeAndMaybeAutofill', () => {
   });
 
   it('treats a score exactly at the threshold as not-strong-enough (tailors, does not autofill directly)', async () => {
-    const { calls: log, autoAnalyzeAndMaybeAutofill } = buildHarness({ matchScore: 75, bulletCount: 5, tailoredScore: 90 });
+    const { calls: log, autoAnalyzeAndMaybeAutofill } = buildHarness({ matchScore: 80, bulletCount: 5, tailoredScore: 90 });
     await autoAnalyzeAndMaybeAutofill();
     expect(log).toContain('rewriteBullets');
   });
@@ -207,7 +207,7 @@ describe('autoAnalyzeAndMaybeAutofill', () => {
     const factory = new Function( // eslint-disable-line no-new-func
       'calls',
       `
-      const MIN_SCORE_TO_APPLY = 75;
+      const MIN_SCORE_TO_APPLY = 80;
       let currentAnalysis = null;
       let _tailoredResumeSlot = null;
       let _tailoredSlotActive = false;
