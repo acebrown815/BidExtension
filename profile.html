@@ -772,6 +772,12 @@
         </label>
 
         <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--jm-text);margin-bottom:12px;">
+          <input type="checkbox" id="autoBidCloseTabAfterApply" style="width:auto;margin:0;">
+          Automatically close the job's tab after applying
+          <span style="font-weight:400;font-size:12px;color:#64748b;">once the page confirms the application ("Thanks for applying")</span>
+        </label>
+
+        <label style="display:flex;align-items:center;gap:8px;font-weight:500;color:var(--jm-text);margin-bottom:12px;">
           Jobs to run at once
           <input type="number" id="autoBidBatchSize" min="1" max="50" step="1" value="10" style="width:70px;margin:0;">
           <span style="font-weight:400;font-size:12px;color:#64748b;">pending rows opened per click (1–50, default 10)</span>

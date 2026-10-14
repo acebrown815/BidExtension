@@ -1799,6 +1799,31 @@ const handlers = {
     return { tabId: tab.id };
   },
 
+  // "Close the job's tab after applying" (Auto-Bid setting closeTabAfterApply).
+  // Auto-Bid marks a tab right before it clicks the final Submit; a page in
+  // that tab that then shows "thanks for applying" asks to close it. Only a
+  // tab Auto-Bid itself submitted in, within APPLY_CONFIRM_WATCH_MS, and only
+  // with the setting on, is ever closed.
+  'WATCH_APPLY_CONFIRMATION': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (!tabId) return { watching: false };
+    await chrome.storage.session.set({ [`applyConfirmWatch_${tabId}`]: Date.now() });
+    return { watching: true };
+  },
+
+  'GET_APPLY_CONFIRMATION_WATCH': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    return { watching: !!tabId && (await isWatchingApplyConfirmation(tabId)) };
+  },
+
+  'CLOSE_TAB_AFTER_APPLY': async (msg, sender) => {
+    const tabId = sender && sender.tab && sender.tab.id;
+    if (!tabId || !(await isWatchingApplyConfirmation(tabId))) return { closed: false };
+    await chrome.storage.session.remove(`applyConfirmWatch_${tabId}`);
+    await chrome.tabs.remove(tabId);
+    return { closed: true };
+  },
+
   'GET_AND_CLEAR_PENDING_AUTOFILL': async (msg, sender) => {
     const tabId = sender && sender.tab && sender.tab.id;
     if (!tabId) return { pending: false, analysis: null, activeResumeId: null, tailoredResumeSlot: null };
@@ -1824,7 +1849,25 @@ const handlers = {
 chrome.tabs.onRemoved.addListener((tabId) => {
   chrome.storage.session.remove(`tabJD_${tabId}`).catch(() => {});
   chrome.storage.session.remove(`pendingAutofill_${tabId}`).catch(() => {});
+  chrome.storage.session.remove(`applyConfirmWatch_${tabId}`).catch(() => {});
 });
+
+// How long after Auto-Bid's Submit click a "thanks for applying" page may
+// still close the tab (a slow redirect to a confirmation page included).
+const APPLY_CONFIRM_WATCH_MS = 5 * 60 * 1000;
+
+/**
+ * Did Auto-Bid submit in this tab recently, with "close the tab after
+ * applying" turned on?
+ * @param {number} tabId
+ * @returns {Promise<boolean>}
+ */
+async function isWatchingApplyConfirmation(tabId) {
+  const key = `applyConfirmWatch_${tabId}`;
+  const at = (await chrome.storage.session.get(key))[key];
+  if (!at || Date.now() - at > APPLY_CONFIRM_WATCH_MS) return false;
+  return !!(await getAutoBidSettings()).closeTabAfterApply;
+}
 
 /**
  * Routes an incoming extension message to the appropriate handler function

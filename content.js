@@ -4173,6 +4173,8 @@
   // it), so a broken page can't loop indefinitely. Real multi-step ATS
   // wizards seen so far (Dice's included) top out well under this.
   const MAX_AUTOFILL_STEPS = 10;
+  // How long a Next click with no error showing may take to move on.
+  const NEXT_STEP_SLOW_WAIT_MS = 8000;
 
   /**
    * Finds a multi-step application form's "advance to the next step"
@@ -4465,7 +4467,6 @@
       if (el.checked || el.offsetParent === null || el.disabled || !isFieldEligible(el)) continue;
       if (!isRequiredConsentBox(el)) continue;
       clickNatively(el);
-      console.info('[JobMatch AI][Auto-Bid] ticked the required "%s"', (getFieldLabel(el) || el.id || '').slice(0, 80));
       ticked++;
       await sleep(CHOICE_CLICK_PACE_MS);
     }
@@ -4519,7 +4520,6 @@
         // the page flagged it, so the tick never reached its state.
         if (el.checked) { clickNatively(el); await sleep(CHOICE_CLICK_PACE_MS); }
         clickNatively(el);
-        console.info('[JobMatch AI][Auto-Bid] ticked "%s" (the page\'s message: "%s")', getFieldLabel(el) || el.id, message);
         fixed++;
         await sleep(CHOICE_CLICK_PACE_MS);
         continue;
@@ -4527,9 +4527,7 @@
       const value = el.value || '';
       if (!value.trim()) continue;
       let next = suggestFixFromErrorMessage(value, message);
-      let how = 'by its rule';
       if (next == null) {
-        how = 'by the AI';
         try {
           next = await sendMessage({ type: 'FIX_FIELD_FROM_ERROR', label: getFieldLabel(el), value, errorMessage: message, resumeId: _activeResumeId });
         } catch (e) {
@@ -4539,7 +4537,6 @@
       }
       if (typeof next !== 'string' || !next.trim() || next === value) continue;
       recommitFieldValue(el, next);
-      console.info('[JobMatch AI][Auto-Bid] "%s" → "%s" (%s, from the page\'s message: "%s")', value, next, how, message);
       fixed++;
       await sleep(FIELD_FILL_PACE_MS);
     }
@@ -4548,6 +4545,46 @@
 
   // How many times a rejected Submit is fixed up and clicked again.
   const MAX_RESUBMITS = 4;
+
+  // The page an application lands on once it went through: "Thank you for
+  // applying", "Your application has been received!", GoFasti's "We have
+  // received your application and will be in touch shortly", "Application
+  // submitted"…
+  const APPLICATION_CONFIRMED_RE = /\bthanks? (?:you )?for (?:applying|your application|submitting)|\byour application (?:has been|was|is) (?:received|submitted|sent|completed?)|\bwe(?:'ve| have)? received your application|\bapplication (?:was |has been )?(?:successfully )?(?:submitted|received)|\bsuccessfully (?:submitted|applied)/i;
+  // How long a page keeps checking for that confirmation.
+  const APPLICATION_CONFIRMED_WAIT_MS = 20000;
+
+  /**
+   * Does the page say the application went through? The form's own Submit
+   * button must be gone too, so a form page that merely mentions "your
+   * application is submitted" in its text never counts.
+   * @returns {boolean}
+   */
+  function pageShowsApplicationConfirmed() {
+    const body = document.body;
+    const text = body ? String(body.innerText || body.textContent || '').slice(0, 50000) : '';
+    return APPLICATION_CONFIRMED_RE.test(text) && !findFinalSubmitButton();
+  }
+
+  /**
+   * "Close the job's tab after applying": waits for the confirmation and
+   * asks the background to close this tab (it only does so for a tab
+   * Auto-Bid just submitted in, with the setting on).
+   * @returns {Promise<boolean>} true if the tab is being closed
+   */
+  async function closeTabOnceApplicationConfirmed() {
+    let watch;
+    try { watch = await sendMessage({ type: 'GET_APPLY_CONFIRMATION_WATCH' }); } catch (_) { return false; }
+    if (!watch || !watch.watching) return false;
+    for (const deadline = Date.now() + APPLICATION_CONFIRMED_WAIT_MS; Date.now() < deadline; await sleep(1000)) {
+      if (!pageShowsApplicationConfirmed()) continue;
+      try {
+        const r = await sendMessage({ type: 'CLOSE_TAB_AFTER_APPLY' });
+        return !!(r && r.closed);
+      } catch (_) { return false; }
+    }
+    return false;
+  }
 
   // Normalized job URL this content-script instance already auto-submitted
   // — never submit the same application twice.
@@ -4643,6 +4680,10 @@
     // Native click, same as the Next/Continue clicks that advanced every
     // earlier step (autoBidClick) — deliberately NOT autoBidClick itself,
     // which would re-stash the state cleared just above.
+    // Marked first: the click may navigate to a confirmation page, whose
+    // fresh content script then closes the tab (see
+    // closeTabOnceApplicationConfirmed).
+    try { await sendMessage({ type: 'WATCH_APPLY_CONFIRMATION' }); } catch (_) {}
     submitBtn.click();
     await waitForDomSettled();
     // "Missing entry for required field: X" for a field that visibly holds
@@ -4662,6 +4703,7 @@
       setStatus('Submitted, but the site reported an error — please check the page.', 'error');
     } else {
       setStatus(`Marked as applied and submitted (match ${score}%).`, 'success');
+      closeTabOnceApplicationConfirmed(); // fire-and-forget; the page may still be loading it
     }
     return true;
   }
@@ -5055,6 +5097,18 @@
           // aria-invalid / role="alert" on the page), and treating that as
           // "advanced" re-filled the SAME step and clicked Next again, over
           // and over up to MAX_AUTOFILL_STEPS.
+          // A slow Next: Paylocity validates the page first and only then
+          // moves on (SET_PAGE_VALIDATION_CONTEXT … WIZARD_ADVANCE_TO_NEXT_STEP),
+          // which outlasted the settle wait — the step was taken as "did not
+          // move", and its re-fill ran into the next step as it rendered.
+          // With no error showing, give it NEXT_STEP_SLOW_WAIT_MS to move on.
+          if (getFormStepSignature() === stepBeforeNext) {
+            for (const until = Date.now() + NEXT_STEP_SLOW_WAIT_MS;
+              getFormStepSignature() === stepBeforeNext && !hasVisibleValidationErrors() && Date.now() < until;) {
+              await sleep(400);
+            }
+            if (getFormStepSignature() !== stepBeforeNext) await waitForFormFieldsReady();
+          }
           const stepDidNotAdvance = getFormStepSignature() === stepBeforeNext;
           // A NEW step may flag its fields' wrappers as soon as it renders
           // (Paylocity's acknowledgement) — only the error markers say Next
@@ -5351,6 +5405,15 @@
     const answers = response.answers || response;
     const { filled, skipped } = await fillFormFromAnswers(Array.isArray(answers) ? answers : []);
     let totalFilled = directFilled + filled;
+
+    // The derived answers once more, for fields still empty: Paylocity's
+    // "Available to Start" can render after the first pass at the top of
+    // this step, and the Q&A/AI write that came next (in one go) is thrown
+    // away by its masked date box — only the derived pass types it key by
+    // key. Recruiting.paylocity.com/…/Apply/4582763 left it empty.
+    try { totalFilled += await fillDerivedAnswers(); } catch (e) {
+      console.warn('[JobMatch AI][Auto-Bid] fillDerivedAnswers (end of step) threw:', e && e.message);
+    }
 
     // Also try any iframes on the page, even though the top frame DID
     // have fields to fill above. The old code only broadcast to iframes
@@ -5766,10 +5829,14 @@
         // Workday's own aria-label is just " Select One Required" — the
         // question lives in the field's <label>/<legend>.
         const isReactWidgets = trigger.classList.contains('rw-dropdownlist');
-        const label = (isWorkdaySelect && getWorkdayFieldLabel(trigger))
+        let label = (isWorkdaySelect && getWorkdayFieldLabel(trigger))
           || (isReactWidgets && (trigger.getAttribute('data-for') || '').trim())
           || getFieldLabel(trigger);
         if (!label) return;
+        // Which reference it is about ("Reference 2: Personal or Work
+        // Reference?"), so the saved answer for that reference is the one used.
+        const refCtx = globalThis.JMReferenceFields && globalThis.JMReferenceFields.referenceContext(trigger);
+        if (refCtx && !/^reference \d/i.test(label)) label = `${refCtx.label}: ${label}`;
         seen.add(qid);
         questions.push({
           question_id: qid,
@@ -6777,7 +6844,16 @@
    * @param {HTMLElement} input - Any form element.
    * @returns {string} The best label text found, or ''.
    */
+  // A field in a "Reference N" block is labelled "Reference 1 Name": the AI,
+  // the Q&A match and the personal-info refill then never take it for the
+  // applicant's own name/email/phone — see lib/referenceFields.js.
   function getFieldLabel(input) {
+    const label = getFieldLabelRaw(input);
+    const ref = globalThis.JMReferenceFields;
+    return ref ? ref.withReferencePrefix(input, label) : label;
+  }
+
+  function getFieldLabelRaw(input) {
     // 0. Rippling-only override — see getRipplingFieldLabel().
     if (isRipplingPage()) {
       const rippling = getRipplingFieldLabel(input);
@@ -7220,6 +7296,40 @@
   }
 
   /**
+   * Types `text` the way the browser does for real keystrokes: the box is
+   * focused and each character goes in through document.execCommand
+   * ('insertText'), so the page sees genuine beforeinput/input events from
+   * the browser's own editing — scripted key events never insert anything,
+   * and some masked inputs only accept text that arrives this way.
+   * Skips a separator the mask already inserted itself.
+   * @param {HTMLInputElement} el
+   * @param {string} text
+   * @returns {Promise<boolean>} false if the box couldn't be focused
+   */
+  async function insertTextLikeTyping(el, text) {
+    if (typeof document.execCommand !== 'function') return false;
+    try { el.focus(); } catch (_) {}
+    if (document.activeElement !== el) return false;
+    // Cleared the same way — a box with its own memory of what was typed
+    // ignores a value written by script, and new text then lands after the
+    // old ("1000-10-14-2026").
+    for (let i = 0; i < 3 && (el.value || '') !== ''; i++) {
+      try { el.select(); } catch (_) {}
+      document.execCommand('delete');
+    }
+    for (const ch of text) {
+      // A separator the box already put in itself — whichever one it uses
+      // ("10-" for our "10/") — is not typed again.
+      if (!/\d/.test(ch) && /\D$/.test(el.value || '')) continue;
+      if (!document.execCommand('insertText', false, ch)) return false;
+      await sleep(30);
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    try { el.blur(); } catch (_) {}
+    return true;
+  }
+
+  /**
    * Fills a date into a text date box and checks it took (the box keeps the
    * date's digits). Types the date in the field's own format (skipping a
    * separator a mask inserts itself), then falls back to a plain write.
@@ -7231,13 +7341,23 @@
     const digits = (t) => String(t || '').replace(/\D/g, '');
     const took = async () => {
       await sleep(400);
-      // The digits decide; a page that re-validates later may keep the
-      // field flagged a while, and a retry would only overwrite a good date.
-      return digits(el.value) === digits(value);
+      // The digits decide (and a date with separators must keep some —
+      // "10202026" is not a date); a page that re-validates later may keep
+      // the field flagged a while, and a retry would only overwrite a good date.
+      return digits(el.value) === digits(value) && (!/\D/.test(value) || /\D/.test(el.value || ''));
     };
+    // Browser-inserted text first: Paylocity's newer date box
+    // (recruiting.paylocity.com/…/Apply/4582763) threw away both the
+    // scripted keystrokes and a one-go write — "did not stick … shows ''".
+    // Then the digits alone, for a box that adds every separator itself.
+    // Once text can be inserted this way, the scripted fallbacks are not
+    // tried: on such a box they only pile up on top of what is there.
+    let insertable = false;
     const attempts = [
-      ['typed', () => typeIntoInputKeyByKey(el, value)],
-      ['set', async () => { fillInput(el, value); }],
+      ['inserted', async () => { insertable = await insertTextLikeTyping(el, value); }],
+      ['inserted as digits', async () => { if (insertable) await insertTextLikeTyping(el, digits(value)); }],
+      ['typed', async () => { if (!insertable) await typeIntoInputKeyByKey(el, value); }],
+      ['set', async () => { if (!insertable) fillInput(el, value); }],
     ];
     for (const [how, attempt] of attempts) {
       await attempt();
@@ -12174,6 +12294,9 @@
     // checkPendingAutoBidAutofill) — a cheap no-op on every page load
     // except the one immediately following such a click.
     checkPendingAutoBidAutofill();
+    // A confirmation page reached by Auto-Bid's Submit click: close the tab
+    // when "close the job's tab after applying" is on (one message, else).
+    closeTabOnceApplicationConfirmed();
     // Note: a previous version of this code had a MutationObserver +
     // setInterval that aggressively re-appended our hosts whenever a page
     // detached them. On heavily-React-driven sites (Greenhouse job boards

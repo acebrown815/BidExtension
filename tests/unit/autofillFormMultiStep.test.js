@@ -74,6 +74,7 @@ function buildAutofillForm({
     let _tailoredSlotActive = tailoredSlotActive;
     let _tailoredResumeSlot = tailoredResumeSlot;
     const MAX_AUTOFILL_STEPS = maxSteps;
+    const NEXT_STEP_SLOW_WAIT_MS = 0; // the stand-in steps move on at once
     let nextButtonsRemaining = stepCount;
     let nextClickCount = 0;
     function findNextStepButton() {

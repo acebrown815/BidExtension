@@ -74,7 +74,7 @@ function load({ analysis = { matchScore: 88, url: ORIGINAL_LINK, title: 'Senior 
       el.dispatchEvent(new FocusEvent(bubbling, { bubbles: true }));
     }
     ${SECTION}
-    return { findFinalSubmitButton, findUnfilledRequiredFields, autoSubmitApplicationIfReady };
+    return { findFinalSubmitButton, findUnfilledRequiredFields, autoSubmitApplicationIfReady, pageShowsApplicationConfirmed };
   `);
   return { ...factory(events, analysis, tailored, markResult, validationError), events };
 }
@@ -124,7 +124,9 @@ describe('autoSubmitApplicationIfReady', () => {
     expect(mark).toBeLessThan(cleared);
     expect(cleared).toBeLessThan(submit);
     expect(events[mark].markApplied.score).toBe(88);
-    expect(events.at(-1)).toEqual({ status: 'Marked as applied and submitted (match 88%).', level: 'success' });
+    expect(events).toContainEqual({ status: 'Marked as applied and submitted (match 88%).', level: 'success' });
+    // the tab is marked for "close after applying" right before the Submit click
+    expect(events.indexOf('WATCH_APPLY_CONFIRMATION')).toBe(submit - 1);
   });
 
   it('does not submit (or mark applied) at a score of 75 or below', async () => {
@@ -380,5 +382,32 @@ describe('findUnfilledRequiredFields', () => {
         <div data-automation-id="selectedItem">United States of America (+1)</div></div></div>
     `;
     expect(load().findUnfilledRequiredFields().sort()).toEqual(['r1', 'source--source', 'terms']);
+  });
+});
+
+// "Automatically close the job's tab after applying": the page an
+// application lands on once it went through.
+describe('pageShowsApplicationConfirmed', () => {
+  it.each([
+    ['Your application has been received!'],
+    ['Thank you for your interest in joining the GoFasti team. We have received your application and will be in touch shortly.'],
+    ['Thanks for applying! We will review your application.'],
+    ['Thank you for applying to Coinbase.'],
+    ['Application submitted'],
+  ])('confirmed: %s', (text) => {
+    document.body.innerHTML = `<main><h1>${text}</h1>
+<a href="/careers">Back to jobs</a></main>`;
+    expect(load().pageShowsApplicationConfirmed()).toBe(true);
+  });
+
+  it('not on a form page that mentions it — the Submit button is still there', () => {
+    document.body.innerHTML = `<p>After your application is submitted, we will email you.</p>
+      <button type="submit">Submit application</button>`;
+    expect(load().pageShowsApplicationConfirmed()).toBe(false);
+  });
+
+  it('not on a job description', () => {
+    document.body.innerHTML = '<p>Thank you for your interest in Coinbase. Apply now to join the Platform team.</p><a href="https://job-boards.greenhouse.io/x">Apply now</a>';
+    expect(load().pageShowsApplicationConfirmed()).toBe(false);
   });
 });

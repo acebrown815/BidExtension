@@ -19,10 +19,10 @@ describe('normalizeAutoBidBatchSize', () => {
 
 describe('withAutoBidDefaults', () => {
   it('defaults for a fresh install', () => {
-    expect(withAutoBidDefaults(undefined)).toEqual({ tailorResumeEnabled: true, batchSize: 10 });
+    expect(withAutoBidDefaults(undefined)).toEqual({ tailorResumeEnabled: true, closeTabAfterApply: false, batchSize: 10 });
   });
   it('keeps settings saved before the batch size existed', () => {
-    expect(withAutoBidDefaults({ tailorResumeEnabled: false })).toEqual({ tailorResumeEnabled: false, batchSize: 10 });
+    expect(withAutoBidDefaults({ tailorResumeEnabled: false })).toEqual({ tailorResumeEnabled: false, closeTabAfterApply: false, batchSize: 10 });
   });
   it('a saved batch size wins over the default', () => {
     expect(withAutoBidDefaults({ tailorResumeEnabled: true, batchSize: 5 }).batchSize).toBe(5);

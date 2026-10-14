@@ -1835,6 +1835,11 @@ document.getElementById('autoBidTailorResumeEnabled').addEventListener('change',
   await sendMessage({ type: 'SAVE_AUTOBID_SETTINGS', settings: { tailorResumeEnabled: e.target.checked } });
 });
 
+/** "Automatically close the job's tab after applying" — saved on change. */
+document.getElementById('autoBidCloseTabAfterApply').addEventListener('change', async (e) => {
+  await sendMessage({ type: 'SAVE_AUTOBID_SETTINGS', settings: { closeTabAfterApply: e.target.checked } });
+});
+
 /**
  * "Jobs to run at once" — how many pending rows one "Analyze Pending Jobs"
  * click opens. Saved on change; the box then shows the value background.js
@@ -2034,6 +2039,8 @@ async function init() {
     // Defaults to enabled (matches the auto-bid pipeline's original,
     // non-configurable behavior) — only an explicit false unchecks it.
     document.getElementById('autoBidTailorResumeEnabled').checked = !autoBidSettings || autoBidSettings.tailorResumeEnabled !== false;
+    // Off unless turned on — closing tabs is opt-in.
+    document.getElementById('autoBidCloseTabAfterApply').checked = !!(autoBidSettings && autoBidSettings.closeTabAfterApply);
     showAutoBidBatchSize(autoBidSettings && autoBidSettings.batchSize);
 
     // Update visibility of the "Clear saved keys" link

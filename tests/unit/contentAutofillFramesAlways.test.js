@@ -82,6 +82,7 @@ function buildAutofillForm({
     const workdayActiveStepName = () => '';
     async function waitForWorkdayStepRendered() {}
     const MAX_AUTOFILL_STEPS = 10;
+    const NEXT_STEP_SLOW_WAIT_MS = 0;
     function findNextStepButton() { return null; }
     async function waitForDomSettled() {}
     async function waitForFormFieldsReady() {}

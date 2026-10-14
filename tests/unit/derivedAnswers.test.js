@@ -185,6 +185,54 @@ describe('fillDateField — a date box that only takes typed characters', () => 
       <div><button type="button"><i aria-label="Delete"></i></button><button type="button" id="info.dateAvailableToStart-button" aria-haspopup="dialog" aria-expanded="false"><i aria-label="Calendar"></i></button></div></div></div>
     <div class="type-footnote show">Available to Start (date) is required</div></div>`;
 
+  it('inserts the date through the browser (execCommand insertText) first', async () => {
+    // Live (Apply/4582763): scripted keys and a one-go write both left the
+    // newer Paylocity date box empty — "did not stick … it shows ''".
+    document.body.innerHTML = PAYLOCITY_DATE;
+    const input = document.getElementById('info.dateAvailableToStart');
+    const commands = [];
+    document.execCommand = (cmd, _ui, text) => {
+      commands.push(cmd);
+      const el = document.activeElement;
+      if (cmd === 'insertText') el.value += text;
+      if (cmd === 'delete') el.value = '';
+      return true;
+    };
+    vi.useRealTimers();
+    try {
+      expect(await derived(env).fillDateField(input, '10/20/2026')).toBe(true);
+    } finally {
+      delete document.execCommand;
+    }
+    expect(input.value).toBe('10/20/2026');
+    expect(commands.filter(c => c === 'insertText')).toHaveLength(10);
+  });
+
+  it('lets a masked box put in its own separators, and clears it the same way first', async () => {
+    // Live: a box that inserts "-" itself showed "1000-10-14-2026" — our "/"
+    // was typed after its "-", and old text was never really cleared.
+    document.body.innerHTML = PAYLOCITY_DATE;
+    const input = document.getElementById('info.dateAvailableToStart');
+    input.value = '10-00-'; // what the box already holds
+    document.execCommand = (cmd, _ui, ch) => {
+      const el = document.activeElement;
+      if (cmd === 'delete') { el.value = ''; return true; }
+      if (cmd !== 'insertText') return false;
+      if (!/\d/.test(ch)) return true; // the mask ignores typed separators
+      el.value += ch;
+      const n = el.value.replace(/\D/g, '').length;
+      if (n === 2 || n === 4) el.value += '-';
+      return true;
+    };
+    vi.useRealTimers();
+    try {
+      expect(await derived(env).fillDateField(input, '10/20/2026')).toBe(true);
+    } finally {
+      delete document.execCommand;
+    }
+    expect(input.value).toBe('10-20-2026');
+  });
+
   it('types the date when a one-go write is thrown away', async () => {
     document.body.innerHTML = PAYLOCITY_DATE;
     const input = document.getElementById('info.dateAvailableToStart');

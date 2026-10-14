@@ -35,7 +35,15 @@
 
   // ─── Label extraction (tries multiple strategies) ───────────────
 
+  // A field in a "Reference N" block is labelled "Reference 1 Name", so the
+  // applicant's own details never go into it — see lib/referenceFields.js.
   function getElementLabel(el) {
+    const label = getElementLabelRaw(el);
+    const ref = globalThis.JMReferenceFields;
+    return ref ? ref.withReferencePrefix(el, label) : label;
+  }
+
+  function getElementLabelRaw(el) {
     // 1. <label for="id">
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
@@ -212,6 +220,14 @@
       'location (city)': (profile?.location || '').split(',')[0]?.trim() || '',
       'city': (profile?.location || '').split(',')[0]?.trim() || '',
     };
+
+    // A reference's field ("reference 1 phone number"): the saved reference
+    // answers by number and kind of field — never the applicant's profile.
+    const refMatch = l.match(/^reference (\d+) (.+)$/);
+    if (refMatch) {
+      const refAnswer = globalThis.JMReferenceFields && globalThis.JMReferenceFields.referenceAnswer(qaList, +refMatch[1], refMatch[2]);
+      if (refAnswer) return refAnswer;
+    }
 
     // Profile match: ONLY exact label match (no fuzzy)
     if (profileMap[l] !== undefined && profileMap[l]) {
