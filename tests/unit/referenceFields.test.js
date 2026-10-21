@@ -107,3 +107,47 @@ describe('filling the References step', () => {
     expect(document.getElementById('references.email.1').value).toBe('');
   });
 });
+
+// Workday questionnaire: one textarea for a whole reference, its question in
+// the <legend>. The AI filled the reference's name and title but the
+// applicant's own phone and email; the saved "Professional Reference" answer
+// lists each reference as a block of lines.
+describe('one box for a whole reference (Workday)', () => {
+  const LABEL = 'Please provide the following information for your first professional reference: Name Job Title Company Professional Relationship Phone Number Email Address';
+  const SAVED = [{
+    question: 'Professional Reference',
+    answer: 'yang.pulse@reconnect.io\nYang Pulse\nFull Stack Developer at Reconnect.io\n\nraghu@collaboratesolutions.org\nRaghu Singh\nSoftware Engineer at CollaborateSolutions',
+  }];
+  const field = (ordinal) => `
+    <div data-automation-id="formField-3bac" class="css-gvoll6"><fieldset><legend><div class="css-f6y8ld"><div data-automation-id="richText"><p>Please provide the following information for your ${ordinal} professional reference:</p><ul><li><p>Name</p></li><li><p>Job Title</p></li><li><p>Company</p></li><li><p>Professional Relationship</p></li><li><p>Phone Number</p></li><li><p>Email Address<abbr title="required" class="requiredAsterisk">*</abbr></p></li></ul></div></div></legend>
+    <div><div><textarea id="primaryQuestionnaire--${ordinal}" aria-required="true"></textarea></div></div></fieldset></div>`;
+
+  it('composes the reference from the saved block — never the applicant\'s phone or email', () => {
+    expect(R.combinedReferenceAnswer(SAVED, LABEL).answer)
+      .toBe('Yang Pulse | Full Stack Developer | Reconnect.io | Professional reference | yang.pulse@reconnect.io');
+    expect(R.combinedReferenceAnswer(SAVED, LABEL.replace('first', 'second')).answer)
+      .toBe('Raghu Singh | Software Engineer | CollaborateSolutions | Professional reference | raghu@collaboratesolutions.org');
+  });
+
+  it('reads a phone line, list markers and "Key: value" lines in a block', () => {
+    const qa = [{ question: 'References', answer: '1. Ann Wu\n303-555-0101\nEmail: ann@acme.com\n\n- Bo Li\nPhone: +1 (720) 555-0199' }];
+    const label = 'Second reference: name, phone and email';
+    expect(R.combinedReferenceAnswer(qa, label.replace('Second', 'First')).answer).toBe('Ann Wu | 303-555-0101 | ann@acme.com');
+    expect(R.combinedReferenceAnswer(qa, label).answer).toBe('Bo Li | +1 (720) 555-0199');
+  });
+
+  it('uses per-reference entries, and is not taken for a single reference field', () => {
+    expect(R.combinedReferenceAnswer(QA, 'Reference 2: name and phone number').answer).toBe('Tom Lee | 303-555-0202');
+    expect(R.combinedReferenceAnswer(QA, 'Reference 1 Phone Number')).toBeNull();
+    expect(R.combinedReferenceAnswer(SAVED, LABEL.replace('first', 'third')).answer).toBeNull();
+  });
+
+  it('fills the Workday textareas from the saved block', async () => {
+    document.body.innerHTML = field('first') + field('second');
+    for (const t of document.querySelectorAll('textarea')) Object.defineProperty(t, 'offsetParent', { get: () => document.body });
+    await window.__jobMatchDirectFill(SAVED, PROFILE);
+    expect(document.getElementById('primaryQuestionnaire--first').value)
+      .toBe('Yang Pulse | Full Stack Developer | Reconnect.io | Professional reference | yang.pulse@reconnect.io');
+    expect(document.getElementById('primaryQuestionnaire--second').value).toMatch(/^Raghu Singh \|.*raghu@collaboratesolutions\.org$/);
+  });
+});

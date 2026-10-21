@@ -93,6 +93,17 @@
       parent = parent.parentElement;
     }
 
+    // 8b. Workday questionnaire: the question is the field's <legend>, with
+    //     no <label> at all.
+    const wdField = el.closest('[data-automation-id^="formField-"]');
+    const legend = wdField && wdField.querySelector('legend');
+    if (legend && wdField.querySelectorAll('input:not([type=hidden]), textarea, select').length === 1) {
+      // Its rich text is <p>/<li> blocks: textContent would run them
+      // together ("…reference:NameJob TitleCompany…").
+      const blocks = legend.querySelectorAll('p, li');
+      return cleanLabel(blocks.length ? Array.from(blocks, b => b.textContent).join(' ') : legend.textContent);
+    }
+
     // 9. name attribute as fallback
     if (el.name) return cleanLabel(el.name.replace(/_/g, ' ').replace(/\[.*\]/, ''));
 
@@ -184,11 +195,10 @@
       value = adjusted;
     }
     // React overrides the value setter, so we need to use the native one
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, 'value'
-    )?.set || Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, 'value'
-    )?.set;
+    // (the textarea's own setter for a textarea — the input one throws
+    // "Illegal invocation" on it)
+    const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
 
     if (nativeInputValueSetter) {
       nativeInputValueSetter.call(el, value);
@@ -228,6 +238,12 @@
       const refAnswer = globalThis.JMReferenceFields && globalThis.JMReferenceFields.referenceAnswer(qaList, +refMatch[1], refMatch[2]);
       if (refAnswer) return refAnswer;
     }
+    // One box for a whole reference ("…your first professional reference:
+    // Name, Job Title, … Phone Number, Email Address"): composed from the
+    // saved reference answers only — not the generic match below, which
+    // would paste every saved reference in.
+    const combined = globalThis.JMReferenceFields && globalThis.JMReferenceFields.combinedReferenceAnswer(qaList, label);
+    if (combined) return combined.answer;
 
     // Profile match: ONLY exact label match (no fuzzy)
     if (profileMap[l] !== undefined && profileMap[l]) {

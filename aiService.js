@@ -756,6 +756,9 @@ RULES:
      DOES show (e.g. "I haven't used AgentCore specifically, but I have built LLM agent workflows with
      LangChain and AWS Bedrock at Acme."). NEVER claim experience, projects or employers the profile does
      not support.
+   - A field about a REFERENCE (someone who vouches for the candidate) is about that person, not the
+     candidate: NEVER put the candidate's own name, phone or email from the profile in it. Use only the
+     reference details in the qa_hint / saved Q&A; leave out any part they don't give.
    - LinkedIn URL, GitHub URL, and portfolio/website URL are DIFFERENT fields with different values.
      NEVER substitute one for another (e.g. never put the LinkedIn URL into a GitHub field, or vice versa)
      even if only one of them is present in the profile. If the specific one asked for is missing → NEEDS_USER_INPUT.
