@@ -296,11 +296,13 @@
       if (theme === 'dark') panel.classList.add('theme-dark');
       if (theme === 'warm') panel.classList.add('theme-warm');
     }
-    // Update FAB toggle button colors
+    // Update FAB toggle button colors — the ★ button only; the logo button
+    // keeps its own white disc and neutral shadow (.jm-has-logo).
     if (toggleBtnRef) {
       const colors = THEME_FAB_COLORS[theme] || THEME_FAB_COLORS.blue;
-      toggleBtnRef.style.background = colors.bg;
-      toggleBtnRef.style.boxShadow = `0 4px 12px ${colors.shadow}`;
+      const logo = toggleBtnRef.classList.contains('jm-has-logo');
+      toggleBtnRef.style.background = logo ? '' : colors.bg;
+      toggleBtnRef.style.boxShadow = logo ? '' : `0 4px 12px ${colors.shadow}`;
     }
     // Update the theme toggle button indicator
     if (shadowRoot) {
@@ -492,6 +494,7 @@
 
       .jm-header h2 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin: 0; flex: 1; min-width: 0; }
       .jm-header h2 > .jm-icon { font-size: 30px; line-height: 1; flex-shrink: 0; }
+      .jm-header h2 > .jm-logo-img { width: 32px; height: 32px; border-radius: 50%; background: #fff; }
       .jm-header .jm-title-text { display: flex; flex-direction: column; min-width: 0; }
       .jm-header .jm-title-text .jm-main-title { font-size: 16px; font-weight: 700; line-height: 1.2; white-space: nowrap; }
       .jm-header .jm-title-text .jm-subtitle { font-size: 10px; font-weight: 400; opacity: 0.75; line-height: 1.2; white-space: nowrap; }
@@ -956,6 +959,22 @@
       .jm-toggle:hover {
         transform: scale(1.1);
         box-shadow: 0 6px 16px var(--jm-fab-shadow, rgba(59,130,246,0.5));
+      }
+      /* The logo fills the round button (its own white disc and red ring). */
+      .jm-toggle.jm-has-logo {
+        background: #fff;
+        padding: 0;
+        overflow: hidden;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+      }
+      .jm-toggle.jm-has-logo:hover { box-shadow: 0 6px 16px rgba(0,0,0,0.3); }
+      .jm-toggle.jm-has-logo.dragging { box-shadow: 0 8px 20px rgba(0,0,0,0.35); }
+      .jm-toggle-logo {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        pointer-events: none; /* drag/click events stay on the button */
+        user-select: none;
       }
       .jm-toggle.dragging {
         cursor: grabbing;
@@ -1513,9 +1532,9 @@
     return `
       <div class="jm-header">
         <h2>
-          <span class="jm-icon">&#9733;</span>
+          ${logoUrl() ? `<img class="jm-icon jm-logo-img" src="${logoUrl()}" alt="">` : '<span class="jm-icon">&#9733;</span>'}
           <div class="jm-title-text">
-            <span class="jm-main-title">JobMatch AI</span>
+            <span class="jm-main-title">BidBot</span>
             <span class="jm-subtitle">Resume &amp; Job Analyzer</span>
           </div>
         </h2>
@@ -1832,6 +1851,16 @@
   }
 
   // ─── Toggle button (always visible) ────────────────────────────
+  /**
+   * The BidBot logo (icons/icon128.png, web-accessible) for the floating
+   * button and the panel header, or '' when the extension context is gone
+   * (reloaded under an open page) — callers show the ★ then.
+   * @returns {string}
+   */
+  function logoUrl() {
+    try { return chrome.runtime.getURL('icons/icon128.png'); } catch (_) { return ''; }
+  }
+
   // The ★ button is a separate Shadow DOM host from the panel so it can float
   // freely without interfering with the panel's stacking context.
   // It supports both mouse drag and touch drag, and persists its last position
@@ -1848,10 +1877,22 @@
     const btn = document.createElement('button');
     btn.className = 'jm-toggle';
     btn.id = 'jobmatch-ai-toggle';
-    btn.innerHTML = '&#9733;';
-    btn.title = 'JobMatch AI';
+    const logo = logoUrl();
+    if (logo) {
+      btn.classList.add('jm-has-logo');
+      btn.innerHTML = `<img class="jm-toggle-logo" src="${logo}" alt="" draggable="false">`;
+      // The ★ again if the image can't load.
+      btn.querySelector('img').addEventListener('error', () => {
+        btn.classList.remove('jm-has-logo');
+        btn.innerHTML = '&#9733;';
+        applyTheme(_currentTheme); // the theme's colors for the ★ button
+      }, { once: true });
+    } else {
+      btn.innerHTML = '&#9733;';
+    }
+    btn.title = 'BidBot';
     btn.setAttribute('role', 'button');
-    btn.setAttribute('aria-label', 'Open JobMatch AI panel');
+    btn.setAttribute('aria-label', 'Open BidBot panel');
     btn.setAttribute('aria-pressed', 'false');
     btn.setAttribute('tabindex', '0');
     toggleBtnRef = btn;
@@ -2355,7 +2396,7 @@
 
     // Update accessibility attributes on the toggle button
     if (toggleBtnRef) {
-      toggleBtnRef.setAttribute('aria-label', panelOpen ? 'Close JobMatch AI panel' : 'Open JobMatch AI panel');
+      toggleBtnRef.setAttribute('aria-label', panelOpen ? 'Close BidBot panel' : 'Open BidBot panel');
       toggleBtnRef.setAttribute('aria-pressed', String(panelOpen));
     }
 
@@ -7155,7 +7196,7 @@
     if (!fieldEl || !fieldEl.isConnected) return;
     const badgeEl = document.createElement('div');
     badgeEl.textContent = 'AI';
-    badgeEl.title = 'Filled by JobMatch AI — please review';
+    badgeEl.title = 'Filled by BidBot — please review';
     badgeEl.style.cssText = [
       'position:fixed', 'z-index:2147483647', 'background:#3b82f6', 'color:#fff',
       'font:600 10px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',

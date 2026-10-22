@@ -2,7 +2,8 @@
   "name": "jobmatchai",
   "version": "1.0.5",
   "private": true,
-  "description": "JobMatch AI Chrome extension — devDependencies are tests only; the extension itself ships as plain JS files with no build step.",
+  "author": "ChonLyong",
+  "description": "BidBot Chrome extension (by ChonLyong) — devDependencies are tests only; the extension itself ships as plain JS files with no build step.",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",

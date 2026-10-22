@@ -1,6 +1,6 @@
 # Google Sheets Sync — one-time setup
 
-This lets JobMatch AI push every job you mark "Applied" to a Google Sheet
+This lets BidBot push every job you mark "Applied" to a Google Sheet
 automatically. It works via a small Apps Script web app that runs under
 your own Google account — no Google API key involved (Sheets doesn't
 support writing to a private spreadsheet with a bare key).
@@ -65,7 +65,7 @@ same URL.
 
 ## 7. Configure the extension
 
-In the JobMatch AI extension: **Profile → Settings → Google Sheets
+In the BidBot extension: **Profile → Settings → Google Sheets
 Sync**:
 
 - Paste the Web App URL from step 5 into **Web App URL**.

@@ -1,17 +1,17 @@
-# JobMatch AI (BidExtension fork)
+# BidBot
 
 **Smart Chrome Extension for Job Seekers** — Analyze any job posting against your resume, get a match score and skill gap analysis, auto-fill applications, generate cover letters (with `.docx` / `.pdf` export), rewrite and tailor resume bullets, and track every job you apply to — including an optional sync of applied jobs to a Google Sheet.
 
-This is a personal fork of [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI), maintained at [acebrown815/BidExtension](https://github.com/acebrown815/BidExtension). It is **not** the version published on the Chrome Web Store — see [Installation](#installation-developer--local-build) below to load it unpacked. Key differences from the upstream project are called out throughout this document and summarized in [What's Different From Upstream](#whats-different-from-upstream).
+BidBot is built and maintained by **ChonLyong**. It is a fork of [wadekarg/JobMatchAI](https://github.com/wadekarg/JobMatchAI) (JobMatch AI), maintained at [acebrown815/BidExtension](https://github.com/acebrown815/BidExtension). It is **not** the version published on the Chrome Web Store — see [Installation](#installation-developer--local-build) below to load it unpacked. Key differences from the upstream project are called out throughout this document and summarized in [What's Different From Upstream](#whats-different-from-upstream).
 
 ![Chrome](https://img.shields.io/badge/Chrome-MV3-brightgreen?logo=googlechrome&logoColor=white)
 ![AI Powered](https://img.shields.io/badge/AI-Powered-blueviolet)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
 <p align="center">
-  <img src="screenshots/panel-overview.png" alt="JobMatch AI side panel open on a job posting, showing resume list and action buttons" width="900">
+  <img src="screenshots/panel-overview.png" alt="BidBot side panel open on a job posting, showing resume list and action buttons" width="900">
 </p>
-<p align="center"><em>JobMatch AI panel open on a job posting — resume switcher, one-click Analyze, AutoFill, Cover Letter, Improve Resume Bullets, and more.</em></p>
+<p align="center"><em>BidBot panel open on a job posting — resume switcher, one-click Analyze, AutoFill, Cover Letter, Improve Resume Bullets, and more.</em></p>
 
 ---
 
@@ -50,7 +50,7 @@ Results are cached per URL. You get a consistent score every session — click *
 
 Click **AutoFill Application** and the extension scans every field on the page and fills it in two passes: first directly from your saved Q&A answers (no AI call), then it sends whatever's still empty to the AI along with your resume profile and writes those answers straight into the form too — **there is no review/approve step before fields are written** in this fork (see below).
 
-Every field AutoFill touches gets a small "AI" badge pinned to it (hover for "Filled by JobMatch AI — please review"), and a dismissible **"Review before submitting"** warning banner appears in the panel afterward as a reminder to check the form before you hit Submit.
+Every field AutoFill touches gets a small "AI" badge pinned to it (hover for "Filled by BidBot — please review"), and a dismissible **"Review before submitting"** warning banner appears in the panel afterward as a reminder to check the form before you hit Submit.
 
 **Resume file upload.** AutoFill also detects résumé/CV file-upload fields (by label/name/`accept`, skipping anything that also reads as a cover letter, portfolio, transcript, or references upload) and attaches a file automatically — no AI call. Specifically:
 
@@ -207,7 +207,7 @@ Switch between **Ocean Blue** (light), **Dark Mode**, and **Warm Amber** using t
 
 ## Where It Works
 
-JobMatch AI works on any website with a job posting. It has dedicated extraction and auto-fill support for the most widely used platforms:
+BidBot works on any website with a job posting. It has dedicated extraction and auto-fill support for the most widely used platforms:
 
 | Site | JD Extraction | Salary | Location | Auto-Fill |
 |------|:---:|:---:|:---:|:---:|
@@ -243,7 +243,7 @@ Analyzing or auto-filling several job tabs at once is safe: which resume's profi
 
 ## AI Provider — Your Key, Your Data
 
-JobMatch AI uses your own OpenAI API key and calls the OpenAI Chat Completions API directly from the browser. Nothing passes through any external server (other than the optional Google Sheets sync webhook, see above). Your resume, your answers, and your API key are stored locally in Chrome's storage.
+BidBot uses your own OpenAI API key and calls the OpenAI Chat Completions API directly from the browser. Nothing passes through any external server (other than the optional Google Sheets sync webhook, see above). Your resume, your answers, and your API key are stored locally in Chrome's storage.
 
 <p align="center">
   <img src="screenshots/ai-settings.png" alt="Settings page showing provider dropdown, API key input, model selection, temperature slider, and Test Connection button" width="900">
@@ -258,7 +258,7 @@ Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys
 
 - **🔄 Refresh models** — click the refresh button next to the model dropdown and the extension pulls OpenAI's **current** model list directly from the `/models` API. No more being stuck on a deprecated model id.
 - **Custom model entry** — pick `Custom…` to paste in any OpenAI model id, including brand-new ones.
-- **Saved key** — JobMatch AI remembers your API key locally. A "Clear saved keys" link in Settings wipes it.
+- **Saved key** — BidBot remembers your API key locally. A "Clear saved keys" link in Settings wipes it.
 
 ---
 
@@ -398,4 +398,4 @@ Have an idea but not sure where to start? Open an [issue](https://github.com/ace
 
 ## License
 
-MIT
+MIT. © 2026 ChonLyong. Based on [JobMatch AI](https://github.com/wadekarg/JobMatchAI) by wadekarg, published under the MIT License.

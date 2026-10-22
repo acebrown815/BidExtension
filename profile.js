@@ -1151,7 +1151,7 @@ document.getElementById('loadDefaultQABtn').addEventListener('click', () => {
 
 /**
  * "Export" button handler — downloads the current qaList as a JSON file so
- * it can be re-imported into JobMatch AI on another browser or computer
+ * it can be re-imported into BidBot on another browser or computer
  * instead of retyping every answer.
  */
 document.getElementById('exportQABtn').addEventListener('click', () => {
@@ -1164,7 +1164,7 @@ document.getElementById('exportQABtn').addEventListener('click', () => {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `jobmatch-ai-qa-answers-${dateStr}.json`;
+  a.download = `bidbot-qa-answers-${dateStr}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1250,7 +1250,7 @@ document.getElementById('qaImportFile').addEventListener('change', async (e) => 
 });
 
 /**
- * "Export All Data" — downloads the user's whole JobMatch AI configuration
+ * "Export All Data" — downloads the user's whole BidBot configuration
  * (profile, resumes, Q&A answers, saved/applied jobs, AI Settings, and
  * Google Sheets sync) as one JSON file, for moving to another browser or
  * computer via "Import All Data" there. Unlike the Q&A-only export above,
@@ -1269,12 +1269,12 @@ document.getElementById('exportAllBtn').addEventListener('click', async () => {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `jobmatch-ai-backup-${dateStr}.json`;
+  a.download = `bidbot-backup-${dateStr}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  showToast('Exported your JobMatch AI data. Keep the file private — it includes your API key and Sheets sync secret.');
+  showToast('Exported your BidBot data. Keep the file private — it includes your API key and Sheets sync secret.');
 });
 
 /** "Import All Data" — just opens the hidden file picker. */
@@ -1302,11 +1302,11 @@ document.getElementById('allDataImportFile').addEventListener('change', async (e
     const text = await file.text();
     payload = JSON.parse(text);
   } catch (err) {
-    showToast('Could not read that file — is it a valid JobMatch AI backup?');
+    showToast('Could not read that file — is it a valid BidBot backup?');
     return;
   }
   if (!payload || typeof payload !== 'object' || !payload.data || typeof payload.data !== 'object') {
-    showToast("That file doesn't look like a JobMatch AI backup.");
+    showToast("That file doesn't look like a BidBot backup.");
     return;
   }
 

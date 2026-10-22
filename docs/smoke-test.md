@@ -1,4 +1,4 @@
-# JobMatch AI — Smoke Test Checklist
+# BidBot — Smoke Test Checklist
 
 Run after each refactor batch. ~5 minutes. Stop at the first failure and revert
 the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
@@ -9,7 +9,7 @@ the batch (`git revert <sha>`) — every batch is one commit, easy to roll back.
 
 ## Steps
 
-1. **Extension loads** — open `chrome://extensions`. JobMatch AI shows no errors.
+1. **Extension loads** — open `chrome://extensions`. BidBot shows no errors.
 2. **Panel opens** — visit a LinkedIn job posting. Click the floating ★ button.
    Side panel appears, no console errors.
 3. **Analyze** — click **Analyze Job**. Score appears within 30 s.

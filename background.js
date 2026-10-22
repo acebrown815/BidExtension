@@ -609,7 +609,7 @@ const BACKUP_KEYS = [
 async function exportAllData() {
   const data = await chrome.storage.local.get(BACKUP_KEYS);
   return {
-    app: 'JobMatch AI',
+    app: 'BidBot',
     exportType: 'full-backup',
     version: 1,
     exportedAt: new Date().toISOString(),
@@ -637,7 +637,7 @@ async function exportAllData() {
  */
 async function importAllData(payload) {
   if (!payload || typeof payload !== 'object' || !payload.data || typeof payload.data !== 'object') {
-    throw new Error("That file doesn't look like a JobMatch AI backup.");
+    throw new Error("That file doesn't look like a BidBot backup.");
   }
   const toWrite = {};
   let importedKeys = 0;

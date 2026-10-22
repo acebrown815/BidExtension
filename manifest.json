@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "JobMatch AI – Smart Resume & Job Analyzer",
+  "name": "BidBot",
   "version": "1.0.7",
-  "description": "Analyze job postings against your resume using AI. Get match scores, skill gap analysis, and auto-fill applications.",
+  "description": "AI job matching and application autofill by ChonLyong.",
   "permissions": [
     "storage",
     "unlimitedStorage",
@@ -46,7 +46,8 @@
         "libs/pdf.min.js",
         "libs/pdf.worker.min.js",
         "libs/mammoth.browser.min.js",
-        "libs/jszip.min.js"
+        "libs/jszip.min.js",
+        "icons/icon128.png"
       ],
       "matches": ["<all_urls>"]
     }
