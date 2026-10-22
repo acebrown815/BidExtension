@@ -192,6 +192,20 @@ describe('autofillForm — never advances steps outside Auto-Bid (manual "AutoFi
     expect(calls.filter(c => c.type === 'findNextStepButton').length).toBe(0);
     expect(calls.filter(c => c.type === 'nextButtonClicked').length).toBe(0);
   });
+
+  // It used to stop after one pass, leaving fields "Resume Auto Mode" filled.
+  it('still fills again when a required field is empty after the first pass — but never clicks Next', async () => {
+    let checks = 0;
+    globalThis.__stillEmpty = () => (++checks === 1 ? ['How Did You Hear About Us?'] : []);
+    try {
+      const autofillForm = buildAutofillForm({ stepCount: 2, isAutoBid: false, calls });
+      await autofillForm();
+      expect(calls.filter(c => c.type === 'detectFormFields').length).toBe(2);
+      expect(calls.filter(c => c.type === 'findNextStepButton').length).toBe(0);
+    } finally {
+      delete globalThis.__stillEmpty;
+    }
+  });
 });
 
 describe('autofillForm — stops instead of looping when a step won\'t actually advance (the real bug)', () => {

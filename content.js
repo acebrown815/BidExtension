@@ -4931,6 +4931,14 @@
       }
     }
     if (!currentAnalysis) await recoverCachedAnalysis();
+    // Nothing chose a resume for this job yet (no stashed Auto-Bid state, no
+    // analysis, no pick by hand): pick the best match first, the way an
+    // "AutoFill Application" click does — the call below pins whichever
+    // resume is active, and the two buttons used to fill the same form from
+    // different resumes.
+    if (!currentAnalysis && !_manualResumeSelection) {
+      try { await ensureBestResumeSelected(); } catch (_) {}
+    }
     setStatus('Auto Mode: continuing from this page...', 'info');
     // Its own flag, not _autoBidContinuationActive: an Apply click below can
     // start checkPendingAutoBidAutofill() (URL-change hop), which owns that
@@ -5061,19 +5069,22 @@
           continue;
         }
         await fillCurrentAutofillStep();
-        if (!_autoBidAutofillRun) break;
         // A required field still empty right after filling usually wasn't
         // ready yet — Workday renders a step's sections progressively and
         // its resume parse re-renders the form afterwards (confirmed on
         // gdit.wd5's "How Did You Hear About Us?": empty on the first pass,
         // filled by "Resume Auto Mode"). Let the page settle and fill once
-        // more (only empty/flagged fields are touched) before clicking Next.
+        // more (only empty/flagged fields are touched) — for an "AutoFill
+        // Application" click too, which used to stop after one pass and so
+        // left fields empty that "Resume Auto Mode" filled.
         const stillEmpty = findUnfilledRequiredFields();
         if (stillEmpty.length) {
           console.info('[JobMatch AI][Auto-Bid] required fields still empty after filling — settling and filling again:', stillEmpty);
           await waitForDomSettled(4000, 500);
           await fillCurrentAutofillStep();
         }
+        // Only Auto-Bid moves on to the next step (see _autoBidAutofillRun).
+        if (!_autoBidAutofillRun) break;
         const nextBtn = findNextStepButton();
         if (!nextBtn) {
           // Last step: Auto-Bid submits it itself when the score and the
