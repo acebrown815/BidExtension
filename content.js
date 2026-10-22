@@ -4437,7 +4437,33 @@
 
   // A checkbox message asking the applicant to accept/agree to something
   // (Paylocity's last step: "Please accept the acknowledgement").
-  const CONSENT_MESSAGE_RE = /\b(accept|agree|acknowledg|consent|certif|attest|confirm)/i;
+  const CONSENT_MESSAGE_RE = /\b(accept|agree|acknowledg|consent|certif|attest|confirm|understand)/i;
+
+  /**
+   * The question a lone checkbox answers when its own label is only the
+   * option ("I understand") and the question is the field's heading — an
+   * Ashby one-option checkbox group: "I understand that 1Password offers
+   * of employment are conditional on … a background check." with the box
+   * labelled "I understand", required only by the heading's
+   * `_required_…` class. Sent as just "I understand", not required, the
+   * AI never ticked it.
+   * @param {HTMLInputElement} cb
+   * @returns {{text: string, required: boolean}|null}
+   */
+  function checkboxFieldHeading(cb) {
+    const entry = cb.closest('[data-field-path], fieldset');
+    // Only a field of its own — in a fieldset holding other fields, another
+    // field's label (and its required marker) isn't this box's question.
+    if (!entry || entry.querySelectorAll('input:not([type=hidden]), select, textarea').length !== 1) return null;
+    const own = new Set(Array.from(cb.labels || []));
+    const heading = Array.from(entry.querySelectorAll('legend, label')).find(l => !own.has(l) && !l.contains(cb));
+    const text = heading && labelTextWithoutBadges(heading).replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    return {
+      text,
+      required: /required/i.test(heading.className || '') || entry.getAttribute('aria-required') === 'true' || /\*\s*$/.test(heading.textContent || ''),
+    };
+  }
 
   /**
    * A single checkbox the application requires the applicant to tick to
@@ -4450,9 +4476,10 @@
    */
   function isRequiredConsentBox(el) {
     if (el.type !== 'checkbox' || (el.name && document.getElementsByName(el.name).length > 1)) return false;
-    const text = [getFieldLabel(el), ...Array.from(el.labels || []).map(l => l.textContent)].join(' ').replace(/\s+/g, ' ');
+    const heading = checkboxFieldHeading(el);
+    const text = [getFieldLabel(el), ...Array.from(el.labels || []).map(l => l.textContent), heading && heading.text].join(' ').replace(/\s+/g, ' ');
     if (!CONSENT_MESSAGE_RE.test(text)) return false;
-    return el.required || el.getAttribute('aria-required') === 'true'
+    return el.required || el.getAttribute('aria-required') === 'true' || !!(heading && heading.required)
       || !!el.closest('.form-required, [aria-required="true"]') || /\(required\)|\*/i.test(text);
   }
 
@@ -5979,11 +6006,15 @@
       const qid = cb.id || cb.name || ('cb_' + qIndex);
       if (seen.has(qid)) return;
       seen.add(qid);
+      // The field's heading when the box's own label is just the option
+      // ("…a background check. — I understand") — see checkboxFieldHeading.
+      const heading = checkboxFieldHeading(cb);
+      const asked = heading && heading.text.toLowerCase() !== label.toLowerCase() ? `${heading.text} — ${label}` : label;
       questions.push({
         question_id: qid,
-        question_text: label,
+        question_text: asked,
         field_type: 'checkbox',
-        required: cb.required,
+        required: cb.required || !!(heading && heading.required),
         available_options: ['Yes', 'No']
       });
       _fieldMap[qid] = { el: cb, type: 'checkbox' };
@@ -8311,7 +8342,8 @@
     try {
       const qaList = await sendMessage({ type: 'GET_QA_LIST' }) || [];
       const match = globalThis.JMQaMatch && globalThis.JMQaMatch.qaQuestionMatchesLabel;
-      const referral = /\bhear(?:d)?\b[^?]*\babout\b|\breferr(?:al|ed)\b|\bsource\b/i;
+      // (also Ashby's "What brought you to this job posting")
+      const referral = /\bhear(?:d)?\b[^?]*\babout\b|\breferr(?:al|ed)\b|\bsource\b|\bwhat brought you to\b|\b(?:how|where) did you (?:find|learn|come across|discover)\b/i;
       const qa = qaList.find(q => q && q.answer && match && match(q.question, questionText))
         || (referral.test(questionText) && qaList.find(q => q && q.answer && referral.test(q.question || '')));
       if (qa) texts.push(String(qa.answer).trim());
@@ -8565,7 +8597,10 @@
     if (searchAsYouType) {
       const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
       for (const text of await searchTextsFor(questionText, answerHint)) {
-        const direct = optionEls.find(o => norm(o.text) === norm(text));
+        // Exact, else the first option that starts with it (a saved
+        // "LinkedIn" → Ashby's "LinkedIn Jobs" / "LinkedIn Social Post").
+        const direct = optionEls.find(o => norm(o.text) === norm(text))
+          || (norm(text).length >= 3 && optionEls.find(o => norm(o.text).startsWith(norm(text))));
         if (direct) {
           console.info('[JobMatch AI][Auto-Bid] "%s": picking "%s" (the saved/AI answer "%s")', questionText, direct.text, text);
           await clickCustomDropdownOption(input, direct, optionTexts);
@@ -9815,8 +9850,13 @@
     }
 
     // Strategy 3: Search entire document for visible options (dropdown might be portaled,
-    // e.g. react-select with menuPortalTarget pointing at document.body)
-    if (results.length === 0) {
+    // e.g. react-select with menuPortalTarget pointing at document.body).
+    // Never for a search-as-you-type field (Ashby): its list is the popup it
+    // opens (found above), and before that rendered this matched the form's
+    // own Yes/No buttons and radio options ("_option_…" classes: "Yes",
+    // "No", ">100", "I understand"…) — "What brought you to this job
+    // posting" was matched against those 28 instead of its own 24.
+    if (results.length === 0 && !isSearchAsYouTypeCombobox(triggerEl)) {
       const allOptions = document.querySelectorAll(
         '[role="option"], [role="listbox"] > *, .dropdown-option, [class*="menu-item"], [class*="listbox-option"], [class*="option"]:not([class*="options"])'
       );

@@ -744,6 +744,9 @@ RULES:
      a qa_hint.
    - If NO qa_hint and no matching saved Q&A and it's a demographic field (gender, race, veteran, disability) →
      pick "Prefer not to say" or "Decline to self-identify" if available, otherwise NEEDS_USER_INPUT.
+   - If NO qa_hint and no matching saved Q&A but the USER PROFILE answers it, pick that. A question whether the
+     candidate is a former/current employee of, or has worked for, a named company (e.g. "Are you a former
+     1Password employee?") → "No" unless that company appears in the profile's work history.
    - NEVER guess demographics from the person's name.
 
 2) TEXT/TEXTAREA: Use qa_hint if available. Otherwise, if a SAVED Q&A ANSWERS section appears below, search it
@@ -773,6 +776,8 @@ RULES:
      with a sentence or description (e.g. "Work samples available upon request") — the form rejects it.
 
 3) CHECKBOX: Return "Yes" to check, "No" to uncheck.
+   A "required": true checkbox that only acknowledges or agrees to a statement (e.g. "I understand that offers
+   are conditional on a background check — I understand", terms, privacy notice) → "Yes".
    CHECKBOX_GROUP ("Select all that apply" — field_type "checkbox_group"): return "selected_options": an array of
    EVERY option from available_options (copied exactly) that the profile/saved Q&A genuinely supports. If the field
    is required and none of the substantive options apply, pick the option that honestly says so (e.g. "Haven't

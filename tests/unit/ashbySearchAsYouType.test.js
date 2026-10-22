@@ -120,7 +120,8 @@ describe('Ashby: one shared floating-ui portal, rows reused while typing', () =>
   beforeAll(() => {
     const opts = slice('  function findVisibleOptions(triggerEl, before) {', '  /**\n   * Collects visible, non-placeholder option elements');
     const collect = slice('  function collectOptions(nodeList, results, seen) {', '\n  }\n') + '\n  }\n';
-    ({ findVisibleOptions, snapshotDropdownState } = new Function(`${opts}\n${collect}\nreturn { findVisibleOptions, snapshotDropdownState };`)()); // eslint-disable-line no-new-func
+    const sayt = slice('  function isSearchAsYouTypeCombobox(el) {', '\n  }\n') + '\n  }\n';
+    ({ findVisibleOptions, snapshotDropdownState } = new Function(`${sayt}\n${opts}\n${collect}\nreturn { findVisibleOptions, snapshotDropdownState };`)()); // eslint-disable-line no-new-func
   });
 
   it('reads only the list the arrow opened, inside the portal another field already created', () => {
@@ -131,6 +132,19 @@ describe('Ashby: one shared floating-ui portal, rows reused while typing', () =>
     document.querySelector('[data-floating-ui-portal]').insertAdjacentHTML('beforeend',
       '<div role="listbox" id=":r3:"><div role="option"><span>LinkedIn</span></div><div role="option"><span>MeridianLink Career Site</span></div></div>');
     expect(findVisibleOptions(input(), snap).map(o => o.text)).toEqual(['LinkedIn', 'MeridianLink Career Site']);
+  });
+
+  // jobs.ashbyhq.com/1password: before the popup rendered, the page-wide
+  // fallback took the form's own Yes/No buttons and radio options ("_option_…"
+  // classes) as this field's 28 options, so "LinkedIn Jobs" was never seen.
+  it('never takes the form\'s Yes/No buttons or radio options for its list', () => {
+    document.body.insertAdjacentHTML('beforeend', `
+      <div><button class="_option_1svni_32" data-option="yes">Yes</button><button class="_option_1svni_32" data-option="no">No</button></div>
+      <label class="_option_1258i_34">I understand</label>`);
+    expect(findVisibleOptions(input(), snapshotDropdownState())).toEqual([]);
+    const snap = snapshotDropdownState();
+    document.body.insertAdjacentHTML('beforeend', '<div data-floating-ui-portal=""><div role="listbox"><div role="option"><span>LinkedIn Jobs</span></div></div></div>');
+    expect(findVisibleOptions(input(), snap).map(o => o.text)).toEqual(['LinkedIn Jobs']);
   });
 
   it('picks the typed answer when typing filters the open list down to the same row', async () => {

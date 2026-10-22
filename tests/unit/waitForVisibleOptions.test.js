@@ -44,8 +44,11 @@ beforeAll(() => {
   // sleep() is defined later in content.js — inlined here rather than
   // extracting from far away in the file, since it's a one-liner.
   const sleepDef = 'function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }';
+  // isSearchAsYouTypeCombobox() too — also defined elsewhere in content.js.
+  const saytStart = src.indexOf('  function isSearchAsYouTypeCombobox(el) {');
+  const saytDef = src.slice(saytStart, src.indexOf('\n  }\n', saytStart) + 4);
   // eslint-disable-next-line no-eval
-  const factory = (0, eval)(`(function () { ${sleepDef}\n${extracted} return { waitForVisibleOptions, findVisibleOptions }; })`);
+  const factory = (0, eval)(`(function () { ${sleepDef}\n${saytDef}\n${extracted} return { waitForVisibleOptions, findVisibleOptions }; })`);
   ({ waitForVisibleOptions, findVisibleOptions } = factory());
 });
 

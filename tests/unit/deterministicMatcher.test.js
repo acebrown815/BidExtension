@@ -287,8 +287,24 @@ describe('deterministicFieldMatcher — referral source ("How Did You Hear About
     expect(deterministicFieldMatcher('How Did You Hear About Us?*', options, QA, null).option).toBe('Online Job Board – LinkedIn');
   });
 
-  it('falls through to the AI when nothing is saved for it', () => {
-    expect(deterministicFieldMatcher('How Did You Hear About Us?', ['Agency', 'Internet - LinkedIn'], [], null).matched).toBe(false);
+  // Ashby (jobs.ashbyhq.com/1password): the search-as-you-type field stayed empty.
+  it('reads Ashby\'s "What brought you to this job posting" as the same question', () => {
+    const options = ['Agency', 'Facebook', 'Glassdoor', 'Indeed', 'LinkedIn Jobs', 'LinkedIn Social Post', 'Other', 'Previously worked at 1Password'];
+    expect(deterministicFieldMatcher('What brought you to this job posting', options, QA, null).option).toBe('LinkedIn Jobs');
+    expect(detectTopic('Where did you find this role?')).toBe('referral_source');
+  });
+
+  it('a saved answer under another referral wording beats the LinkedIn default', () => {
+    const ashby = ['Agency', 'Indeed', 'LinkedIn Jobs', 'Other'];
+    const saved = [{ question: 'What brought you to this job posting', answer: 'Indeed' }];
+    expect(deterministicFieldMatcher('How did you hear about us?', ashby, saved, null).option).toBe('Indeed');
+  });
+
+  it('with nothing saved, picks the LinkedIn job-board option — else leaves it to the AI', () => {
+    const ashby = ['Agency', 'Indeed', 'LinkedIn Social Post', 'LinkedIn Jobs', 'Other'];
+    expect(deterministicFieldMatcher('What brought you to this job posting', ashby, [], null).option).toBe('LinkedIn Jobs');
+    expect(deterministicFieldMatcher('How Did You Hear About Us?', ['Agency', 'Internet - LinkedIn'], [], null).option).toBe('Internet - LinkedIn');
+    expect(deterministicFieldMatcher('How Did You Hear About Us?', ['Agency', 'Indeed'], [], null).matched).toBe(false);
   });
 
   it('still leaves relatives questions to their own topic', () => {

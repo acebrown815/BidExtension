@@ -44,7 +44,9 @@ beforeAll(() => {
   const labelHelper = slice('  function labelTextWithoutBadges(label) {', '  /** @returns {boolean} true on a Rippling');
   const options = slice('  function findVisibleOptions(triggerEl, before) {', '  /**\n   * Collects visible, non-placeholder option elements');
   const collect = slice('  function collectOptions(nodeList, results, seen) {', '\n  }\n') + '\n  }\n';
+  const sayt = slice('  function isSearchAsYouTypeCombobox(el) {', '\n  }\n') + '\n  }\n';
   api = new Function(` // eslint-disable-line no-new-func
+    ${sayt}
     ${labelHelper}
     ${options}
     ${collect}

@@ -31,7 +31,10 @@ const TOPIC_PATTERNS = {
   // often didn't come back with the LinkedIn one. Containment matching
   // (matchAnswerToOption step 5) maps the saved answer onto the option.
   referral_source: [
-    /\bhear(?:d)? about\b/i, /\bhow did you (?:find|learn of|learn about)\b/i,
+    /\bhear(?:d)? about\b/i, /\bhow did you (?:find|learn of|learn about|come across|discover)\b/i,
+    /\bwhere did you (?:find|see|learn|discover|come across)\b/i,
+    // Ashby (1Password): "What brought you to this job posting"
+    /\bwhat brought you to\b/i,
     /\breferral source\b/i, /\bsource of (?:application|referral)\b/i
   ],
 
@@ -304,7 +307,10 @@ function findQAAnswers(topic, qaList) {
     const qLower = qa.question.toLowerCase();
 
     // Check every keyword for this topic against the saved question text
-    if (keywords.some(kw => qLower.includes(kw))) {
+    // A referral question saved in any of its wordings ("What brought you to
+    // this job posting") — else the LinkedIn default below overrides it.
+    if (keywords.some(kw => qLower.includes(kw))
+      || (topic === 'referral_source' && TOPIC_PATTERNS.referral_source.some(re => re.test(qa.question)))) {
       answers.push(qa.answer.trim());
     }
   }
@@ -678,6 +684,17 @@ function deterministicFieldMatcher(questionText, options, qaList, profile) {
   if (topic === 'relatives_at_company' && candidateAnswers.length === 0) {
     const no = findNegativeOption(options);
     if (no) return { matched: true, option: no, topic };
+  }
+
+  // Referral source with nothing saved: the AI matcher answers SKIP (no
+  // saved answer to go by) and a required field stays empty — Ashby's
+  // "What brought you to this job posting" was left open with its list
+  // showing. Job postings are found on LinkedIn far more than anywhere
+  // else, so its job-board option is picked; a saved answer always wins.
+  if (topic === 'referral_source' && candidateAnswers.length === 0) {
+    const linkedIn = options.filter(o => /linked\s*in/i.test(o));
+    const pick = linkedIn.find(o => /\bjobs?\b|board/i.test(o)) || linkedIn[0];
+    if (pick) return { matched: true, option: pick, topic };
   }
 
   // ── Step 5: Deterministic matching failed ─────────────────────────────────
