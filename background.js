@@ -497,6 +497,17 @@ async function getAppliedJobs() {
  * @returns {Promise<Object>} The job record — check `.sheetsSynced` to know
  *   whether this call actually confirmed a Sheets sync.
  */
+/**
+ * Today's date as YYYY-MM-DD in the browser's own time zone. toISOString()
+ * gives the UTC date, so a bid made in the evening west of UTC (after 6 pm
+ * in Chicago) was dated the next day in the sheet and in the ERP's daily
+ * reports.
+ */
+function localISODate(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 async function handleMarkApplied(jobData) {
   const jobs = await getAppliedJobs();
   // Match by *normalized* URL so the same posting opened from different
@@ -520,7 +531,7 @@ async function handleMarkApplied(jobData) {
     score: jobData.score || 0,
     url: jobData.url || '',
     resume: jobData.resume || '', // Which saved resume this job was analyzed/applied against
-    date: new Date().toISOString().split('T')[0]
+    date: localISODate()
     // Note: analysis is intentionally omitted here to keep the applied list leaner
   };
 

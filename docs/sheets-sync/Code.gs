@@ -33,6 +33,8 @@ const SHEET_NAME = 'Applications';
 /**
  * Handles POST requests from the extension: either a connectivity/secret
  * check ({ test: true }) or an actual job row to upsert ({ job: {...} }).
+ * Also serves two read-only requests from the ERP: { listTabs: true } and
+ * { readTabs: true | [tab names] } (see readTabs below).
  *
  * Sent with Content-Type: text/plain by the extension (avoids a CORS
  * preflight Apps Script web apps don't handle), so the body is parsed from
@@ -72,7 +74,26 @@ function doPost(e) {
       return jsonResponse({ success: true, jobs: listPendingJobs(data.sheetName) });
     }
 
-    return jsonResponse({ success: false, error: 'Request had neither test, job, nor listPending.' });
+    // ── Read-only actions used by the ERP's Bidding pages ──────────────────
+    // Neither one writes anything or creates a tab, and the extension never
+    // sends them, so adding them changes nothing for the extension.
+
+    if (data.listTabs) {
+      // Every tab in this spreadsheet with its data-row count (header
+      // excluded). One tab per employee: the tab name is the employee's
+      // "Sheet Tab Name" in the extension / "Bidding profile name" in the ERP.
+      return jsonResponse({ success: true, tabs: listTabs() });
+    }
+
+    if (data.readTabs) {
+      // All rows of several tabs in one call. `readTabs: true` reads every
+      // tab; `readTabs: ["Alice", "Bob"]` reads only those (names that don't
+      // exist come back in `missing`, they are NOT created).
+      const names = Array.isArray(data.readTabs) ? data.readTabs : null;
+      return jsonResponse(Object.assign({ success: true }, readTabs(names)));
+    }
+
+    return jsonResponse({ success: false, error: 'Request had neither test, job, listPending, listTabs, nor readTabs.' });
   } catch (err) {
     return jsonResponse({ success: false, error: String(err && err.message || err) });
   }
@@ -240,6 +261,96 @@ function listPendingJobs(sheetName) {
     }
   });
   return pending;
+}
+
+// ─── Read-only helpers for the ERP ──────────────────────────────────────────
+
+/**
+ * Lists every tab with its number of data rows (row 1 is the header).
+ * @returns {Array<{name: string, rows: number}>}
+ */
+function listTabs() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheets().map(function (sheet) {
+    return { name: sheet.getName(), rows: Math.max(sheet.getLastRow() - 1, 0) };
+  });
+}
+
+/**
+ * Reads whole tabs without creating or changing anything.
+ * @param {string[]|null} names Tabs to read, or null for every tab.
+ * @returns {{tabs: Array<{name: string, header: string[], rows: Object[]}>, missing: string[]}}
+ *   Each row is an object keyed by the tab's own header text (so a reordered
+ *   or extended header still reads correctly), plus:
+ *     row     1-indexed sheet row, for a human checking the sheet
+ *     status  'pending'  Link present, Company/Location/Salary/ResumeNo blank
+ *                        (exactly the rule listPendingJobs uses)
+ *             'applied'  anything else with a Link
+ *   Rows without a Link are skipped. Date cells come back as yyyy-MM-dd in
+ *   the spreadsheet's time zone; Link is the URL even when the cell shows
+ *   other text.
+ */
+function readTabs(names) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tz = ss.getSpreadsheetTimeZone();
+  const sheets = names
+    ? names.map(function (n) { return { name: String(n), sheet: ss.getSheetByName(String(n)) }; })
+    : ss.getSheets().map(function (s) { return { name: s.getName(), sheet: s }; });
+
+  const tabs = [];
+  const missing = [];
+  sheets.forEach(function (t) {
+    if (!t.sheet) {
+      missing.push(t.name);
+      return;
+    }
+    tabs.push(readTab(t.sheet, tz));
+  });
+  return { tabs: tabs, missing: missing };
+}
+
+function readTab(sheet, tz) {
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  const name = sheet.getName();
+  if (lastRow < 1 || lastCol < 1) return { name: name, header: [], rows: [] };
+
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function (h) {
+    return String(h).trim();
+  });
+  if (lastRow < 2) return { name: name, header: header, rows: [] };
+
+  const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
+  const values = range.getValues();
+  const linkCol = header.indexOf('Link');
+  // A link pasted as "label → URL" reads back as the label; the rich-text
+  // link holds the real URL. HYPERLINK() cells written by this script
+  // already show the URL itself, so this only matters for hand-pasted links.
+  const richLinks = linkCol >= 0
+    ? sheet.getRange(2, linkCol + 1, lastRow - 1, 1).getRichTextValues()
+    : null;
+
+  const rows = [];
+  values.forEach(function (cells, i) {
+    const row = { row: i + 2 };
+    header.forEach(function (h, c) {
+      if (!h) return;
+      const v = cells[c];
+      const isDate = Object.prototype.toString.call(v) === '[object Date]';
+      row[h] = isDate ? Utilities.formatDate(v, tz, 'yyyy-MM-dd') : v;
+    });
+
+    if (linkCol >= 0) {
+      const rich = richLinks[i][0];
+      const url = rich && rich.getLinkUrl();
+      if (url) row.Link = url;
+    }
+    if (!row.Link) return;  // blank or link-less rows aren't jobs
+
+    const untouched = !row.Company && !row.Location && !row.Salary && !row.ResumeNo;
+    row.status = untouched ? 'pending' : 'applied';
+    rows.push(row);
+  });
+  return { name: name, header: header, rows: rows };
 }
 
 function jsonResponse(obj) {

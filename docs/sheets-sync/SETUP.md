@@ -183,3 +183,28 @@ listPending."
   instead usually means the row was opened and analyzed by hand (pasting
   the link into a new tab yourself) rather than through the pending-jobs
   queue.
+
+## ERP read access (Bidding pages)
+
+The company ERP reads this spreadsheet to show each employee's bids. It uses
+two **read-only** requests, protected by the same `SHARED_SECRET`. The
+extension never sends them, and neither one writes or creates a tab:
+
+- `{ secret, listTabs: true }` →
+  `{ success, tabs: [{ name, rows }] }`, every tab and its number of data rows.
+- `{ secret, readTabs: true }`, or `{ secret, readTabs: ["Tab A", "Tab B"] }` →
+  `{ success, tabs: [{ name, header, rows }], missing }`. Each row is keyed
+  by the tab's own header text (`Date`, `Title`, `Link`, `Company`, `Location`,
+  `Salary`, `ResumeNo`, `Score`, plus any column you added) and also has
+  `row` (sheet row number) and `status`. `status` is `pending` when only
+  the Link is filled, by the same rule as Auto-Bid's pending queue, and
+  `applied` otherwise. Rows without a Link are skipped. Dates come back as
+  `yyyy-MM-dd`. Requested tab names that don't exist are listed in
+  `missing`.
+
+One tab per employee: each employee's **Sheet Tab Name** in the extension
+must match the **Bidding profile name** they set in the ERP.
+
+If your deployment predates these actions, re-deploy (step 6, same URL) to
+pick them up. Until then the ERP gets "Request had neither test, job,
+listPending, listTabs, nor readTabs."
