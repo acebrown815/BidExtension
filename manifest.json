@@ -11,6 +11,7 @@
   ],
   "host_permissions": [
     "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
     "https://script.google.com/*",
     "https://script.googleusercontent.com/*"
   ],

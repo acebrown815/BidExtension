@@ -243,21 +243,22 @@ Analyzing or auto-filling several job tabs at once is safe: which resume's profi
 
 ## AI Provider — Your Key, Your Data
 
-BidBot uses your own OpenAI API key and calls the OpenAI Chat Completions API directly from the browser. Nothing passes through any external server (other than the optional Google Sheets sync webhook, see above). Your resume, your answers, and your API key are stored locally in Chrome's storage.
+BidBot uses your own API key — **OpenAI** or **Anthropic (Claude)**, your choice — and calls that provider's API directly from the browser. Nothing passes through any external server (other than the optional Google Sheets sync webhook, see above). Your resume, your answers, and your API key are stored locally in Chrome's storage.
 
 <p align="center">
   <img src="screenshots/ai-settings.png" alt="Settings page showing provider dropdown, API key input, model selection, temperature slider, and Test Connection button" width="900">
 </p>
-<p align="center"><em>Settings — paste your OpenAI API key, pick a model, set temperature, and click Test Connection to verify before saving.</em></p>
+<p align="center"><em>Settings — pick a provider, paste its API key, pick a model, set temperature, and click Test Connection to verify before saving.</em></p>
 
-This fork supports a **single provider, OpenAI**, unlike upstream JobMatch AI's ten-provider lineup (Anthropic, Google Gemini, Groq, Cerebras, Together AI, OpenRouter, Mistral AI, DeepSeek, Cohere, OpenAI). The provider abstraction (`aiService.js`) is kept generic internally, so another provider could be re-added the same way if needed, but only OpenAI ships today.
+Two providers are supported: **OpenAI** and **Anthropic (Claude)**. Pick one in the Settings provider dropdown; each provider remembers its own key. Every AI feature works the same with either one — `aiService.js` translates the extension's prompts to each provider's API (for Claude: the system prompt goes in its own field, `temperature` is only sent to older models that accept it, and the output budget leaves room for the model's thinking).
 
-Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Built-in models include GPT-4.1, GPT-4.1 Mini, GPT-4o, GPT-4o Mini, o4-mini, and o3-mini (default: GPT-4.1).
+- **OpenAI** — get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Built-in models: GPT-4.1, GPT-4.1 Mini, GPT-4o, GPT-4o Mini, o4-mini, o3-mini (default: GPT-4.1).
+- **Anthropic (Claude)** — get a key at [platform.claude.com/settings/keys](https://platform.claude.com/settings/keys). Built-in models: Claude Opus 5.5, Claude Sonnet 5.5, Claude Haiku 5.5, Claude Fable 5.2 (default: Claude Opus 5.5). The temperature slider has no effect on current Claude models, which don't accept it.
 
 ### Live Model Refresh & Custom Models
 
-- **🔄 Refresh models** — click the refresh button next to the model dropdown and the extension pulls OpenAI's **current** model list directly from the `/models` API. No more being stuck on a deprecated model id.
-- **Custom model entry** — pick `Custom…` to paste in any OpenAI model id, including brand-new ones.
+- **🔄 Refresh models** — click the refresh button next to the model dropdown and the extension pulls the selected provider's **current** model list directly from its `/models` API. No more being stuck on a deprecated model id.
+- **Custom model entry** — pick `Custom…` to paste in any model id from the selected provider, including brand-new ones.
 - **Saved key** — BidBot remembers your API key locally. A "Clear saved keys" link in Settings wipes it.
 
 ---
@@ -270,7 +271,7 @@ Load the extension unpacked (see [Installation](#installation-developer--local-b
 
 ### 2. Configure AI
 
-Go to **Settings**, paste your OpenAI API key, pick a model, and click **Test Connection**. Click **Save Settings**.
+Go to **Settings**, choose OpenAI or Anthropic (Claude), paste your API key, pick a model, and click **Test Connection**. Click **Save Settings**.
 
 ### 3. Upload Your Resume
 
@@ -299,8 +300,8 @@ Go to **Settings → Google Sheets Sync**, follow `docs/sheets-sync/SETUP.md` to
 
 ## Privacy
 
-- Your resume, API key, and Sheets sync secret are stored **locally** in Chrome's storage — never sent to any server other than OpenAI, and (if you enable it) the Google Apps Script web app you deploy yourself for Sheets sync.
-- All AI analysis happens via direct API calls from your browser to OpenAI.
+- Your resume, API key, and Sheets sync secret are stored **locally** in Chrome's storage — never sent to any server other than the AI provider you selected (OpenAI or Anthropic), and (if you enable it) the Google Apps Script web app you deploy yourself for Sheets sync.
+- All AI analysis happens via direct API calls from your browser to the AI provider you selected.
 - No analytics, no tracking, no data collection of any kind.
 
 This fork removes upstream JobMatch AI's H1B/PERM sponsorship-data feature, which called a separate third-party H1B data worker — see [What's Different From Upstream](#whats-different-from-upstream). Upstream's privacy policy (linked from the original project) does not describe this fork's Google Sheets sync feature or its narrower AI-provider surface.
@@ -331,7 +332,7 @@ BidExtension/
 │                               #   Sheets sync, backup/restore
 ├── content.js                 # Side panel UI, job scraping, autofill, notes, badges,
 │                               #   local resume auto-match
-├── aiService.js                # AI provider abstraction (OpenAI only; retry logic)
+├── aiService.js                # AI provider abstraction (OpenAI + Anthropic; retry logic)
 ├── deterministicMatcher.js    # Rule-based dropdown matching (no AI)
 ├── directFill.js               # Low-level field filling helpers
 ├── profile.html / profile.js  # Profile, Q&A, Stats, Auto-Bid, Settings

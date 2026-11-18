@@ -3,15 +3,15 @@
  * @description AI provider abstraction layer for JobMatch AI.
  *
  * This module is the single point of contact for all AI API interactions within
- * the extension. It currently supports a single provider:
- *   - OpenAI                 — OpenAI chat completions style
+ * the extension. It supports two providers, chosen in Settings:
+ *   - OpenAI                 — OpenAI Chat Completions API
+ *   - Anthropic (Claude)     — Anthropic Messages API
  *
- * The module was previously a multi-provider abstraction (Anthropic, Google
- * Gemini, Groq, Cerebras, Together AI, OpenRouter, Mistral AI, DeepSeek,
- * Cohere). Support for those providers was intentionally removed to keep
- * the extension scoped to a single, well-tested provider. The PROVIDERS
- * registry and apiStyle dispatch below are kept generic so another
- * provider can be re-added the same way in the future if needed.
+ * Every caller builds prompts in one neutral shape — an array of
+ * { role: 'system'|'user'|'assistant', content: string } — and gets plain
+ * text back from callAI. Each provider's adapter (fetchOpenAI,
+ * fetchAnthropic) translates that shape to its own wire format, so no
+ * caller needs to know which provider is active.
  *
  * Key responsibilities:
  *   1. Maintaining the canonical provider registry (PROVIDERS) with endpoints,
@@ -64,7 +64,8 @@ const DEFAULT_PROVIDER = 'openai';
 //   name          — Human-readable label shown in the extension UI.
 //   apiStyle      — Selects which HTTP adapter function to use:
 //                     'openai'    → fetchOpenAI
-//   endpoint      — Base URL for the provider's chat API.
+//                     'anthropic' → fetchAnthropic
+//   endpoint     — Base URL for the provider's chat API.
 //   keyPlaceholder — Prefix hint shown in the API key input field.
 //   hint          — User-facing tooltip explaining where to obtain the key.
 //   free          — Whether the provider offers a free tier (used to badge the UI).
@@ -99,6 +100,31 @@ const PROVIDERS = {
     ],
     defaultModel: 'gpt-4.1',
     listModels: fetchOpenAIModels,
+  },
+
+  // ── Anthropic (Claude) ────────────────────────────────────────────
+  // The Anthropic Messages API. Called with raw fetch rather than the
+  // @anthropic-ai/sdk package because the extension ships as plain JS with
+  // no bundler, so an npm package can't be imported by the service worker.
+  // Auth: 'x-api-key: <key>' header (plus 'anthropic-version', and the
+  // direct-browser-access header that CORS requires for a browser origin).
+  // Response path: the text blocks in content[].
+  anthropic: {
+    name: 'Anthropic (Claude)',
+    apiStyle: 'anthropic',
+    endpoint: 'https://api.anthropic.com/v1/messages',
+    keyPlaceholder: 'sk-ant-...',
+    hint: 'Get key at platform.claude.com/settings/keys',
+    keyUrl: 'https://platform.claude.com/settings/keys',
+    free: false,
+    models: [
+      { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
+      { id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5' },
+      { id: 'claude-fable-5-2', name: 'Claude Fable 5.2 (most capable)' },
+    ],
+    defaultModel: 'claude-opus-5-5',
+    listModels: fetchAnthropicModels,
   },
 };
 
@@ -155,6 +181,53 @@ async function fetchOpenAIModels(apiKey) {
   return parseOpenAIModels(json);
 }
 
+// ─── Anthropic ────────────────────────────────────────────────────
+
+/** API version sent on every Anthropic request. */
+const ANTHROPIC_VERSION = '2023-06-01';
+
+/** Headers every Anthropic request needs. */
+function anthropicHeaders(apiKey) {
+  return {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': ANTHROPIC_VERSION,
+    // Required for CORS: without it the API rejects calls from a browser
+    // origin (chrome-extension://, moz-extension://). The key is the
+    // user's own and stays in their browser, which is the case this
+    // header exists for.
+    'anthropic-dangerous-direct-browser-access': 'true',
+  };
+}
+
+/**
+ * Parses Anthropic's GET /v1/models response into [{id, name}].
+ * Every model it lists is a Messages-API chat model; keep claude-* ids
+ * and use the human-readable display_name when present.
+ */
+export function parseAnthropicModels(json) {
+  const data = Array.isArray(json?.data) ? json.data : [];
+  return data
+    .filter(m => /^claude-/.test(m?.id || ''))
+    .map(m => ({ id: m.id, name: m.display_name || m.id }));
+}
+
+async function fetchAnthropicModels(apiKey) {
+  const res = await fetch('https://api.anthropic.com/v1/models?limit=1000', {
+    method: 'GET',
+    headers: anthropicHeaders(apiKey),
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw httpError(res, 'Anthropic');
+  let json;
+  try {
+    json = await res.json();
+  } catch {
+    throw new Error('Unexpected response from Anthropic — use Custom… to enter a model ID manually');
+  }
+  return parseAnthropicModels(json);
+}
+
 // ─── Dispatcher ───────────────────────────────────────────────────
 
 /**
@@ -180,7 +253,7 @@ export async function listProviderModels(providerId, apiKey) {
  * the final params object, and delegates to `dispatchCall` with automatic
  * exponential back-off retry on HTTP 429 (rate limit) errors.
  *
- * @param {string} provider  - Key into PROVIDERS (currently only 'openai').
+ * @param {string} provider  - Key into PROVIDERS ('openai' or 'anthropic').
  * @param {string} apiKey    - User-supplied API key for the chosen provider.
  * @param {Array<{role: string, content: string}>} messages
  *                           - Conversation messages in OpenAI role/content format.
@@ -215,13 +288,19 @@ async function callAI(provider, apiKey, messages, options = {}) {
       return await dispatchCall(config, apiKey, messages, params);
     } catch (e) {
       lastError = e;
-      // Retry on rate-limit (429) and transient server errors (5xx)
-      if (e.status === 429 || e.status === 500 || e.status === 502 || e.status === 503) continue;
+      // Retry on rate-limit (429) and transient server errors (5xx,
+      // including Anthropic's 529 "overloaded").
+      if (isRetryableStatus(e.status)) continue;
       throw wrapAIError(e);
     }
   }
   // All retry attempts exhausted (429 after all retries) — wrap with user-friendly message.
   throw wrapAIError(lastError);
+}
+
+/** HTTP statuses worth retrying: rate limits and transient server errors. */
+function isRetryableStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 529;
 }
 
 /**
@@ -241,7 +320,7 @@ function wrapAIError(e) {
   if (e.status === 429) {
     return new Error('Rate limit exceeded. Please wait a moment and try again.');
   }
-  if (e.status === 500 || e.status === 502 || e.status === 503) {
+  if (isRetryableStatus(e.status)) {
     return new Error('AI provider is temporarily unavailable. Please try again later.');
   }
   // Fallback for any other error
@@ -273,6 +352,7 @@ function wrapAIError(e) {
 function dispatchCall(config, apiKey, messages, params) {
   switch (config.apiStyle) {
     case 'openai': return fetchOpenAI(config, apiKey, messages, params);
+    case 'anthropic': return fetchAnthropic(config, apiKey, messages, params);
     default: throw new Error(`Unsupported API style: ${config.apiStyle}`);
   }
 }
@@ -392,6 +472,216 @@ async function fetchOpenAI(config, apiKey, messages, params) {
     clearTimeout(timeoutId);
     const data = await resp.json();
     return data.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    clearTimeout(timeoutId);
+    if (e.name === 'AbortError') throw new Error('AI request timed out. Please try again.');
+    throw e;
+  }
+}
+
+// ─── Anthropic adapter ───────────────────────────────────────────────
+//
+//   - Auth: 'x-api-key: <key>' + 'anthropic-version' (see anthropicHeaders).
+//   - Request body: { model, max_tokens, system?, messages }.
+//   - Response text: the concatenated 'text' blocks of content[].
+//
+// Differences from OpenAI that this adapter absorbs so callers don't
+// have to:
+//   1. No 'system' role inside messages — system prompts go in the
+//      top-level 'system' field. They are pulled out of the array here.
+//   2. Current models (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable, Opus 4.7+)
+//      reject 'temperature' with a 400. It is sent only to older models
+//      that accept it (CLAUDE_SAMPLING_MODEL_RE); for any other model, a
+//      400 naming 'temperature' drops it and retries, like fetchOpenAI.
+//   3. Current models always think before answering, and thinking tokens
+//      count against max_tokens. The tiny budgets some callers use (100
+//      tokens for the connection test, 200 for a dropdown pick) could be
+//      spent entirely on thinking, leaving no answer. max_tokens is only a
+//      ceiling — billing is for tokens actually produced — so it is raised
+//      to at least CLAUDE_MIN_MAX_TOKENS. If a model's output cap is lower
+//      than that (older models), the 400 is caught and the caller's own
+//      budget is used instead.
+//   4. Safety classifiers can decline a request (HTTP 200 with
+//      stop_reason 'refusal'). For the models that support it, server-side
+//      fallback is turned on so the API re-runs a declined request on a
+//      fallback model in the same call; a refusal that still comes back is
+//      surfaced as an error rather than an empty answer.
+//   5. Anthropic returns 529 when overloaded — retried by callAI.
+//
+
+/** Floor for max_tokens on Claude so thinking can't use up the whole budget. */
+const CLAUDE_MIN_MAX_TOKENS = 16000;
+
+/**
+ * Older Claude models that still accept 'temperature': Claude 3.x and
+ * earlier, and the 4.0–4.6 generation (including the dated
+ * 'claude-sonnet-4-20250514'-style ids). Opus 4.7 and later reject it.
+ */
+const CLAUDE_SAMPLING_MODEL_RE = /^claude-(?:[0-3](?:[-.]|$)|instant|(?:opus|sonnet|haiku)-4(?:-[0-6](?!\d)|-\d{8}|$))/;
+
+/** Models that accept server-side refusal fallback (fallbacks: "default"). */
+const CLAUDE_FALLBACK_MODELS = new Set([
+  'claude-fable-5-2', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5',
+]);
+const CLAUDE_FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+
+/**
+ * Per-model request-shape adjustments discovered at runtime, keyed by model id.
+ * @type {Map<string, {temperature: boolean, raiseMaxTokens: boolean, fallbacks: boolean}>}
+ */
+const anthropicModelQuirks = new Map();
+
+/** Claude can think for a while on large prompts; allow more time than OpenAI. */
+const ANTHROPIC_TIMEOUT_MS = 180000;
+
+/**
+ * Converts the neutral { role, content } message list into Anthropic's
+ * shape: 'system' entries become the top-level system string, the rest
+ * stay as user/assistant turns (consecutive same-role turns are merged).
+ *
+ * @param {Array<{role: string, content: string|Array}>} messages
+ * @returns {{system: string, messages: Array<{role: 'user'|'assistant', content: string}>}}
+ */
+export function toAnthropicMessages(messages) {
+  const textOf = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .map(p => (typeof p === 'string' ? p : (p?.text ?? '')))
+        .join('');
+    }
+    return content == null ? '' : String(content);
+  };
+
+  const systemParts = [];
+  const out = [];
+  for (const m of messages || []) {
+    const text = textOf(m?.content);
+    if (m?.role === 'system' || m?.role === 'developer') {
+      if (text) systemParts.push(text);
+      continue;
+    }
+    const role = m?.role === 'assistant' ? 'assistant' : 'user';
+    const last = out[out.length - 1];
+    if (last && last.role === role) {
+      last.content += '\n\n' + text;
+    } else {
+      out.push({ role, content: text });
+    }
+  }
+  // The Messages API requires the conversation to start with a user turn.
+  if (out.length === 0 || out[0].role !== 'user') {
+    out.unshift({ role: 'user', content: '(continue)' });
+  }
+  return { system: systemParts.join('\n\n'), messages: out };
+}
+
+/**
+ * Builds the Anthropic request body for the given call and quirks.
+ * Exported for tests.
+ */
+export function buildAnthropicBody(messages, params, quirks) {
+  const { system, messages: msgs } = toAnthropicMessages(messages);
+  const body = {
+    model: params.model,
+    max_tokens: quirks.raiseMaxTokens
+      ? Math.max(params.maxTokens, CLAUDE_MIN_MAX_TOKENS)
+      : params.maxTokens,
+    messages: msgs,
+  };
+  if (system) body.system = system;
+  if (quirks.temperature && typeof params.temperature === 'number') {
+    body.temperature = params.temperature;
+  }
+  if (quirks.fallbacks) body.fallbacks = 'default';
+  return body;
+}
+
+/** Starting request shape for a model before any 400 has taught us otherwise. */
+export function defaultAnthropicQuirks(model) {
+  return {
+    temperature: CLAUDE_SAMPLING_MODEL_RE.test(model || ''),
+    raiseMaxTokens: true,
+    fallbacks: CLAUDE_FALLBACK_MODELS.has(model),
+  };
+}
+
+/**
+ * Pulls the answer text out of a Messages API response, or throws when
+ * the model declined or ran out of tokens before writing anything.
+ * Exported for tests.
+ */
+export function extractAnthropicText(data) {
+  const text = (Array.isArray(data?.content) ? data.content : [])
+    .filter(b => b?.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text)
+    .join('');
+  if (data?.stop_reason === 'refusal') {
+    throw new Error('Claude declined this request (safety filter). Try again, or pick a different model in Settings.');
+  }
+  if (!text && data?.stop_reason === 'max_tokens') {
+    throw new Error('Claude ran out of output tokens before answering. Try again, or pick a different model in Settings.');
+  }
+  return text;
+}
+
+/**
+ * Calls the Anthropic Messages endpoint.
+ *
+ * @param {Object} config   - Anthropic provider config from PROVIDERS (apiStyle: 'anthropic').
+ * @param {string} apiKey   - Anthropic API key.
+ * @param {Array}  messages - Messages in the neutral role/content format.
+ * @param {Object} params   - Resolved call params (model, temperature, maxTokens).
+ * @returns {Promise<string>} The response text.
+ */
+async function fetchAnthropic(config, apiKey, messages, params) {
+  const existing = anthropicModelQuirks.get(params.model);
+  const quirks = existing ? { ...existing } : defaultAnthropicQuirks(params.model);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ANTHROPIC_TIMEOUT_MS);
+  try {
+    let resp, errorText;
+    // One attempt per adjustable quirk, plus the first try.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const headers = anthropicHeaders(apiKey);
+      if (quirks.fallbacks) headers['anthropic-beta'] = CLAUDE_FALLBACK_BETA;
+      if (config.extraHeaders) Object.assign(headers, config.extraHeaders);
+
+      resp = await fetch(config.endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers,
+        body: JSON.stringify(buildAnthropicBody(messages, params, quirks)),
+      });
+      if (resp.ok) break;
+
+      errorText = await resp.text();
+      if (resp.status !== 400) throwAPIError(resp.status, errorText);
+
+      // A 400 that names a field we chose to send → stop sending it.
+      let adjusted = false;
+      if (quirks.temperature && /temperature/i.test(errorText)) {
+        quirks.temperature = false;
+        adjusted = true;
+      }
+      if (quirks.raiseMaxTokens && /max_tokens/i.test(errorText)) {
+        quirks.raiseMaxTokens = false;
+        adjusted = true;
+      }
+      if (quirks.fallbacks && /fallback|anthropic-beta/i.test(errorText)) {
+        quirks.fallbacks = false;
+        adjusted = true;
+      }
+      if (!adjusted) throwAPIError(resp.status, errorText);
+    }
+
+    if (!resp.ok) throwAPIError(resp.status, errorText);
+    anthropicModelQuirks.set(params.model, quirks);
+
+    clearTimeout(timeoutId);
+    const data = await resp.json();
+    return extractAnthropicText(data);
   } catch (e) {
     clearTimeout(timeoutId);
     if (e.name === 'AbortError') throw new Error('AI request timed out. Please try again.');

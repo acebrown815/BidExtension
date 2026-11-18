@@ -128,7 +128,7 @@ let qaList = [];
 
 /**
  * Registry of available AI providers fetched from the background on init.
- * Keyed by provider ID (currently only 'openai').  Used to populate the
+ * Keyed by provider ID ('openai', 'anthropic').  Used to populate the
  * provider dropdown and drive per-provider model lists / key placeholders.
  * @type {Object.<string, {name: string, models: Object[], defaultModel: string, keyPlaceholder: string, hint: string, free?: boolean}>}
  */
@@ -1438,7 +1438,11 @@ async function updateProviderUI(providerId, desiredModelId) {
       : modelSelect.value;
 
   // Reset Custom… state for the new provider.
-  if (customInput) { customInput.hidden = true; customInput.value = ''; }
+  if (customInput) {
+    customInput.hidden = true;
+    customInput.value = '';
+    if (config.defaultModel) customInput.placeholder = `e.g. ${config.defaultModel}`;
+  }
 
   // Prefer cached fetched models over the curated list.
   let cached = null;
@@ -1501,7 +1505,14 @@ async function updateProviderUI(providerId, desiredModelId) {
 /** Refresh the model list and UI hints whenever the provider selection changes. */
 document.getElementById('sProvider').addEventListener('change', async (e) => {
   const requestedProvider = e.target.value;
-  await updateProviderUI(requestedProvider);
+  // Model ids are provider-specific, so don't carry the old provider's
+  // model across: restore the model saved for this provider if it is the
+  // saved one, otherwise start from this provider's default.
+  const saved = (await chrome.storage.local.get('aiSettings')).aiSettings;
+  const modelForProvider = saved?.provider === requestedProvider && saved?.model
+    ? saved.model
+    : providerData[requestedProvider]?.defaultModel;
+  await updateProviderUI(requestedProvider, modelForProvider);
   // If the user toggles providers faster than storage can resolve,
   // two handler invocations race and the last *resolution* wins, not
   // the last *click*. Worst case is a transient UI mismatch (the field
